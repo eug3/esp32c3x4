@@ -1,0 +1,14 @@
+# partitions_with_app2.csv
+# Partition table for 16MB flash with three app partitions (app0/app1/app2)
+# Columns: name, type, subtype, offset, size, flags
+
+nvs,data,nvs,,0x6000,
+otadata,data,ota,,0x2000,
+# BOOTLOADER and partition table remain at standard locations (bootloader at 0x1000, partition table at 0x8000)
+# App partitions (explicit offsets to avoid overlap)
+app0,app,ota_0,0x10000,0x640000,
+app1,app,ota_1,0x650000,0x640000,
+app2,app,ota_2,0xC90000,0x370000,
+
+# Optional data partitions below (adjust if needed)
+# spiffs,data,spiffs,,0x100000,

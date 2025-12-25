@@ -1,0 +1,7 @@
+# partitions.csv for boot_selector (16MB flash)
+# name,   type, sub_type, offset,  size, flags
+nvs,data,nvs,,0x6000,
+otadata,data,ota,,0x2000,
+app0,app,ota_0,0x10000,0x640000,
+app1,app,ota_1,0x650000,0x640000,
+app2,app,ota_2,0xC90000,0x370000,
