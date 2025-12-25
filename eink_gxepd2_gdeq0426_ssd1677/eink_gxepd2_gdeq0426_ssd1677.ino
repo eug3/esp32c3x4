@@ -23,6 +23,8 @@
 #include <SPI.h>
 #include <GxEPD2_BW.h>
 #include <Adafruit_GFX.h>
+// 使用库中针对 GDEQ0426T82 的驱动头
+#include <gdeq/GxEPD2_426_GDEQ0426T82.h>
 
 // 引脚定义
 #define EPD_SCK   6
@@ -32,13 +34,9 @@
 #define EPD_RST   3
 #define EPD_BUSY  4
 
-// 占位：替换为实际的 GxEPD2 模板
-// 例：库可能提供类似 GxEPD2_800x480 或 GxEPD2_42. 请参阅库 README。
-// #include <GxEPD2_800x480.h>
-// using EpdType = GxEPD2_BW<GxEPD2_800x480, GxEPD2_800x480::HEIGHT>;
-// EpdType display(GxEPD2_800x480(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
-
-// 如果不确定模板，请先在库里搜索支持 SSD1677 的条目并替换上面三行。
+// 使用 GxEPD2 库中提供的 GDEQ0426T82 模板并实例化
+using EpdType = GxEPD2_BW<GxEPD2_426_GDEQ0426T82, GxEPD2_426_GDEQ0426T82::HEIGHT>;
+EpdType display(GxEPD2_426_GDEQ0426T82(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
 SPIClass spi = SPI;
 
@@ -73,24 +71,19 @@ void waitBusy(unsigned long timeout_ms = 5000)
 
 void demoDraw()
 {
-  // 使用 GxEPD2 的分页绘制模式
-  // 请在替换模板并实例化 `display` 后解除下列注释并按需修改绘制内容。
-  /*
   display.setRotation(0);
-  display.fillScreen(GxEPD_WHITE);
   display.setTextColor(GxEPD_BLACK);
-  display.setFont(); // 可选：设置字体
-  display.setCursor(20, 40);
   display.setTextSize(2);
-  display.println("Hello GDEQ0426T82");
 
   display.firstPage();
   do {
-    // 在此做绘制操作，如 text、rect、bitmap
+    display.fillScreen(GxEPD_WHITE);
+    display.setCursor(20, 40);
+    display.println("Hello GDEQ0426T82");
     display.setCursor(20, 80);
-    display.print("SSD1677 800x480 demo");
+    display.println("SSD1677 800x480 demo");
+    display.drawRect(10, 20, 460, 100, GxEPD_BLACK);
   } while (display.nextPage());
-  */
 }
 
 void setup() {
@@ -105,8 +98,12 @@ void setup() {
   setup_spi_pins();
   hardwareReset();
   waitBusy();
+  // 初始化显示并立即绘制测试内容
+  display.init();
+  delay(20);
+  demoDraw();
 
-  Serial.println("请替换占位模板后解除 demoDraw() 中的注释以执行绘制。");
+  Serial.println("演示绘制已执行，请检查墨水屏。");
 }
 
 void loop() {
