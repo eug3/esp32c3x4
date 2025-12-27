@@ -158,23 +158,63 @@ void check_button_and_sleep(void) {
     gpio_config(&io_conf);
 
     printf("Press button on GPIO %d to enter deep sleep...\n", SLEEP_BUTTON_PIN);
+    printf("Double-click button on GPIO %d to re-test EPD display...\n", SLEEP_BUTTON_PIN);
+
+    int last_button_state = 1;  // Button not pressed (high with pull-up)
+    int press_count = 0;
+    TickType_t last_press_time = 0;
+    const TickType_t DOUBLE_CLICK_TIME = 500 / portTICK_PERIOD_MS;  // 500ms window for double click
 
     while (1) {
-        // Check if button is pressed (active low with pull-up)
-        if (gpio_get_level(SLEEP_BUTTON_PIN) == 0) {
-            printf("Button pressed! Entering deep sleep in 2 seconds...\n");
-            vTaskDelay(2000 / portTICK_PERIOD_MS);  // Debounce delay
+        int button_state = gpio_get_level(SLEEP_BUTTON_PIN);
 
-            // Double-check button is still pressed
-            if (gpio_get_level(SLEEP_BUTTON_PIN) == 0) {
-                printf("Entering deep sleep now. Press reset button to wake up.\n");
+        // Detect button press (falling edge)
+        if (last_button_state == 1 && button_state == 0) {
+            TickType_t current_time = xTaskGetTickCount();
 
-                // For ESP32-C3, ext0 wakeup may not be available, so we'll just enter deep sleep
-                // User needs to press reset button to wake up
-                esp_deep_sleep_start();
+            // Check if this is within double-click time window
+            if ((current_time - last_press_time) < DOUBLE_CLICK_TIME) {
+                press_count++;
+            } else {
+                press_count = 1;
+            }
+
+            last_press_time = current_time;
+
+            // Debounce delay
+            vTaskDelay(50 / portTICK_PERIOD_MS);
+
+            // Wait for button release
+            while (gpio_get_level(SLEEP_BUTTON_PIN) == 0) {
+                vTaskDelay(10 / portTICK_PERIOD_MS);
+            }
+
+            // Check for double click after button release
+            if (press_count >= 2) {
+                printf("Double-click detected! Re-testing EPD display...\n");
+                // Re-run EPD test
+                test_driver(CURRENT_DRIVER);
+                printf("EPD re-test completed. Press button for sleep or double-click for re-test.\n");
+                press_count = 0;
+            } else {
+                // Single click - wait a bit to see if it's part of a double click
+                vTaskDelay(DOUBLE_CLICK_TIME - (xTaskGetTickCount() - last_press_time));
+
+                if (press_count == 1) {
+                    printf("Single click detected! Entering deep sleep in 1 second...\n");
+                    vTaskDelay(1000 / portTICK_PERIOD_MS);  // Final confirmation delay
+
+                    printf("Entering deep sleep now. Press reset button to wake up.\n");
+
+                    // For ESP32-C3, ext0 wakeup may not be available, so we'll just enter deep sleep
+                    // User needs to press reset button to wake up
+                    esp_deep_sleep_start();
+                }
             }
         }
-        vTaskDelay(100 / portTICK_PERIOD_MS);  // Poll every 100ms
+
+        last_button_state = button_state;
+        vTaskDelay(10 / portTICK_PERIOD_MS);  // Poll every 10ms for better responsiveness
     }
 }
 
