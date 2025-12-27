@@ -1,0 +1,52 @@
+[0/1] cd /Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/build && /Users/beijihu/.espressif/python_env/idf6.1_py3.14_env/bin/python /Users/beijihu/esp/esp-idf/tools/kconfig_new/prepare_kconfig_files.py --list-separator=semicolon --env-file /Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/build/config.env && /Users/beijihu/.espressif/python_env/idf6.1_py3.14_env/bin/python -m kconfgen --list-separator=semicolon --kconfig /Users/beijihu/esp/esp-idf/Kconfig --sdkconfig-rename /Users/beijihu/esp/esp-idf/sdkconfig.rename --config /Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/sdkconfig --env IDF_MINIMAL_BUILD=n --env-file /Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/build/config.env --env IDF_TARGET=esp32 --env IDF_TOOLCHAIN=gcc --env IDF_ENV_FPGA= --env IDF_INIT_VERSION=6.1.0 --env KCONFIG_REPORT_VERBOSITY=quiet --dont-write-deprecated --output config /Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/sdkconfig && /Users/beijihu/.espressif/python_env/idf6.1_py3.14_env/bin/python /Users/beijihu/esp/esp-idf/tools/check_term.py && /opt/homebrew/bin/cmake -E env COMPONENT_KCONFIGS_SOURCE_FILE=/Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/build/kconfigs.in COMPONENT_KCONFIGS_PROJBUILD_SOURCE_FILE=/Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/build/kconfigs_projbuild.in KCONFIG_CONFIG=/Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/sdkconfig IDF_TARGET=esp32 IDF_TOOLCHAIN=gcc IDF_ENV_FPGA= IDF_INIT_VERSION=6.1.0 IDF_MINIMAL_BUILD=n /Users/beijihu/.espressif/python_env/idf6.1_py3.14_env/bin/python -m esp_menuconfig /Users/beijihu/esp/esp-idf/Kconfig && /Users/beijihu/.espressif/python_env/idf6.1_py3.14_env/bin/python -m kconfgen --list-separator=semicolon --kconfig /Users/beijihu/esp/esp-idf/Kconfig --sdkconfig-rename /Users/beijihu/esp/esp-idf/sdkconfig.rename --config /Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/sdkconfig --env IDF_MINIMAL_BUILD=n --env-file /Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/build/config.env --env IDF_TARGET=esp32 --env IDF_TOOLCHAIN=gcc --env IDF_ENV_FPGA= --env IDF_INIT_VERSION=6.1.0 --output header /Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/build/config/sdkconfig.h --output cmake /Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/build/config/sdkconfig.cmake --output json /Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/build/config/sdkconfig.json --output json_menus /Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/build/config/kconfig_menus.json --output config /Users/beijihu/Github/esp32c3x4/c3x4_main_control/examples/minimal_nimble/sdkconfig --env KCONFIG_REPORT_VERBOSITY=default
+TERM environment variable is set to "xterm-256color"
+[?1049h[1;51r(B[m[4l[?7h[?1h=[39;49m[?25l[?1h=[39;49m(B[m[H[2J[37m[44m(Top)[K[2;37H[37m[46m[1K Espressif IoT Development Framework Configuration[K
+(B[0;1m[37m[44m    Build type  --->(B[0m[30m[47m[K
+    Bootloader config  --->[K
+    Security features  --->[K
+    Application manager  --->[K
+    Serial flasher config  --->[K
+    Partition Table  --->[K
+    Compiler options  --->[K
+    Component config  --->[K
+[ ] Make experimental features visible (default value)[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[37m[46m[K
+[37m[44m[Space/Enter] Toggle/enter  [ESC] Leave menu[19X[48;64H[S] Save[K
+[O] Load[20X[49;29H[?] Symbol info[20X[49;64H[/] Jump to symbol[K
+[F] Toggle show-help mode   [C] Toggle show-name mode          [A] Toggle show-all mode[K
+[Q] Quit (prompts for save) [D] Save minimal config (advanced) [R] Reset to default value[K[1;6H[39;49m(B[mninja: build stopped: interrupted by user.
