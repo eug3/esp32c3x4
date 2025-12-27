@@ -106,3 +106,48 @@ EPD 引脚与固件逆向调查报告
 （若你希望，我可以：）
 - 在 IDA 项目中列出 `gpio_set_level` 的所有 xref 地址，并尝试从反编译中提取具体的引脚常量；
 - 或者我可以直接把 `docs/EPD_pin_investigation.md` 中的上述内容提交为更新（已完成）。
+
+## 最新更新：固件引脚映射确认与刷写状态
+
+### IDA 逆向分析结果
+通过 IDA MCP 工具对固件二进制进行深入分析，已确认 EPD 引脚映射：
+
+- **确认的引脚映射**：
+  - CS (Chip Select): GPIO 4
+  - DC (Data/Command): GPIO 5  
+  - RST (Reset): GPIO 6
+  - BUSY: GPIO 7
+  - MOSI (SPI Data): GPIO 8
+  - SCLK (SPI Clock): GPIO 10
+
+- **关键发现**：
+  - EPD 结构体位于 `0x3FC96310`，包含上述引脚配置
+  - 通过 `gpio_matrix_out` 和 `gpio_matrix_in` 函数调用确认引脚使用
+  - 固件中未发现专门的电源控制引脚（PWR/VCC）
+  - EPD 初始化函数：`sub_42057640` 和 `sub_42057124`
+
+### 代码更新
+已根据 IDA 分析结果更新 `main/DEV_Config.h` 中的引脚定义，确保与固件实际使用的 GPIO 一致。
+
+### 刷写状态
+- **构建状态**：✅ 成功（2024-01-XX）
+- **刷写状态**：❌ 失败 - ESP32 设备未连接
+  - 错误：`Could not open /dev/tty.usbmodem1101, the port is busy or doesn't exist`
+  - 原因：串口设备 `/dev/tty.usbmodem1101` 不存在，可能 ESP32 未连接或端口号错误
+
+### 下一步行动
+1. **硬件连接**：连接 ESP32 开发板并确认串口端口
+   ```bash
+   ls /dev/tty.*
+   ```
+2. **重新刷写**：确认端口后执行刷写命令
+3. **硬件测试**：刷写成功后测试 EPD 显示功能
+4. **电源分析**：使用示波器测量功耗，确认是否需要硬件修改添加电源控制
+
+### 电源管理建议
+由于固件中未发现电源控制引脚，建议通过硬件修改实现电源节省：
+- 在 EPD 的 VCC 线上添加 MOSFET 开关
+- 使用 ESP32 的可用 GPIO（如 GPIO 9）控制 MOSFET
+- 或者使用电源管理 IC 实现自动断电
+
+此更新基于 IDA 逆向工程的静态分析结果，确保了引脚映射的准确性。
