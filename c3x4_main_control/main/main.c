@@ -94,15 +94,32 @@ static const char *BLE_TAG = "BLE_MIN";
 // 8..11 : payload length (uint32 LE)
 #define X4IM_HDR_LEN 12
 
-// Image data storage - reduced size to fit in DRAM
-static uint8_t image_data[160 * 120 * 2]; // 160x120 RGB565 image buffer (38.4KB)
+// JSON layout protocol:
+// 0..3  : ASCII 'X4JS'
+// 4     : version = 1
+// 5..7  : reserved
+// 8..11 : payload length (uint32 LE)
+#define X4JS_HDR_LEN 12
+
+// Image data storage - using external storage for large images
+// static uint8_t image_data[160 * 120 * 2]; // Removed to save DRAM
 static uint32_t image_data_len = 0;
-static uint32_t image_expected_len = (400u * 240u * 2u);
+static uint32_t image_expected_len = (480u * 800u * 2u);
 static bool image_data_ready = false;
 static uint32_t image_frame_id = 0;
+static char current_image_filename[64] = {0};
+static FILE *image_file = NULL;
+
+// JSON layout storage
+static char current_json_filename[64] = {0};
+static FILE *json_file = NULL;
+static uint32_t json_data_len = 0;
+static uint32_t json_expected_len = 0;
+static bool json_data_ready = false;
 
 static uint16_t control_cmd_chr_val_handle = 0;
 static char last_control_cmd[16] = {0};
+static bool cmd_notify_enabled = false;
 
 static uint32_t read_le_u32(const uint8_t *p) {
     return ((uint32_t)p[0]) | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
@@ -161,13 +178,12 @@ static int image_data_chr_access(uint16_t conn_handle, uint16_t attr_handle,
 
     case BLE_GATT_ACCESS_OP_WRITE_CHR:
         // Streamed frame write (header + sequential chunks).
+        // Supports both X4IM (image) and X4JS (JSON layout)
         {
             uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
             if (len == 0) {
                 return 0;
             }
-            // Copy the write payload into a small stack buffer (writes should be <= negotiated MTU).
-            // If MTU is larger than this, increase the buffer.
             if (len > 600) {
                 ESP_LOGW(BLE_TAG, "Write too large for temp buffer: %u", len);
                 return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -181,24 +197,112 @@ static int image_data_chr_access(uint16_t conn_handle, uint16_t attr_handle,
 
             uint32_t offset = 0;
 
-            // New frame header?
-            // Only accept header at a frame boundary to avoid accidental resync if pixel bytes
-            // happen to contain the magic sequence.
+            // Check for X4JS (JSON) header first
+            if ((json_data_len == 0 || json_data_ready) &&
+                copy_len >= X4JS_HDR_LEN &&
+                tmp[0] == 'X' && tmp[1] == '4' && tmp[2] == 'J' && tmp[3] == 'S' &&
+                tmp[4] == 1) {
+                const uint32_t payload_len = read_le_u32(&tmp[8]);
+                json_expected_len = payload_len;
+                json_data_len = 0;
+                json_data_ready = false;
+
+                if (json_file != NULL) {
+                    fclose(json_file);
+                    json_file = NULL;
+                }
+                memset(current_json_filename, 0, sizeof(current_json_filename));
+
+                time_t now;
+                time(&now);
+                struct tm timeinfo;
+                localtime_r(&now, &timeinfo);
+                strftime(current_json_filename, sizeof(current_json_filename), "/sdcard/layout_%Y%m%d_%H%M%S.json", &timeinfo);
+
+                json_file = fopen(current_json_filename, "wb");
+                if (json_file == NULL) {
+                    ESP_LOGE(BLE_TAG, "Failed to open JSON file");
+                    memset(current_json_filename, 0, sizeof(current_json_filename));
+                    return BLE_ATT_ERR_INSUFFICIENT_RES;
+                }
+
+                offset = X4JS_HDR_LEN;
+                ESP_LOGI(BLE_TAG, "JSON start len=%" PRIu32 ", file=%s", json_expected_len, current_json_filename);
+                
+                if (offset < copy_len) {
+                    uint32_t remaining = (uint32_t)(copy_len - offset);
+                    uint32_t space = json_expected_len;
+                    if (remaining > space) remaining = space;
+                    if (remaining > 0) {
+                        fwrite(&tmp[offset], 1, remaining, json_file);
+                        json_data_len += remaining;
+                    }
+                }
+                
+                if (json_data_len >= json_expected_len && json_expected_len > 0) {
+                    json_data_ready = true;
+                    fclose(json_file);
+                    json_file = NULL;
+                    ESP_LOGI(BLE_TAG, "JSON complete: %" PRIu32 " bytes", json_data_len);
+                }
+                return 0;
+            }
+            
+            // Continue JSON chunk
+            if (json_file != NULL && !json_data_ready) {
+                uint32_t remaining = copy_len;
+                uint32_t space = (json_expected_len > json_data_len) ? (json_expected_len - json_data_len) : 0;
+                if (remaining > space) remaining = space;
+                if (remaining > 0) {
+                    fwrite(tmp, 1, remaining, json_file);
+                    json_data_len += remaining;
+                }
+                
+                if (json_data_len >= json_expected_len && json_expected_len > 0) {
+                    json_data_ready = true;
+                    fclose(json_file);
+                    json_file = NULL;
+                    ESP_LOGI(BLE_TAG, "JSON complete: %" PRIu32 " bytes", json_data_len);
+                }
+                return 0;
+            }
+
+            // Check for X4IM (image) header
             if ((image_data_len == 0 || image_data_ready) &&
                 copy_len >= X4IM_HDR_LEN &&
                 tmp[0] == 'X' && tmp[1] == '4' && tmp[2] == 'I' && tmp[3] == 'M' &&
                 tmp[4] == 1 && tmp[5] == 1) {
                 const uint32_t payload_len = read_le_u32(&tmp[8]);
-                if (payload_len > sizeof(image_data)) {
-                    ESP_LOGW(BLE_TAG, "payload too large: %" PRIu32, payload_len);
-                    return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-                }
+                // Accept any size since we use external storage
                 image_expected_len = payload_len;
                 image_data_len = 0;
                 image_data_ready = false;
                 image_frame_id++;
+
+                // Close any previous file (e.g., aborted transfer)
+                if (image_file != NULL) {
+                    fclose(image_file);
+                    image_file = NULL;
+                }
+                memset(current_image_filename, 0, sizeof(current_image_filename));
+
+                // Create filename with timestamp
+                time_t now;
+                time(&now);
+                struct tm timeinfo;
+                localtime_r(&now, &timeinfo);
+                strftime(current_image_filename, sizeof(current_image_filename), "/sdcard/image_%Y%m%d_%H%M%S.raw", &timeinfo);
+
+                // Open file for writing
+                image_file = fopen(current_image_filename, "wb");
+                if (image_file == NULL) {
+                    ESP_LOGE(BLE_TAG, "Failed to open image file for writing");
+                    memset(current_image_filename, 0, sizeof(current_image_filename));
+                    return BLE_ATT_ERR_INSUFFICIENT_RES;
+                }
+
                 offset = X4IM_HDR_LEN;
-                ESP_LOGI(BLE_TAG, "frame start id=%" PRIu32 " len=%" PRIu32, image_frame_id, image_expected_len);
+                ESP_LOGI(BLE_TAG, "frame start id=%" PRIu32 " len=%" PRIu32 ", file=%s", image_frame_id, image_expected_len, current_image_filename);
             }
 
             // Append remaining payload bytes.
@@ -208,18 +312,26 @@ static int image_data_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                 if (remaining > space) {
                     remaining = space;
                 }
-                if (remaining > 0) {
-                    memcpy(&image_data[image_data_len], &tmp[offset], remaining);
+                if (remaining > 0 && image_file != NULL) {
+                    size_t written = fwrite(&tmp[offset], 1, remaining, image_file);
+                    if (written != remaining) {
+                        ESP_LOGE(BLE_TAG, "Failed to write to image file");
+                        fclose(image_file);
+                        image_file = NULL;
+                        memset(current_image_filename, 0, sizeof(current_image_filename));
+                        return BLE_ATT_ERR_INSUFFICIENT_RES;
+                    }
                     image_data_len += remaining;
                 }
             }
 
             if (!image_data_ready && image_data_len >= image_expected_len && image_expected_len > 0) {
                 image_data_ready = true;
-                ESP_LOGI(BLE_TAG, "Received full frame id=%" PRIu32 " (%" PRIu32 " bytes)", image_frame_id, image_data_len);
-
-                // Save image to SD card
-                save_image_to_sd(image_data, image_data_len);
+                if (image_file != NULL) {
+                    fclose(image_file);
+                    image_file = NULL;
+                }
+                ESP_LOGI(BLE_TAG, "Received full frame id=%" PRIu32 " (%" PRIu32 " bytes), saved to %s", image_frame_id, image_data_len, current_image_filename);
             }
             return 0;
         }
@@ -302,7 +414,17 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         if (event->connect.status == 0) {
             ble_conn_handle = event->connect.conn_handle;
             ble_connected = true;
+            ble_advertising = false;
             ble_pending_connection = false;
+            {
+                struct ble_gap_conn_desc desc;
+                if (ble_gap_conn_find(event->connect.conn_handle, &desc) == 0) {
+                    snprintf(ble_peer_addr, sizeof(ble_peer_addr),
+                             "%02x:%02x:%02x:%02x:%02x:%02x",
+                             desc.peer_id_addr.val[0], desc.peer_id_addr.val[1], desc.peer_id_addr.val[2],
+                             desc.peer_id_addr.val[3], desc.peer_id_addr.val[4], desc.peer_id_addr.val[5]);
+                }
+            }
             ESP_LOGI(BLE_TAG, "BLE server connected, handle=%d", ble_conn_handle);
         }
         return 0;
@@ -311,8 +433,38 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         ble_connected = false;
         ble_conn_handle = 0;
         memset(ble_peer_addr, 0, sizeof(ble_peer_addr));
+        ble_advertising = true;
+        cmd_notify_enabled = false;
+
+        // If an image transfer was in progress, close the file and reset state.
+        if (image_file != NULL) {
+            fclose(image_file);
+            image_file = NULL;
+        }
+        image_data_len = 0;
+        image_data_ready = false;
+        memset(current_image_filename, 0, sizeof(current_image_filename));
+        
+        // Also reset JSON state
+        if (json_file != NULL) {
+            fclose(json_file);
+            json_file = NULL;
+        }
+        json_data_len = 0;
+        json_data_ready = false;
+        memset(current_json_filename, 0, sizeof(current_json_filename));
+
         // Restart advertising
         start_advertising();
+        return 0;
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        ESP_LOGI(BLE_TAG, "Subscribe event; attr_handle=%d cur_notify=%d cur_indicate=%d",
+                 event->subscribe.attr_handle, event->subscribe.cur_notify, event->subscribe.cur_indicate);
+        if (event->subscribe.attr_handle == control_cmd_chr_val_handle) {
+            cmd_notify_enabled = event->subscribe.cur_notify;
+            ESP_LOGI(BLE_TAG, "CMD notify %s",
+                     cmd_notify_enabled ? "ENABLED" : "DISABLED");
+        }
         return 0;
     case BLE_GAP_EVENT_PASSKEY_ACTION:
         ESP_LOGI(BLE_TAG, "Passkey action event; action=%d",
@@ -365,6 +517,8 @@ static int start_advertising(void)
         ESP_LOGE(BLE_TAG, "ble_gap_adv_start failed: %d", rc);
         return rc;
     }
+
+    ble_advertising = true;
 
     ESP_LOGI(BLE_TAG, "Advertising started (connectable), name=%s", DEVICE_NAME);
     return 0;
@@ -934,10 +1088,10 @@ static const char* html_template =
     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
     "<style>"
     "body { font-family: Arial, sans-serif; text-align: center; margin: 20px; }"
-    ".status { background-color: #f0f0f0; padding: 20px; border-radius: 10px; margin: 20px auto; max-width: 400px; }"
+    ".status { background-color: #f0f0f0; padding: 20px; border-radius: 10px; margin: 20px auto; max-width: 800px; }"
     ".btns { margin: 12px 0; }"
     ".btns button { padding: 10px 16px; margin: 0 6px; font-size: 16px; }"
-    "canvas { border: 1px solid #ddd; max-width: 100%%; height: auto; }"
+    "#jsonDisplay { border: 1px solid #ddd; max-width: 100%%; height: 600px; overflow: auto; background: #fff; text-align: left; padding: 10px; white-space: pre-wrap; font-family: monospace; font-size: 12px; }"
     "</style>"
     "</head>"
     "<body>"
@@ -947,21 +1101,18 @@ static const char* html_template =
     "<p id=\"bleStatus\">BLE: Checking...</p>"
     "<p>BLE MAC: %s</p>"
     "<p>WiFi: Connected</p>"
-    "<p>EPD: Ready</p>"
     "<div class=\"btns\">"
     "<button onclick=\"sendCmd('prev')\">Previous</button>"
     "<button onclick=\"sendCmd('next')\">Next</button>"
     "<button onclick=\"sendCmd('capture')\">Refresh</button>"
     "</div>"
-    "<p id=\"imgStatus\">Image: (unknown)</p>"
-    "<canvas id=\"c\" width=\"400\" height=\"300\"></canvas>"
+    "<p id=\"imgStatus\">Layout: (unknown)</p>"
+    "<div id=\"jsonDisplay\">Waiting for layout data...</div>"
     "</div>"
     "<script>"
-    "const W=400,H=300;"
-    "const c=document.getElementById('c');"
-    "const ctx=c.getContext('2d');"
     "const statusEl=document.getElementById('imgStatus');"
     "const bleStatusEl=document.getElementById('bleStatus');"
+    "const jsonDisplayEl=document.getElementById('jsonDisplay');"
     "async function sendCmd(cmd){"
     "  try{ await fetch('/cmd?cmd='+encodeURIComponent(cmd)); }catch(e){}"
     "  pollAndRender();"
@@ -980,28 +1131,23 @@ static const char* html_template =
     "    bleStatusEl.textContent=statusText;"
     "  }catch(e){ bleStatusEl.textContent='BLE: Error checking status'; }"
     "}"
-    "  const ab=await (await fetch('/cmd?cmd=get_image')).arrayBuffer();"
-    "  if(ab.byteLength < W*H*2){ throw new Error('short'); }"
-    "  const u8=new Uint8Array(ab);"
-    "  const img=ctx.createImageData(W,H);"
-    "  const dst=img.data;"
-    "  let di=0;"
-    "  for(let i=0;i<W*H;i++){"
-    "    const lo=u8[i*2]; const hi=u8[i*2+1];"
-    "    const u16=(hi<<8)|lo;"
-    "    const r=((u16>>11)&31)*255/31;"
-    "    const g=((u16>>5)&63)*255/63;"
-    "    const b=(u16&31)*255/31;"
-    "    dst[di++]=r|0; dst[di++]=g|0; dst[di++]=b|0; dst[di++]=255;"
+    "async function renderJson(){"
+    "  try{"
+    "    const json=await (await fetch('/cmd?cmd=get_layout')).text();"
+    "    if(json && json.length > 0){"
+    "      jsonDisplayEl.textContent=json;"
+    "      statusEl.textContent='Layout: Loaded ('+json.length+' bytes)';"
+    "    }else{"
+    "      jsonDisplayEl.textContent='No layout data';"
+    "      statusEl.textContent='Layout: No data';"
+    "    }"
+    "  }catch(e){"
+    "    jsonDisplayEl.textContent='Error loading layout: '+e;"
+    "    statusEl.textContent='Layout: Error';"
     "  }"
-    "  ctx.putImageData(img,0,0);"
     "}"
     "async function pollAndRender(){"
-    "  try{"
-    "    const st=await (await fetch('/cmd?cmd=image_status')).json();"
-    "    statusEl.textContent='Image: ready='+st.image_ready+' size='+st.image_size;"
-    "    if(st.image_ready){ await renderOnce(); }"
-    "  }catch(e){ statusEl.textContent='Image: error'; }"
+    "  await renderJson();"
     "  checkBleStatus();"
     "}"
     "setInterval(pollAndRender, 2000);"
@@ -1053,12 +1199,13 @@ static esp_err_t cmd_handler(httpd_req_t *req)
             // Handle ble_status command
             if (httpd_query_key_value(buf, "cmd", param, sizeof(param)) == ESP_OK) {
                 if (strcmp(param, "ble_status") == 0) {
-                    sprintf(response, "{\"ble_connected\":%s,\"ble_advertising\":%s,\"ble_pending\":%s,\"peer_addr\":\"%s\",\"local_addr\":\"%s\"}",
+                    sprintf(response, "{\"ble_connected\":%s,\"ble_advertising\":%s,\"ble_pending\":%s,\"peer_addr\":\"%s\",\"local_addr\":\"%s\",\"cmd_notify\":%s}",
                         ble_connected ? "true" : "false",
                         ble_advertising ? "true" : "false",
                         ble_pending_connection ? "true" : "false",
                         ble_peer_addr,
-                        ble_local_addr);
+                        ble_local_addr,
+                        cmd_notify_enabled ? "true" : "false");
                     httpd_resp_set_type(req, "application/json");
                     httpd_resp_send(req, response, strlen(response));
                     free(buf);
@@ -1097,10 +1244,23 @@ static esp_err_t cmd_handler(httpd_req_t *req)
                 }
                 // Handle get_image command to retrieve image data from BLE
                 else if (strcmp(param, "get_image") == 0) {
-                    if (image_data_ready && image_data_len > 0) {
-                        httpd_resp_set_type(req, "application/octet-stream");
-                        httpd_resp_send(req, (const char*)image_data, image_data_len);
-                        ESP_LOGI("HTTP", "Sent image data: %" PRIu32 " bytes", image_data_len);
+                    if (image_data_ready && image_data_len > 0 && strlen(current_image_filename) > 0) {
+                        FILE *f = fopen(current_image_filename, "rb");
+                        if (f != NULL) {
+                            httpd_resp_set_type(req, "application/octet-stream");
+                            uint8_t buffer[1024];
+                            size_t read_bytes;
+                            while ((read_bytes = fread(buffer, 1, sizeof(buffer), f)) > 0) {
+                                httpd_resp_send_chunk(req, (const char*)buffer, read_bytes);
+                            }
+                            httpd_resp_send_chunk(req, NULL, 0); // End chunked response
+                            fclose(f);
+                            ESP_LOGI("HTTP", "Sent image data: %" PRIu32 " bytes from %s", image_data_len, current_image_filename);
+                        } else {
+                            sprintf(response, "{\"status\":\"error\",\"message\":\"Failed to open image file\"}");
+                            httpd_resp_set_type(req, "application/json");
+                            httpd_resp_send(req, response, strlen(response));
+                        }
                     } else {
                         sprintf(response, "{\"status\":\"error\",\"message\":\"No image data available\"}");
                         httpd_resp_set_type(req, "application/json");
@@ -1109,11 +1269,40 @@ static esp_err_t cmd_handler(httpd_req_t *req)
                     free(buf);
                     return ESP_OK;
                 }
+                // Handle get_layout command to retrieve JSON layout data
+                else if (strcmp(param, "get_layout") == 0) {
+                    if (json_data_ready && json_data_len > 0 && strlen(current_json_filename) > 0) {
+                        FILE *f = fopen(current_json_filename, "rb");
+                        if (f != NULL) {
+                            httpd_resp_set_type(req, "application/json");
+                            uint8_t buffer[1024];
+                            size_t read_bytes;
+                            while ((read_bytes = fread(buffer, 1, sizeof(buffer), f)) > 0) {
+                                httpd_resp_send_chunk(req, (const char*)buffer, read_bytes);
+                            }
+                            httpd_resp_send_chunk(req, NULL, 0);
+                            fclose(f);
+                            ESP_LOGI("HTTP", "Sent JSON layout: %" PRIu32 " bytes from %s", json_data_len, current_json_filename);
+                        } else {
+                            sprintf(response, "{\"status\":\"error\",\"message\":\"Failed to open JSON file\"}");
+                            httpd_resp_set_type(req, "application/json");
+                            httpd_resp_send(req, response, strlen(response));
+                        }
+                    } else {
+                        sprintf(response, "{\"status\":\"error\",\"message\":\"No JSON data available\"}");
+                        httpd_resp_set_type(req, "application/json");
+                        httpd_resp_send(req, response, strlen(response));
+                    }
+                    free(buf);
+                    return ESP_OK;
+                }
                 // Handle image_status command
                 else if (strcmp(param, "image_status") == 0) {
-                    sprintf(response, "{\"image_ready\":%s,\"image_size\":%" PRIu32 "}",
+                    sprintf(response, "{\"image_ready\":%s,\"image_size\":%" PRIu32 ",\"expected_size\":%" PRIu32 ",\"file\":\"%s\"}",
                         image_data_ready ? "true" : "false",
-                        image_data_len);
+                        image_data_len,
+                        image_expected_len,
+                        current_image_filename);
                     httpd_resp_set_type(req, "application/json");
                     httpd_resp_send(req, response, strlen(response));
                     free(buf);
@@ -1126,6 +1315,15 @@ static esp_err_t cmd_handler(httpd_req_t *req)
 
                     if (!ble_connected || ble_conn_handle == 0 || control_cmd_chr_val_handle == 0) {
                         sprintf(response, "{\"status\":\"error\",\"message\":\"BLE not connected\"}");
+                        httpd_resp_set_type(req, "application/json");
+                        httpd_resp_send(req, response, strlen(response));
+                        free(buf);
+                        return ESP_OK;
+                    }
+
+                    if (!cmd_notify_enabled) {
+                        ESP_LOGW("HTTP", "CMD notify not enabled; skipping notify for cmd=%s", last_control_cmd);
+                        sprintf(response, "{\"status\":\"error\",\"message\":\"notify not enabled\"}");
                         httpd_resp_set_type(req, "application/json");
                         httpd_resp_send(req, response, strlen(response));
                         free(buf);
