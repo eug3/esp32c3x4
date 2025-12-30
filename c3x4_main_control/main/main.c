@@ -234,7 +234,14 @@ static int image_data_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                     uint32_t space = json_expected_len;
                     if (remaining > space) remaining = space;
                     if (remaining > 0) {
-                        fwrite(&tmp[offset], 1, remaining, json_file);
+                        size_t written = fwrite(&tmp[offset], 1, remaining, json_file);
+                        if (written != remaining) {
+                            ESP_LOGE(BLE_TAG, "Failed to write JSON initial data (written=%zu, expected=%" PRIu32 ")", written, remaining);
+                            fclose(json_file);
+                            json_file = NULL;
+                            memset(current_json_filename, 0, sizeof(current_json_filename));
+                            return BLE_ATT_ERR_INSUFFICIENT_RES;
+                        }
                         json_data_len += remaining;
                     }
                 }
@@ -254,10 +261,17 @@ static int image_data_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                 uint32_t space = (json_expected_len > json_data_len) ? (json_expected_len - json_data_len) : 0;
                 if (remaining > space) remaining = space;
                 if (remaining > 0) {
-                    fwrite(tmp, 1, remaining, json_file);
+                    size_t written = fwrite(tmp, 1, remaining, json_file);
+                    if (written != remaining) {
+                        ESP_LOGE(BLE_TAG, "Failed to write JSON data (written=%zu, expected=%" PRIu32 ")", written, remaining);
+                        fclose(json_file);
+                        json_file = NULL;
+                        memset(current_json_filename, 0, sizeof(current_json_filename));
+                        return BLE_ATT_ERR_INSUFFICIENT_RES;
+                    }
                     json_data_len += remaining;
                 }
-                
+
                 if (json_data_len >= json_expected_len && json_expected_len > 0) {
                     json_data_ready = true;
                     fclose(json_file);
@@ -315,13 +329,14 @@ static int image_data_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                 if (remaining > 0 && image_file != NULL) {
                     size_t written = fwrite(&tmp[offset], 1, remaining, image_file);
                     if (written != remaining) {
-                        ESP_LOGE(BLE_TAG, "Failed to write to image file");
+                        ESP_LOGE(BLE_TAG, "Failed to write to image file (written=%zu, expected=%" PRIu32 ")", written, remaining);
                         fclose(image_file);
                         image_file = NULL;
                         memset(current_image_filename, 0, sizeof(current_image_filename));
                         return BLE_ATT_ERR_INSUFFICIENT_RES;
                     }
-                    image_data_len += remaining;
+                    // 修复：使用实际写入的字节数，而不是期望的字节数
+                    image_data_len += (uint32_t)written;
                 }
             }
 
