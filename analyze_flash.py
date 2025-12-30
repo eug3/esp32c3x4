@@ -75,7 +75,7 @@ def parse_partition_table(data):
     return partitions
 
 # 读取 flash dump
-with open('flash_dump.bin', 'rb') as f:
+with open('d:\\GitHub\\esp32c3x4\\flash_dump.bin', 'rb') as f:
     flash_data = f.read()
 
 print("=" * 80)

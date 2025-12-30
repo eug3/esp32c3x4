@@ -7,3 +7,11 @@ app1.bin.i64
 c3x4_main_control/.cache/
 E-Paper_ESP32_Driver_Board_Code/
 
+otadata_verify.bin
+__pycache__/
+arduino_build/
+bin/
+build/
+esp32_env/
+lib/
+E-Paper_ESP32_Driver_Board_Code/
