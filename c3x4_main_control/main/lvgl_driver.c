@@ -254,7 +254,7 @@ static button_state_t btn_state = {
 static void keypad_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
 {
     button_t btn = get_pressed_button();
-    
+
     // 调试：定期输出按钮状态（仅在状态变化时）
     static button_t last_debug_btn = BTN_NONE;
     if (btn != last_debug_btn) {
@@ -263,12 +263,13 @@ static void keypad_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
         }
         last_debug_btn = btn;
     }
-    
+
     // 检测按键状态变化
     if (btn != BTN_NONE && btn != btn_state.last_key) {
+        // 新按键按下
         btn_state.pressed = true;
         btn_state.last_key = btn;
-        
+
         // 根据按键发送不同的输入事件
         switch (btn) {
             case BTN_CONFIRM:
@@ -295,17 +296,48 @@ static void keypad_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
                 data->key = 0;
                 break;
         }
-        
+
         data->state = LV_INDEV_STATE_PRESSED;
-        ESP_LOGI(TAG, "Key pressed: %d", btn);
+        ESP_LOGI(TAG, "Key pressed: %d -> LVGL key: %d", btn, (int)data->key);
     } else if (btn == BTN_NONE && btn_state.pressed) {
+        // 按键释放
         btn_state.pressed = false;
+        btn_state.last_key = BTN_NONE;
         data->state = LV_INDEV_STATE_RELEASED;
+        data->key = 0;
         ESP_LOGI(TAG, "Key released");
+    } else if (btn_state.pressed && btn_state.last_key != BTN_NONE) {
+        // 按键持续按下 - 保持发送相同的 key
+        switch (btn_state.last_key) {
+            case BTN_CONFIRM:
+                data->key = LV_KEY_ENTER;
+                break;
+            case BTN_BACK:
+                data->key = LV_KEY_ESC;
+                break;
+            case BTN_LEFT:
+                data->key = LV_KEY_LEFT;
+                break;
+            case BTN_RIGHT:
+                data->key = LV_KEY_RIGHT;
+                break;
+            case BTN_VOLUME_UP:
+                data->key = LV_KEY_PREV;
+                break;
+            case BTN_VOLUME_DOWN:
+                data->key = LV_KEY_NEXT;
+                break;
+            default:
+                data->key = 0;
+                break;
+        }
+        data->state = LV_INDEV_STATE_PRESSED;
     } else {
-        data->state = btn_state.pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+        // 无按键
+        data->state = LV_INDEV_STATE_RELEASED;
+        data->key = 0;
     }
-    
+
     data->continue_reading = false;
 }
 

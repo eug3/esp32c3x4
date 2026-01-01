@@ -76,11 +76,14 @@ static void welcome_menu_btnm_event_cb(lv_event_t *e)
     const lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t *btnm = lv_event_get_target(e);
 
+    // FOCUSED/DEFOCUSED 事件：触发 EPD 刷新
     if (code == LV_EVENT_FOCUSED || code == LV_EVENT_DEFOCUSED) {
         welcome_schedule_epd_refresh(250);
         return;
     }
 
+    // KEY 事件：手动处理 PREV/NEXT/ENTER 键
+    // 注意：lv_btnmatrix 在 group 中不会自动响应 PREV/NEXT 来切换内部按钮
     if (code == LV_EVENT_KEY) {
         const uint32_t key = lv_event_get_key(e);
 
@@ -88,6 +91,8 @@ static void welcome_menu_btnm_event_cb(lv_event_t *e)
             if (welcome_menu_selected > 0) {
                 welcome_btnm_set_selected(btnm, welcome_menu_selected - 1);
                 welcome_schedule_epd_refresh(250);
+            } else {
+                ESP_LOGI(TAG, "Already at first item");
             }
             return;
         }
@@ -96,6 +101,8 @@ static void welcome_menu_btnm_event_cb(lv_event_t *e)
             if (welcome_menu_selected < 1) {
                 welcome_btnm_set_selected(btnm, welcome_menu_selected + 1);
                 welcome_schedule_epd_refresh(250);
+            } else {
+                ESP_LOGI(TAG, "Already at last item");
             }
             return;
         }
@@ -107,6 +114,7 @@ static void welcome_menu_btnm_event_cb(lv_event_t *e)
         }
     }
 
+    // 处理点击事件
     if (code == LV_EVENT_VALUE_CHANGED || code == LV_EVENT_CLICKED) {
         const uint16_t sel = lv_btnmatrix_get_selected_btn(btnm);
         if (sel <= 1) {
