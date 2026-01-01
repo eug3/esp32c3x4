@@ -5,7 +5,6 @@
 
 #include "lvgl_driver.h"
 #include "EPD_4in26.h"
-#include "GUI_Paint.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -23,6 +22,7 @@ static const char *TAG = "LVGL_DRV";
 #define DISP_HOR_RES    480
 #define DISP_VER_RES    800
 #define DISP_BUF_LINES  5
+#define MAX_PARTIAL_REFRESHES  10
 
 // 显示缓冲区
 static lv_color_t buf1[DISP_HOR_RES * DISP_BUF_LINES];
@@ -35,6 +35,13 @@ static uint8_t s_epd_framebuffer[(EPD_WIDTH * EPD_HEIGHT) / 8];
 static lv_area_t s_dirty_area;
 static bool s_dirty_valid = false;
 
+// 当前刷新模式（可动态切换）
+static epd_refresh_mode_t s_refresh_mode = EPD_REFRESH_FAST;
+
+// 局部刷新计数器：多次局部刷新后强制全刷以消除鬼影
+static uint32_t s_partial_refresh_count = 0;
+#define FORCE_FULL_REFRESH_AFTER_N_PARTIAL 10
+
 // EPD refresh state tracking (异步刷新)
 static bool s_epd_refreshing = false;
 static SemaphoreHandle_t s_epd_mutex = NULL;
@@ -43,12 +50,8 @@ static QueueHandle_t s_refresh_queue = NULL;
 
 // 刷新请求结构
 typedef struct {
-    bool force_full;  // 是否强制全刷
+    epd_refresh_mode_t mode;  // 刷新模式
 } refresh_request_t;
-
-// Partial refresh counter: force full refresh every N partial refreshes
-static uint32_t s_partial_refresh_count = 0;
-#define FORCE_FULL_REFRESH_AFTER_N_PARTIAL 5
 
 // 优化：不再使用单独的局部刷新缓冲区
 // 改为流式发送，直接从 s_epd_framebuffer 按行发送数据
@@ -59,55 +62,63 @@ static void dirty_area_add(const lv_area_t *area)
     if (!s_dirty_valid) {
         s_dirty_area = *area;
         s_dirty_valid = true;
-        ESP_LOGD(TAG, "New dirty area: x=[%d, %d] y=[%d, %d]", 
-                 (int)area->x1, (int)area->x2, (int)area->y1, (int)area->y2);
         return;
     }
 
-    // Record old bounds for comparison
-    lv_area_t old_area = s_dirty_area;
+    // 脱离检查并合并
+    const int32_t y_gap = (area->y1 > s_dirty_area.y2) ? (area->y1 - s_dirty_area.y2 - 1)
+                          : ((s_dirty_area.y1 > area->y2) ? (s_dirty_area.y1 - area->y2 - 1)
+                          : 0);
 
-    if (area->x1 < s_dirty_area.x1) s_dirty_area.x1 = area->x1;
-    if (area->y1 < s_dirty_area.y1) s_dirty_area.y1 = area->y1;
-    if (area->x2 > s_dirty_area.x2) s_dirty_area.x2 = area->x2;
-    if (area->y2 > s_dirty_area.y2) s_dirty_area.y2 = area->y2;
+    if (y_gap <= 10) {  // Y方向上相邻或距离小于10像素才合并
+        if (area->x1 < s_dirty_area.x1) s_dirty_area.x1 = area->x1;
+        if (area->y1 < s_dirty_area.y1) s_dirty_area.y1 = area->y1;
+        if (area->x2 > s_dirty_area.x2) s_dirty_area.x2 = area->x2;
+        if (area->y2 > s_dirty_area.y2) s_dirty_area.y2 = area->y2;
 
-    // Log if area grew
-    if (s_dirty_area.x1 != old_area.x1 || s_dirty_area.y1 != old_area.y1 ||
-        s_dirty_area.x2 != old_area.x2 || s_dirty_area.y2 != old_area.y2) {
-        ESP_LOGD(TAG, "Dirty area union: new=[%d,%d,%d,%d] old=[%d,%d,%d,%d]",
-                 (int)area->x1, (int)area->x2, (int)area->y1, (int)area->y2,
-                 (int)old_area.x1, (int)old_area.x2, (int)old_area.y1, (int)old_area.y2);
+        // 区域已合并
     }
 }
 
 // 直接写入 1bpp framebuffer 的辅助函数
-// 坐标映射：LVGL 逻辑坐标 (x, y) -> 物理屏幕坐标 (memX, memY) 使用 ROTATE_270
+// 坐标映射：LVGL 逻辑坐标 (x, y) -> EPD 物理坐标 (memX, memY) 使用 ROTATE_270
+// framebuffer 使用 EPD 物理布局 (800x480)
 // EPD 1bpp 格式: 0=黑色, 1=白色（标准电子墨水屏格式）
-static inline void set_epd_pixel(int32_t x, int32_t y, bool black)
+// 移除 inline 以确保函数调用不被优化掉
+static void set_epd_pixel(int32_t x, int32_t y, bool black)
 {
-    if (x < 0 || x >= DISP_HOR_RES || y < 0 || y >= DISP_VER_RES) return;
+    // 未使用的函数，保留备用
 
-    // ROTATE_270 映射: memX = y, memY = EPD_HEIGHT - 1 - x
+    if (x < 0 || x >= DISP_HOR_RES || y < 0 || y >= DISP_VER_RES) {
+        ESP_LOGE(TAG, "[PIXEL] Out of bounds: LVGL(%d,%d)", (int)x, (int)y);
+        return;
+    }
+
+    // ROTATE_270 映射: LVGL(x,y) -> EPD(memX,memY)
+    // memX = y, memY = EPD_HEIGHT - 1 - x
     const int32_t memX = y;
     const int32_t memY = EPD_HEIGHT - 1 - x;
 
-    // Bounds check for framebuffer
+    // 边界检查：EPD 物理坐标 (800x480)
     if (memX < 0 || memX >= EPD_WIDTH || memY < 0 || memY >= EPD_HEIGHT) {
-        ESP_LOGE(TAG, "set_epd_pixel: out of bounds - LVGL(x=%d, y=%d) -> Phys(memX=%d, memY=%d)",
+        ESP_LOGE(TAG, "[PIXEL] EPD out of bounds - LVGL(%d,y=%d) -> EPD(memX=%d,memY=%d)",
                  (int)x, (int)y, (int)memX, (int)memY);
         return;
     }
 
+    // framebuffer 布局: 800x480 (EPD 物理布局), 每行 800/8 = 100 字节
     const uint32_t byte_index = (uint32_t)memY * (EPD_WIDTH / 8) + (uint32_t)(memX / 8);
     const uint8_t bit_mask = 1 << (7 - (memX % 8));
 
-    // Bounds check for framebuffer index
+    // 边界检查：framebuffer 大小
     if (byte_index >= sizeof(s_epd_framebuffer)) {
-        ESP_LOGE(TAG, "set_epd_pixel: framebuffer index out of bounds - byte_index=%u (max=%u)",
-                 (unsigned)byte_index, (unsigned)sizeof(s_epd_framebuffer));
+        ESP_LOGE(TAG, "[PIXEL] FB overflow - LVGL(%d,%d)->EPD(%d,%d) idx=%u max=%u",
+                 (int)x, (int)y, (int)memX, (int)memY, (unsigned)byte_index,
+                 (unsigned)sizeof(s_epd_framebuffer));
         return;
     }
+
+    // 直接写入framebuffer
 
     if (black) {
         s_epd_framebuffer[byte_index] &= ~bit_mask; // Clear bit = black (0)
@@ -141,8 +152,12 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
                  DISP_HOR_RES, DISP_VER_RES);
     }
 
-    // 将 LVGL 的缓冲区数据直接写入到 1bpp framebuffer。
-    // 坐标为 LVGL 逻辑坐标（竖屏 480x800）。
+    // 开始处理flush
+    uint32_t black_count = 0;
+    uint32_t white_count = 0;
+
+    // 将 LVGL 的缓冲区数据直接写入到 1bpp framebuffer（坐标为 LVGL 逻辑坐标）
+
     for (y = area->y1; y <= area->y2; y++) {
         for (x = area->x1; x <= area->x2; x++) {
             // 计算在缓冲区中的位置
@@ -152,6 +167,7 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
 
             // 根据颜色格式获取像素
             bool black = false;
+
             if (cf == LV_COLOR_FORMAT_RGB565) {
                 uint16_t *pixel_16 = (uint16_t *)px_map;
                 uint16_t c = pixel_16[buf_pos];
@@ -174,10 +190,41 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
                 const uint16_t lum = (uint16_t)(r8 * 30 + g8 * 59 + b8 * 11);
                 const uint8_t y8 = (uint8_t)(lum / 100);
                 black = (y8 < 128);
+            } else {
+                // 未知的颜色格式
+                ESP_LOGE(TAG, "[CF_ERROR] Unknown color format: cf=%d at LVGL(%d,%d)", (int)cf, (int)x, (int)y);
+                continue; // 跳过这个像素
             }
-            set_epd_pixel(x, y, black);
+
+            if (black) {
+                black_count++;
+            } else {
+                white_count++;
+            }
+
+            // ========== 直接写入 framebuffer（内联版本） ==========
+            // ROTATE_270 映射: LVGL(x,y) -> EPD(memX,memY)
+            // memX = y, memY = EPD_HEIGHT - 1 - x
+            const int32_t memX = y;
+            const int32_t memY = EPD_HEIGHT - 1 - x;
+
+            const uint32_t byte_index = (uint32_t)memY * (EPD_WIDTH / 8) + (uint32_t)(memX / 8);
+            const uint8_t bit_mask = 1 << (7 - (memX % 8));
+
+            if (byte_index < sizeof(s_epd_framebuffer)) {
+                if (black) {
+                    s_epd_framebuffer[byte_index] &= ~bit_mask; // Clear bit = black
+                } else {
+                    s_epd_framebuffer[byte_index] |= bit_mask;  // Set bit = white
+                }
+            } else {
+                ESP_LOGE(TAG, "FB overflow at idx=%u", (unsigned)byte_index);
+            }
+            // ===================================================
         }
     }
+
+    // Flush处理完成
 
     // Record dirty area for partial EPD refresh later.
     dirty_area_add(area);
@@ -233,6 +280,17 @@ lv_display_t* lvgl_display_init(void)
     memset(s_epd_framebuffer, 0xFF, sizeof(s_epd_framebuffer));
     ESP_LOGI(TAG, "EPD framebuffer cleared and initialized to white (%u bytes)",
              (unsigned)sizeof(s_epd_framebuffer));
+    
+    // 测试：手动写入几个黑色像素到framebuffer
+    // 尝试在 (0,0) 位置写入黑色
+    s_epd_framebuffer[0] = 0xFE; // 最高位清零 = 黑色像素
+    ESP_LOGI(TAG, "[TEST] Manual write: s_epd_framebuffer[0] = 0x%02X", s_epd_framebuffer[0]);
+    
+    // 尝试在多个位置写入测试模式
+    for (uint32_t i = 0; i < 10; i++) {
+        s_epd_framebuffer[i * 100] = 0x00; // 每隔100字节写入全黑
+    }
+    ESP_LOGI(TAG, "[TEST] Manual black pixels written at indices 0, 100, 200, ..., 900");
 
     // 清空脏区域追踪
     s_dirty_valid = false;
@@ -270,66 +328,55 @@ static void epd_refresh_task(void *arg)
                 s_epd_refreshing = true;
                 __sync_synchronize();
 
-                if (s_dirty_valid) {
-                    // ... (刷新逻辑，与原来相同)
-                    ESP_LOGI(TAG, "=== Refresh Task ===");
+                epd_refresh_mode_t mode = req.mode;
 
-                    // 坐标映射和对齐（从原函数复制）
-                    int32_t mem_x1 = s_dirty_area.y1;
-                    int32_t mem_x2 = s_dirty_area.y2;
-                    int32_t mem_y1 = (EPD_HEIGHT - 1) - s_dirty_area.x2;
-                    int32_t mem_y2 = (EPD_HEIGHT - 1) - s_dirty_area.x1;
-                    if (mem_y1 > mem_y2) {
-                        const int32_t tmp = mem_y1; mem_y1 = mem_y2; mem_y2 = tmp;
+                // 根据模式和脏区域判断最终执行的刷新方式
+                if (s_dirty_valid && mode == EPD_REFRESH_PARTIAL &&
+                    s_partial_refresh_count < FORCE_FULL_REFRESH_AFTER_N_PARTIAL) {
+                    // 执行局部刷新 - 坐标变换
+                    // LVGL 逻辑坐标 -> EPD 物理坐标 (ROTATE_270)
+                    // memX = LVGL_y, memY = EPD_HEIGHT - 1 - LVGL_x
+
+                    // 计算 EPD 物理坐标
+                    int32_t epd_x1 = s_dirty_area.y1;
+                    int32_t epd_x2 = s_dirty_area.y2;
+                    int32_t epd_y1 = (EPD_HEIGHT - 1) - s_dirty_area.x2;
+                    int32_t epd_y2 = (EPD_HEIGHT - 1) - s_dirty_area.x1;
+
+                    // 确保坐标顺序正确（确保 y1 <= y2）
+                    if (epd_y1 > epd_y2) {
+                        int32_t tmp = epd_y1;
+                        epd_y1 = epd_y2;
+                        epd_y2 = tmp;
                     }
 
-                    mem_x1 = mem_x1 & ~0x7;
-                    mem_x2 = ((mem_x2 + 7) & ~0x7) - 1;
+                    // 计算宽度和高度
+                    int32_t epd_width = epd_x2 - epd_x1 + 1;
+                    int32_t epd_height = epd_y2 - epd_y1 + 1;
 
-                    if (mem_x1 < 0) mem_x1 = 0;
-                    if (mem_y1 < 0) mem_y1 = 0;
-                    if (mem_x2 >= EPD_WIDTH) mem_x2 = EPD_WIDTH - 1;
-                    if (mem_y2 >= EPD_HEIGHT) mem_y2 = EPD_HEIGHT - 1;
+                    // framebuffer stride
+                    uint32_t fb_stride = EPD_WIDTH / 8;  // 800/8 = 100 bytes per row
 
-                    const uint32_t mem_w = (uint32_t)(mem_x2 - mem_x1 + 1);
-                    const uint32_t mem_h = (uint32_t)(mem_y2 - mem_y1 + 1);
-                    const uint32_t screen_area = (uint32_t)EPD_WIDTH * (uint32_t)EPD_HEIGHT;
-                    const uint32_t dirty_area = mem_w * mem_h;
-
-                    bool force_full = req.force_full || (s_partial_refresh_count >= FORCE_FULL_REFRESH_AFTER_N_PARTIAL);
-
-                    if (dirty_area > (screen_area * 3) / 5 || force_full) {
-                        ESP_LOGI(TAG, "Full refresh (async)");
-                        EPD_4in26_Display(s_epd_framebuffer);
-                        s_partial_refresh_count = 0;
-                    } else {
-                        // 局部刷新
-                        const UWORD x0 = (UWORD)mem_x1;
-                        const UWORD y0 = (UWORD)mem_y1;
-                        const UWORD w0 = (UWORD)mem_w;
-                        const UWORD h0 = (UWORD)mem_h;
-                        const UWORD row_stride = (UWORD)((w0 + 7) / 8);
-                        const uint32_t fb_stride = (uint32_t)(EPD_WIDTH / 8);
-                        const uint32_t x_byte_offset = (uint32_t)(x0 / 8);
-
-                        ESP_LOGI(TAG, "Partial refresh (async): %ux%u at (%u,%u)", w0, h0, x0, y0);
-                        EPD_4in26_Display_Part_Stream(s_epd_framebuffer, x0, y0, w0, h0,
-                                                      fb_stride, x_byte_offset, row_stride);
-                        s_partial_refresh_count++;
-                    }
-
+                    // 使用重构后的流式局部刷新（坐标对齐已在函数内部处理）
+                    EPD_4in26_Display_Part_Stream(s_epd_framebuffer, fb_stride,
+                                                   epd_x1, epd_y1, epd_width, epd_height);
+                    s_partial_refresh_count++;
+                    s_dirty_valid = false;
+                } else if (mode == EPD_REFRESH_FAST || 
+                           (s_partial_refresh_count >= FORCE_FULL_REFRESH_AFTER_N_PARTIAL)) {
+                    // 执行快速刷新（达到局部刷新次数限制时也改用快速刷新）
+                    EPD_4in26_Display_Fast(s_epd_framebuffer);
+                    s_partial_refresh_count = 0;
                     s_dirty_valid = false;
                 } else {
-                    // 无脏区域，全刷
-                    ESP_LOGI(TAG, "Full refresh (async, no dirty area)");
-                    EPD_4in26_Display(s_epd_framebuffer);
+                    // 执行快刷（默认或模式为全刷时改用快刷）
+                    EPD_4in26_Display_Fast(s_epd_framebuffer);
                     s_partial_refresh_count = 0;
+                    s_dirty_valid = false;
                 }
 
                 s_epd_refreshing = false;
                 xSemaphoreGive(s_epd_mutex);
-
-                ESP_LOGI(TAG, "EPD refresh completed (async)");
             } else {
                 ESP_LOGW(TAG, "Failed to acquire mutex for refresh");
             }
@@ -337,34 +384,63 @@ static void epd_refresh_task(void *arg)
     }
 }
 
-// 强制完整刷新EPD (改为异步请求 - 非阻塞)
+// 刷新 EPD - 使用当前配置的模式
 void lvgl_display_refresh(void)
 {
     refresh_request_t req = {
-        .force_full = false
+        .mode = s_refresh_mode
     };
-
-    // 发送刷新请求到队列，立即返回（非阻塞）
-    if (xQueueSend(s_refresh_queue, &req, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "Refresh queue full, skipping refresh request");
-    } else {
-        ESP_LOGD(TAG, "Refresh request queued (async)");
-    }
+    xQueueSend(s_refresh_queue, &req, 0);
 }
 
-// 强制完整刷新EPD (异步请求 - 非阻塞)
+// 局部刷新 EPD
+void lvgl_display_refresh_partial(void)
+{
+    refresh_request_t req = {
+        .mode = EPD_REFRESH_PARTIAL
+    };
+    xQueueSend(s_refresh_queue, &req, 0);
+}
+
+// 快速刷新 EPD
+void lvgl_display_refresh_fast(void)
+{
+    refresh_request_t req = {
+        .mode = EPD_REFRESH_FAST
+    };
+    xQueueSend(s_refresh_queue, &req, 0);
+}
+
+// 全刷 EPD
 void lvgl_display_refresh_full(void)
 {
     refresh_request_t req = {
-        .force_full = true
+        .mode = EPD_REFRESH_FULL
     };
+    xQueueSend(s_refresh_queue, &req, 0);
+}
 
-    // 发送刷新请求到队列，立即返回（非阻塞）
-    if (xQueueSend(s_refresh_queue, &req, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "Refresh queue full, skipping full refresh request");
-    } else {
-        ESP_LOGI(TAG, "Full refresh request queued (async)");
+// 设置刷新模式
+void lvgl_set_refresh_mode(epd_refresh_mode_t mode)
+{
+    s_refresh_mode = mode;
+    switch (mode) {
+        case EPD_REFRESH_PARTIAL:
+            ESP_LOGI(TAG, "Refresh mode set to PARTIAL (fastest, may have ghosting)");
+            break;
+        case EPD_REFRESH_FAST:
+            ESP_LOGI(TAG, "Refresh mode set to FAST (balanced)");
+            break;
+        case EPD_REFRESH_FULL:
+            ESP_LOGI(TAG, "Refresh mode set to FULL (clearest)");
+            break;
     }
+}
+
+// 获取当前刷新模式
+epd_refresh_mode_t lvgl_get_refresh_mode(void)
+{
+    return s_refresh_mode;
 }
 
 /* ========================================================================
@@ -401,14 +477,7 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     button_t btn = get_pressed_button();
 
-    // 调试：定期输出按钮状态（仅在状态变化时）
-    static button_t last_debug_btn = BTN_NONE;
-    if (btn != last_debug_btn) {
-        if (btn != BTN_NONE) {
-            ESP_LOGI(TAG, "Button detected: %d", btn);
-        }
-        last_debug_btn = btn;
-    }
+    // 读取按键状态
 
     // 检测按键状态变化
     if (btn != BTN_NONE && btn != btn_state.last_key) {
@@ -458,7 +527,6 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 
         data->state = LV_INDEV_STATE_PRESSED;
         s_last_lvgl_key = data->key;
-        ESP_LOGI(TAG, "Key pressed: btn=%d -> LVGL key=%d", btn, (int)data->key);
     } else if (btn == BTN_NONE && btn_state.pressed) {
         // 按键释放
         btn_state.pressed = false;
@@ -466,9 +534,7 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         btn_state.press_time_ms = 0;        // 重置计时器
         btn_state.last_repeat_time_ms = 0;  // 重置计时器
         data->state = LV_INDEV_STATE_RELEASED;
-        // Keep reporting the last key on release.
         data->key = s_last_lvgl_key;
-        ESP_LOGI(TAG, "Key released");
     } else if (btn_state.pressed && btn_state.last_key != BTN_NONE) {
         // 按键持续按下 - 带防抖延迟的重复事件
         uint32_t now = lv_tick_get();
@@ -513,7 +579,6 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
             }
             data->state = LV_INDEV_STATE_PRESSED;
             s_last_lvgl_key = data->key;
-            ESP_LOGD(TAG, "Key repeat: %d (press_duration=%ldms)", btn_state.last_key, now - btn_state.press_time_ms);
         } else {
             // 还未到重复时间，不发送事件
             data->state = LV_INDEV_STATE_RELEASED;
