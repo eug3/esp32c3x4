@@ -27,7 +27,7 @@ button_t get_pressed_button(void);
  * @brief 初始化LVGL显示驱动
  * @return 显示设备指针
  */
-lv_disp_t* lvgl_display_init(void);
+lv_display_t* lvgl_display_init(void);
 
 /**
  * @brief 刷新EPD显示

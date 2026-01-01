@@ -16,4 +16,4 @@ dependencies:
   #   public: true
   joltwallet/littlefs: '*'
   lvgl/lvgl:
-    version: "^8.3.0"
+    version: "^9.4.0"

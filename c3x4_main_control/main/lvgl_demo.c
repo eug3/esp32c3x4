@@ -1,6 +1,6 @@
 /**
  * @file lvgl_demo.c
- * @brief LVGL示例GUI应用 - 展示各种UI元素
+ * @brief LVGL GUI - 主菜单屏幕（Monster For Pan）
  */
 
 #include "lvgl_demo.h"
@@ -11,7 +11,7 @@
 
 static const char *TAG = "LVGL_DEMO";
 
-// UI对象 (仅欢迎页使用)
+// UI对象
 static lv_obj_t *main_screen = NULL;
 
 // Welcome screen helpers (EPD refresh scheduling)
@@ -82,10 +82,10 @@ static void welcome_menu_btnm_event_cb(lv_event_t *e)
         return;
     }
 
-    // KEY 事件：手动处理 PREV/NEXT/ENTER 键
-    // 注意：lv_btnmatrix 在 group 中不会自动响应 PREV/NEXT 来切换内部按钮
+    // KEY 事件：处理 PREV/NEXT/ENTER 键
     if (code == LV_EVENT_KEY) {
         const uint32_t key = lv_event_get_key(e);
+        ESP_LOGI(TAG, "KEY event received: key=%u", (unsigned)key);
 
         if (key == LV_KEY_PREV || key == LV_KEY_UP) {
             if (welcome_menu_selected > 0) {
@@ -126,214 +126,17 @@ static void welcome_menu_btnm_event_cb(lv_event_t *e)
     }
 }
 
-// 创建主屏幕
-void lvgl_demo_create_main_screen(void)
-{
-    ESP_LOGI(TAG, "Creating main screen");
-    
-    // 创建主屏幕
-    main_screen = lv_obj_create(NULL);
-    lv_scr_load(main_screen);
-    
-    // 设置背景为白色
-    lv_obj_set_style_bg_color(main_screen, lv_color_white(), 0);
-    
-    // 创建标题标签
-    lv_obj_t *label_title = lv_label_create(main_screen);
-    lv_label_set_text(label_title, "Xteink X4 - LVGL Demo");
-    lv_obj_set_style_text_font(label_title, &lv_font_montserrat_14, 0);
-    lv_obj_align(label_title, LV_ALIGN_TOP_MID, 0, 20);
-    
-    // 创建信息标签
-    lv_obj_t *label_info = lv_label_create(main_screen);
-    lv_label_set_text(label_info, "Press buttons to interact");
-    lv_obj_set_style_text_font(label_info, &lv_font_montserrat_14, 0);
-    lv_obj_align(label_info, LV_ALIGN_TOP_MID, 0, 60);
-    
-    // 创建按钮
-    lv_obj_t *btn_menu = lv_btn_create(main_screen);
-    lv_obj_set_size(btn_menu, 200, 60);
-    lv_obj_align(btn_menu, LV_ALIGN_CENTER, 0, -50);
-    
-    lv_obj_t *btn_label = lv_label_create(btn_menu);
-    lv_label_set_text(btn_label, "Click Me");
-    lv_obj_center(btn_label);
-    
-    ESP_LOGI(TAG, "Main screen created");
-}
-
-// 创建菜单屏幕
-void lvgl_demo_create_menu_screen(void)
-{
-    ESP_LOGI(TAG, "Creating menu screen");
-    
-    // 创建主屏幕
-    main_screen = lv_obj_create(NULL);
-    lv_scr_load(main_screen);
-    
-    // 设置背景为白色
-    lv_obj_set_style_bg_color(main_screen, lv_color_white(), 0);
-    
-    // 创建标题
-    lv_obj_t *label_title = lv_label_create(main_screen);
-    lv_label_set_text(label_title, "Main Menu");
-    lv_obj_set_style_text_font(label_title, &lv_font_montserrat_14, 0);
-    lv_obj_align(label_title, LV_ALIGN_TOP_MID, 0, 10);
-    
-    // 创建信息标签
-    lv_obj_t *label_info = lv_label_create(main_screen);
-    lv_label_set_text(label_info, "Use UP/DOWN to navigate");
-    lv_obj_set_style_text_font(label_info, &lv_font_montserrat_14, 0);
-    lv_obj_align(label_info, LV_ALIGN_TOP_MID, 0, 45);
-    
-    // 创建列表
-    lv_obj_t *list_menu = lv_list_create(main_screen);
-    lv_obj_set_size(list_menu, 300, 350);
-    lv_obj_align(list_menu, LV_ALIGN_CENTER, 0, 20);
-    
-    // 添加列表项
-    lv_obj_t *btn;
-    
-    btn = lv_list_add_btn(list_menu, NULL, "Settings");
-    (void)btn;
-    
-    btn = lv_list_add_btn(list_menu, NULL, "File Browser");
-    (void)btn;
-    
-    btn = lv_list_add_btn(list_menu, NULL, "Network");
-    (void)btn;
-    
-    btn = lv_list_add_btn(list_menu, NULL, "Battery Info");
-    (void)btn;
-    
-    btn = lv_list_add_btn(list_menu, NULL, "About");
-    (void)btn;
-    
-    ESP_LOGI(TAG, "Menu screen created");
-}
-
-// 创建信息显示屏幕
-void lvgl_demo_create_info_screen(const char *title, const char *info_text)
-{
-    ESP_LOGI(TAG, "Creating info screen");
-    
-    // 创建屏幕
-    lv_obj_t *screen = lv_obj_create(NULL);
-    lv_scr_load(screen);
-    
-    // 设置背景为白色
-    lv_obj_set_style_bg_color(screen, lv_color_white(), 0);
-    
-    // 创建标题
-    lv_obj_t *label_t = lv_label_create(screen);
-    lv_label_set_text(label_t, title);
-    lv_obj_set_style_text_font(label_t, &lv_font_montserrat_14, 0);
-    lv_obj_align(label_t, LV_ALIGN_TOP_MID, 0, 20);
-    
-    // 创建文本区域
-    lv_obj_t *textarea = lv_textarea_create(screen);
-    lv_obj_set_size(textarea, 700, 380);
-    lv_obj_align(textarea, LV_ALIGN_CENTER, 0, 20);
-    lv_textarea_set_text(textarea, info_text);
-    
-    // 返回按钮提示
-    lv_obj_t *label_hint = lv_label_create(screen);
-    lv_label_set_text(label_hint, "Press BACK to return");
-    lv_obj_set_style_text_font(label_hint, &lv_font_montserrat_14, 0);
-    lv_obj_align(label_hint, LV_ALIGN_BOTTOM_MID, 0, -10);
-}
-
-// 创建进度条示例
-void lvgl_demo_create_progress_screen(void)
-{
-    ESP_LOGI(TAG, "Creating progress screen");
-    
-    // 创建屏幕
-    lv_obj_t *screen = lv_obj_create(NULL);
-    lv_scr_load(screen);
-    
-    // 设置背景为白色
-    lv_obj_set_style_bg_color(screen, lv_color_white(), 0);
-    
-    // 标题
-    lv_obj_t *label = lv_label_create(screen);
-    lv_label_set_text(label, "Progress Example");
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
-    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
-    
-    // 进度条1
-    lv_obj_t *bar1 = lv_bar_create(screen);
-    lv_obj_set_size(bar1, 400, 30);
-    lv_obj_align(bar1, LV_ALIGN_CENTER, 0, -80);
-    lv_bar_set_value(bar1, 35, LV_ANIM_OFF);
-    
-    lv_obj_t *bar1_label = lv_label_create(screen);
-    lv_label_set_text(bar1_label, "Battery: 35%");
-    lv_obj_align_to(bar1_label, bar1, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
-    
-    // 进度条2
-    lv_obj_t *bar2 = lv_bar_create(screen);
-    lv_obj_set_size(bar2, 400, 30);
-    lv_obj_align(bar2, LV_ALIGN_CENTER, 0, 0);
-    lv_bar_set_value(bar2, 75, LV_ANIM_OFF);
-    
-    lv_obj_t *bar2_label = lv_label_create(screen);
-    lv_label_set_text(bar2_label, "Storage: 75%");
-    lv_obj_align_to(bar2_label, bar2, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
-    
-    // 滑块
-    lv_obj_t *slider = lv_slider_create(screen);
-    lv_obj_set_size(slider, 400, 20);
-    lv_obj_align(slider, LV_ALIGN_CENTER, 0, 80);
-    lv_slider_set_value(slider, 50, LV_ANIM_OFF);
-    
-    lv_obj_t *slider_label = lv_label_create(screen);
-    lv_label_set_text(slider_label, "Brightness: 50%");
-    lv_obj_align_to(slider_label, slider, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
-}
-
-// 创建简单的启动画面
-void lvgl_demo_create_splash_screen(void)
-{
-    ESP_LOGI(TAG, "Creating splash screen");
-    
-    // 创建屏幕
-    lv_obj_t *screen = lv_obj_create(NULL);
-    lv_scr_load(screen);
-    
-    // 设置背景为白色
-    lv_obj_set_style_bg_color(screen, lv_color_white(), 0);
-    
-    // 大标题
-    lv_obj_t *label = lv_label_create(screen);
-    lv_label_set_text(label, "Xteink X4");
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
-    lv_obj_align(label, LV_ALIGN_CENTER, 0, -40);
-    
-    // 副标题
-    lv_obj_t *sublabel = lv_label_create(screen);
-    lv_label_set_text(sublabel, "E-Ink Device");
-    lv_obj_set_style_text_font(sublabel, &lv_font_montserrat_14, 0);
-    lv_obj_align(sublabel, LV_ALIGN_CENTER, 0, 0);
-    
-    // 版本信息
-    lv_obj_t *version = lv_label_create(screen);
-    lv_label_set_text(version, "LVGL GUI v1.0");
-    lv_obj_set_style_text_font(version, &lv_font_montserrat_14, 0);
-    lv_obj_align(version, LV_ALIGN_BOTTOM_MID, 0, -20);
-}
-
-// 创建完整的欢迎屏幕（替换 display_welcome_screen）
+// 创建主屏幕（Monster For Pan 菜单）
 void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, bool charging, const char *version_str)
 {
-    ESP_LOGI(TAG, "Creating welcome screen with system info");
+    ESP_LOGI(TAG, "Creating Monster For Pan menu screen");
 
     // 创建屏幕
     lv_obj_t *screen = lv_obj_create(NULL);
     lv_scr_load(screen);
 
-    // 设置背景为白色
-    lv_obj_set_style_bg_color(screen, lv_color_white(), 0);
+    // 设置背景为黑色
+    lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(screen, 0, 0);
     lv_obj_set_style_pad_all(screen, 0, 0);
@@ -345,22 +148,22 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     lv_obj_t *title = lv_label_create(screen);
     lv_label_set_text(title, "Monster For Pan");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(title, lv_color_black(), 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 12);
 
     // 副标题 "ESP32-C3 System"
     lv_obj_t *subtitle = lv_label_create(screen);
     lv_label_set_text(subtitle, "ESP32-C3 System");
     lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(subtitle, lv_color_black(), 0);
+    lv_obj_set_style_text_color(subtitle, lv_color_white(), 0);
     lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 40);
 
     // 顶部分隔线
     lv_obj_t *line_top = lv_line_create(screen);
-    static lv_point_t line_top_points[] = {{10, 70}, {470, 70}};
+    static lv_point_precise_t line_top_points[] = {{10, 70}, {470, 70}};
     lv_line_set_points(line_top, line_top_points, 2);
     lv_obj_set_style_line_width(line_top, 2, 0);
-    lv_obj_set_style_line_color(line_top, lv_color_black(), 0);
+    lv_obj_set_style_line_color(line_top, lv_color_white(), 0);
     lv_obj_set_style_line_opa(line_top, LV_OPA_COVER, 0);
 
     // ========================================
@@ -369,7 +172,7 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     lv_obj_t *info_label = lv_label_create(screen);
     lv_label_set_text(info_label, "System Info:");
     lv_obj_set_style_text_font(info_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(info_label, lv_color_black(), 0);
+    lv_obj_set_style_text_color(info_label, lv_color_white(), 0);
     lv_obj_align(info_label, LV_ALIGN_TOP_LEFT, 20, 85);
 
     // 电池信息
@@ -378,14 +181,14 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     lv_obj_t *bat_label = lv_label_create(screen);
     lv_label_set_text(bat_label, bat_str);
     lv_obj_set_style_text_font(bat_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(bat_label, lv_color_black(), 0);
+    lv_obj_set_style_text_color(bat_label, lv_color_white(), 0);
     lv_obj_align(bat_label, LV_ALIGN_TOP_LEFT, 20, 108);
 
     // 充电状态
     lv_obj_t *status_label = lv_label_create(screen);
     lv_label_set_text(status_label, charging ? "Status: Charging" : "Status: On Battery");
     lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(status_label, lv_color_black(), 0);
+    lv_obj_set_style_text_color(status_label, lv_color_white(), 0);
     lv_obj_align(status_label, LV_ALIGN_TOP_LEFT, 20, 128);
 
     // ========================================
@@ -393,16 +196,16 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     // ========================================
     // 中部分隔线
     lv_obj_t *line_menu = lv_line_create(screen);
-    static lv_point_t line_menu_points[] = {{10, 158}, {470, 158}};
+    static lv_point_precise_t line_menu_points[] = {{10, 158}, {470, 158}};
     lv_line_set_points(line_menu, line_menu_points, 2);
     lv_obj_set_style_line_width(line_menu, 1, 0);
-    lv_obj_set_style_line_color(line_menu, lv_color_black(), 0);
+    lv_obj_set_style_line_color(line_menu, lv_color_white(), 0);
     lv_obj_set_style_line_opa(line_menu, LV_OPA_COVER, 0);
 
     lv_obj_t *menu_title = lv_label_create(screen);
     lv_label_set_text(menu_title, "Main Menu:");
     lv_obj_set_style_text_font(menu_title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(menu_title, lv_color_black(), 0);
+    lv_obj_set_style_text_color(menu_title, lv_color_white(), 0);
     lv_obj_align(menu_title, LV_ALIGN_TOP_LEFT, 20, 170);
 
     // Menu: use btnmatrix so there are NO per-item label objects to style.
@@ -416,28 +219,28 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     lv_obj_set_size(welcome_menu_btnm, 420, 140);
     lv_obj_align(welcome_menu_btnm, LV_ALIGN_TOP_LEFT, 30, 200);
 
-    lv_obj_set_style_bg_color(welcome_menu_btnm, lv_color_white(), 0);
+    lv_obj_set_style_bg_color(welcome_menu_btnm, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(welcome_menu_btnm, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(welcome_menu_btnm, 0, 0);
     lv_obj_set_style_pad_all(welcome_menu_btnm, 6, 0);
     lv_obj_set_style_pad_row(welcome_menu_btnm, 12, 0);
     lv_obj_set_style_pad_column(welcome_menu_btnm, 12, 0);
 
-    // Items (buttons) - default state
+    // Items (buttons) - default state (黑底白字)
     lv_obj_set_style_text_font(welcome_menu_btnm, &lv_font_montserrat_14, LV_PART_ITEMS | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(welcome_menu_btnm, LV_OPA_COVER, LV_PART_ITEMS | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(welcome_menu_btnm, lv_color_white(), LV_PART_ITEMS | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(welcome_menu_btnm, lv_color_black(), LV_PART_ITEMS | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(welcome_menu_btnm, lv_color_black(), LV_PART_ITEMS | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(welcome_menu_btnm, lv_color_white(), LV_PART_ITEMS | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(welcome_menu_btnm, 2, LV_PART_ITEMS | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_color(welcome_menu_btnm, lv_color_black(), LV_PART_ITEMS | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(welcome_menu_btnm, lv_color_white(), LV_PART_ITEMS | LV_STATE_DEFAULT);
     lv_obj_set_style_border_opa(welcome_menu_btnm, LV_OPA_COVER, LV_PART_ITEMS | LV_STATE_DEFAULT);
     lv_obj_set_style_radius(welcome_menu_btnm, 6, LV_PART_ITEMS | LV_STATE_DEFAULT);
 
-    // Selected/checked item: black background + white text + thicker border
-    lv_obj_set_style_bg_color(welcome_menu_btnm, lv_color_black(), LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_set_style_text_color(welcome_menu_btnm, lv_color_white(), LV_PART_ITEMS | LV_STATE_CHECKED);
+    // Selected/checked item: 白底黑字 + thicker border (反转)
+    lv_obj_set_style_bg_color(welcome_menu_btnm, lv_color_white(), LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_text_color(welcome_menu_btnm, lv_color_black(), LV_PART_ITEMS | LV_STATE_CHECKED);
     lv_obj_set_style_border_width(welcome_menu_btnm, 3, LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_set_style_border_color(welcome_menu_btnm, lv_color_black(), LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_border_color(welcome_menu_btnm, lv_color_white(), LV_PART_ITEMS | LV_STATE_CHECKED);
     lv_obj_set_style_border_opa(welcome_menu_btnm, LV_OPA_COVER, LV_PART_ITEMS | LV_STATE_CHECKED);
 
     // Make buttons checkable and keep only one checked
@@ -453,29 +256,29 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     // 第4部分: 底部操作提示
     // ========================================
     lv_obj_t *line_bottom = lv_line_create(screen);
-    static lv_point_t line_bottom_points[] = {{10, 720}, {470, 720}};
+    static lv_point_precise_t line_bottom_points[] = {{10, 720}, {470, 720}};
     lv_line_set_points(line_bottom, line_bottom_points, 2);
     lv_obj_set_style_line_width(line_bottom, 2, 0);
-    lv_obj_set_style_line_color(line_bottom, lv_color_black(), 0);
+    lv_obj_set_style_line_color(line_bottom, lv_color_white(), 0);
     lv_obj_set_style_line_opa(line_bottom, LV_OPA_COVER, 0);
 
     // 操作提示
     lv_obj_t *hint1 = lv_label_create(screen);
     lv_label_set_text(hint1, "UP/DOWN: Select");
     lv_obj_set_style_text_font(hint1, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(hint1, lv_color_black(), 0);
+    lv_obj_set_style_text_color(hint1, lv_color_white(), 0);
     lv_obj_align(hint1, LV_ALIGN_TOP_LEFT, 20, 730);
 
     lv_obj_t *hint2 = lv_label_create(screen);
     lv_label_set_text(hint2, "CONFIRM: Enter");
     lv_obj_set_style_text_font(hint2, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(hint2, lv_color_black(), 0);
+    lv_obj_set_style_text_color(hint2, lv_color_white(), 0);
     lv_obj_align(hint2, LV_ALIGN_TOP_LEFT, 20, 750);
 
     lv_obj_t *hint3 = lv_label_create(screen);
     lv_label_set_text(hint3, "POWER: Sleep (1s)");
     lv_obj_set_style_text_font(hint3, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(hint3, lv_color_black(), 0);
+    lv_obj_set_style_text_color(hint3, lv_color_white(), 0);
     lv_obj_align(hint3, LV_ALIGN_TOP_LEFT, 20, 770);
 
     // 版本信息 (右下角)
@@ -483,33 +286,15 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
         lv_obj_t *version_label = lv_label_create(screen);
         lv_label_set_text(version_label, version_str);
         lv_obj_set_style_text_font(version_label, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(version_label, lv_color_black(), 0);
+        lv_obj_set_style_text_color(version_label, lv_color_white(), 0);
         lv_obj_align(version_label, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
     }
 
     // ========================================
-    // 创建输入组，使按键可以控制菜单
+    // 按键处理：不使用 group，直接在对象上处理 KEY 事件
     // ========================================
-    lv_group_t *group = lv_group_create();
-    lv_group_add_obj(group, welcome_menu_btnm);
+    // 添加事件回调到 btnmatrix
     lv_obj_add_event_cb(welcome_menu_btnm, welcome_menu_btnm_event_cb, LV_EVENT_ALL, NULL);
 
-    // Ensure there is an initial focused object so keys work immediately.
-    lv_group_focus_obj(welcome_menu_btnm);
-
-    // Initialize refresh timer after setting initial focus to avoid spurious refresh
-    welcome_last_epd_refresh_ms = lv_tick_get();
-
-    // 获取输入设备并设置组
-    uint32_t bound = 0;
-    for (lv_indev_t *indev = lv_indev_get_next(NULL); indev != NULL; indev = lv_indev_get_next(indev)) {
-        const lv_indev_type_t t = lv_indev_get_type(indev);
-        if (t == LV_INDEV_TYPE_KEYPAD || t == LV_INDEV_TYPE_ENCODER) {
-            lv_indev_set_group(indev, group);
-            bound++;
-        }
-    }
-    ESP_LOGI(TAG, "Input device group set for welcome screen (bound=%u)", (unsigned)bound);
-
-    ESP_LOGI(TAG, "Welcome screen created successfully");
+    ESP_LOGI(TAG, "Monster For Pan menu screen created successfully");
 }

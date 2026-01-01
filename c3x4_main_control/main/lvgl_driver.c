@@ -1,6 +1,6 @@
 /**
  * @file lvgl_driver.c
- * @brief LVGL驱动适配层 - EPD和按键输入
+ * @brief LVGL驱动适配层 - EPD和按键输入 (LVGL 9.x)
  */
 
 #include "lvgl_driver.h"
@@ -26,7 +26,6 @@ static const char *TAG = "LVGL_DRV";
 #define DISP_BUF_LINES  5
 
 // 显示缓冲区
-static lv_disp_draw_buf_t disp_buf;
 static lv_color_t buf1[DISP_HOR_RES * DISP_BUF_LINES];
 
 // 1bpp framebuffer for EPD (directly operated by LVGL)
@@ -71,36 +70,55 @@ static inline void set_epd_pixel(int32_t x, int32_t y, bool black)
     }
 }
 
-// 显示刷新回调函数
-static void disp_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p)
+// LVGL 9.x 显示flush回调
+static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     int32_t x, y;
 
     ESP_LOGI(TAG, "Flushing area: x1=%d, y1=%d, x2=%d, y2=%d",
              area->x1, area->y1, area->x2, area->y2);
 
+    // 获取显示颜色格式
+    lv_color_format_t cf = lv_display_get_color_format(disp);
+
+    // 获取缓冲区宽度（stride）
+    int32_t buf_w = lv_area_get_width(area);
+
     // 将 LVGL 的缓冲区数据直接写入到 1bpp framebuffer。
     // 坐标为 LVGL 逻辑坐标（竖屏 480x800）。
-    // 使用 set_epd_pixel 直接操作 framebuffer，无需 Paint 层。
     for (y = area->y1; y <= area->y2; y++) {
         for (x = area->x1; x <= area->x2; x++) {
-            // RGB565 -> 亮度 (0..255)
-            // 说明：文字抗锯齿会产生灰度；黑白模式下做阈值化处理。
-            const uint16_t c = (uint16_t)color_p->full;
-            const uint8_t r5 = (c >> 11) & 0x1F;
-            const uint8_t g6 = (c >> 5) & 0x3F;
-            const uint8_t b5 = (c >> 0) & 0x1F;
-            const uint8_t r8 = (uint8_t)((r5 * 255) / 31);
-            const uint8_t g8 = (uint8_t)((g6 * 255) / 63);
-            const uint8_t b8 = (uint8_t)((b5 * 255) / 31);
-            const uint16_t lum = (uint16_t)(r8 * 30 + g8 * 59 + b8 * 11); // 0..25500
-            const uint8_t y8 = (uint8_t)(lum / 100);
+            // 计算在缓冲区中的位置
+            int32_t buf_x = x - area->x1;
+            int32_t buf_y = y - area->y1;
+            uint32_t buf_pos = buf_y * buf_w + buf_x;
 
-            // 阈值：亮->白，暗->黑
-            // 经验值：128 在多数 UI 上对比更清晰；如需更黑可降到 150~170。
-            const bool black = (y8 < 128);
+            // 根据颜色格式获取像素
+            bool black = false;
+            if (cf == LV_COLOR_FORMAT_RGB565) {
+                uint16_t *pixel_16 = (uint16_t *)px_map;
+                uint16_t c = pixel_16[buf_pos];
+                const uint8_t r5 = (c >> 11) & 0x1F;
+                const uint8_t g6 = (c >> 5) & 0x3F;
+                const uint8_t b5 = (c >> 0) & 0x1F;
+                const uint8_t r8 = (uint8_t)((r5 * 255) / 31);
+                const uint8_t g8 = (uint8_t)((g6 * 255) / 63);
+                const uint8_t b8 = (uint8_t)((b5 * 255) / 31);
+                const uint16_t lum = (uint16_t)(r8 * 30 + g8 * 59 + b8 * 11);
+                const uint8_t y8 = (uint8_t)(lum / 100);
+                // 阈值：亮->白，暗->黑
+                black = (y8 < 128);
+            } else if (cf == LV_COLOR_FORMAT_XRGB8888 || cf == LV_COLOR_FORMAT_ARGB8888) {
+                uint32_t *pixel_32 = (uint32_t *)px_map;
+                uint32_t c = pixel_32[buf_pos];
+                const uint8_t r8 = (c >> 16) & 0xFF;
+                const uint8_t g8 = (c >> 8) & 0xFF;
+                const uint8_t b8 = (c >> 0) & 0xFF;
+                const uint16_t lum = (uint16_t)(r8 * 30 + g8 * 59 + b8 * 11);
+                const uint8_t y8 = (uint8_t)(lum / 100);
+                black = (y8 < 128);
+            }
             set_epd_pixel(x, y, black);
-            color_p++;
         }
     }
 
@@ -108,53 +126,28 @@ static void disp_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_col
     dirty_area_add(area);
 
     // 通知LVGL刷新完成
-    lv_disp_flush_ready(disp_drv);
-}
-
-// 可选：Rounder回调 - 对于某些EPD可能需要对齐到8像素边界
-static void disp_rounder_cb(lv_disp_drv_t *disp_drv, lv_area_t *area)
-{
-    // EPD通常需要8像素对齐（1字节 = 8像素）
-    area->x1 = area->x1 & ~0x7;
-    area->x2 = (area->x2 + 7) & ~0x7;
-
-    // rounder 可能把 x2 从 799 对齐到 800，导致 flush 循环写越界
-    if (area->x1 < 0) area->x1 = 0;
-    if (area->y1 < 0) area->y1 = 0;
-    if (area->x2 >= DISP_HOR_RES) area->x2 = DISP_HOR_RES - 1;
-    if (area->y2 >= DISP_VER_RES) area->y2 = DISP_VER_RES - 1;
+    lv_display_flush_ready(disp);
 }
 
 // 初始化LVGL显示驱动
-lv_disp_t* lvgl_display_init(void)
+lv_display_t* lvgl_display_init(void)
 {
-    ESP_LOGI(TAG, "Initializing LVGL display driver");
-    
+    ESP_LOGI(TAG, "Initializing LVGL display driver (LVGL 9.x)");
+
     // 初始化LVGL
     lv_init();
-    
-    // 初始化绘图缓冲区
-    // 单缓冲：省 RAM（对 ESP32-C3 很关键）
-    lv_disp_draw_buf_init(&disp_buf, buf1, NULL, DISP_HOR_RES * DISP_BUF_LINES);
-    
-    // 初始化显示驱动
-    static lv_disp_drv_t disp_drv;
-    lv_disp_drv_init(&disp_drv);
-    
-    disp_drv.hor_res = DISP_HOR_RES;
-    disp_drv.ver_res = DISP_VER_RES;
-    disp_drv.flush_cb = disp_flush_cb;
-    disp_drv.rounder_cb = disp_rounder_cb;
-    disp_drv.draw_buf = &disp_buf;
-    
-    // Enable partial rendering (dirty rectangles). We'll still do EPD refresh on demand.
-    disp_drv.full_refresh = 0;
-    
-    lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
-    
-    ESP_LOGI(TAG, "LVGL display driver initialized (logical): %dx%d", 
+
+    // 创建显示设备 - LVGL 9.x 新API
+    lv_display_t *disp = lv_display_create(DISP_HOR_RES, DISP_VER_RES);
+    lv_display_set_flush_cb(disp, disp_flush_cb);
+
+    // 设置缓冲区 - LVGL 9.x 使用字节数而不是像素数
+    uint32_t buf_size = DISP_HOR_RES * DISP_BUF_LINES * sizeof(lv_color_t);
+    lv_display_set_buffers(disp, buf1, NULL, buf_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+
+    ESP_LOGI(TAG, "LVGL display driver initialized (logical): %dx%d",
              DISP_HOR_RES, DISP_VER_RES);
-    
+
     return disp;
 }
 
@@ -234,7 +227,7 @@ void lvgl_display_refresh(void)
 }
 
 /* ========================================================================
- * 输入设备驱动 - 按键
+ * 输入设备驱动 - 按键 (LVGL 9.x)
  * ========================================================================*/
 
 // 按键状态
@@ -254,8 +247,8 @@ static button_state_t btn_state = {
 // If key is cleared to 0 too early, some widgets/group navigation may not receive KEY events reliably.
 static uint32_t s_last_lvgl_key = 0;
 
-// 输入设备读取回调
-static void keypad_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
+// 输入设备读取回调 - LVGL 9.x
+static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     button_t btn = get_pressed_button();
 
@@ -344,25 +337,20 @@ static void keypad_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
         data->state = LV_INDEV_STATE_RELEASED;
         data->key = s_last_lvgl_key;
     }
-
-    data->continue_reading = false;
 }
 
-// 初始化LVGL输入设备驱动
+// 初始化LVGL输入设备驱动 - LVGL 9.x
 lv_indev_t* lvgl_input_init(void)
 {
-    ESP_LOGI(TAG, "Initializing LVGL input driver");
-    
-    static lv_indev_drv_t indev_drv;
-    lv_indev_drv_init(&indev_drv);
-    
-    indev_drv.type = LV_INDEV_TYPE_KEYPAD;
-    indev_drv.read_cb = keypad_read_cb;
-    
-    lv_indev_t *indev = lv_indev_drv_register(&indev_drv);
-    
+    ESP_LOGI(TAG, "Initializing LVGL input driver (LVGL 9.x)");
+
+    // 创建输入设备 - LVGL 9.x 新API
+    lv_indev_t *indev = lv_indev_create();
+    lv_indev_set_type(indev, LV_INDEV_TYPE_KEYPAD);
+    lv_indev_set_read_cb(indev, keypad_read_cb);
+
     ESP_LOGI(TAG, "LVGL input driver initialized");
-    
+
     return indev;
 }
 
@@ -379,7 +367,7 @@ void lvgl_tick_task(void *arg)
 void lvgl_timer_task(void *arg)
 {
     ESP_LOGI(TAG, "LVGL timer task started");
-    
+
     while (1) {
         // 增加延迟到 30ms，避免占用过多 CPU 时间
         // EPD 不需要高频率刷新，30ms 已经足够
