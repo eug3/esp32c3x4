@@ -7,6 +7,8 @@ import subprocess
 import os
 import sys
 from datetime import datetime
+import re
+from pathlib import Path
 
 def get_git_info():
     """获取Git信息"""
@@ -33,10 +35,34 @@ def get_git_info():
     except:
         return "0", "unknown", False
 
+
+def get_project_name(default: str = "Min Monster") -> str:
+    """Try to get the project name from the top-level CMakeLists.txt.
+
+    Expected line: project(<name>)
+    """
+    try:
+        root = Path(__file__).resolve().parent
+        cmake_path = root / "CMakeLists.txt"
+        if not cmake_path.exists():
+            return default
+
+        text = cmake_path.read_text(encoding="utf-8", errors="ignore")
+        # Match: project(name) or project(name LANGUAGES C CXX)
+        m = re.search(r"^\s*project\(\s*([^\s\)]+)", text, flags=re.IGNORECASE | re.MULTILINE)
+        if not m:
+            return default
+
+        name = m.group(1).strip()
+        return name if name else default
+    except Exception:
+        return default
+
 def generate_version_file(output_file):
     """生成版本头文件"""
     build_num, commit_hash, dirty = get_git_info()
     build_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    project_name = get_project_name()
     
     # 主版本号
     MAJOR = 1
@@ -48,7 +74,7 @@ def generate_version_file(output_file):
     if dirty:
         version_string += "-dirty"
     
-    full_version = f"{version_string} - Min Monster ({commit_hash})"
+    full_version = f"{version_string} - {project_name} ({commit_hash})"
     
     # 生成C头文件
     header_content = f'''/**
