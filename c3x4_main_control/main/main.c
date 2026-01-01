@@ -41,7 +41,8 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_cali.h"
-#include "lvgl_driver.h"  // 包含按钮类型定义和函数声明
+#include "lvgl_driver.h"  // LVGL驱动适配层
+#include "lvgl_demo.h"     // LVGL示例UI
 #include "version.h"       // 自动生成的版本信息
 
 // ============================================================================
@@ -89,6 +90,9 @@ static uint8_t own_addr_type;
 // 按钮状态
 static button_t last_button = BTN_NONE;
 static volatile button_t current_pressed_button = BTN_NONE;
+
+// EPD 图像缓冲区（用于 LVGL 和传统绘图）
+UBYTE *BlackImage = NULL;
 
 // Define driver selection
 #define TEST_DRIVER_SSD1677 1
@@ -575,28 +579,7 @@ static const struct ble_gatt_svc_def gatt_svr_defs[] = {
     }
 };
 
-static int security_event_cb(struct ble_gap_event *event, void *arg)
-{
-    switch (event->type) {
-    case BLE_GAP_EVENT_PASSKEY_ACTION:
-        ESP_LOGI(BLE_TAG, "Security: Passkey action event");
-        if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
-            // Display passkey (for this demo, we'll use a fixed passkey)
-            struct ble_sm_io pk;
-            pk.action = event->passkey.params.action;
-            pk.passkey = 123456; // Fixed passkey for demo
-            ESP_LOGI(BLE_TAG, "Display passkey: %06d", pk.passkey);
-            ble_sm_inject_io(event->passkey.conn_handle, &pk);
-        }
-        return 0;
-    case BLE_GAP_EVENT_ENC_CHANGE:
-        ESP_LOGI(BLE_TAG, "Security: Encryption change event; status=%d",
-                 event->enc_change.status);
-        return 0;
-    default:
-        return 0;
-    }
-}
+
 
 static int gatt_svr_init(void)
 {
@@ -820,29 +803,55 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 }
 
 // WiFi initialization function
-void wifi_init_sta(void)
+// 注意：在 4 灰度模式下帧缓冲更大（96KB），WiFi 初始化可能因内存不足失败。
+// 不要 ESP_ERROR_CHECK 直接 abort，改为返回错误让系统继续运行（至少保证 EPD/LVGL 可用）。
+esp_err_t wifi_init_sta(void)
 {
     ESP_LOGI("WIFI", "Initializing WiFi in station mode...");
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_err_t err;
+
+    err = esp_netif_init();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE("WIFI", "esp_netif_init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = esp_event_loop_create_default();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE("WIFI", "esp_event_loop_create_default failed: %s", esp_err_to_name(err));
+        return err;
+    }
     esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    err = esp_wifi_init(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE("WIFI", "esp_wifi_init failed: %s", esp_err_to_name(err));
+        return err;
+    }
 
     // Register event handlers
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
+    err = esp_event_handler_instance_register(WIFI_EVENT,
+                                              ESP_EVENT_ANY_ID,
+                                              &wifi_event_handler,
+                                              NULL,
+                                              &instance_any_id);
+    if (err != ESP_OK) {
+        ESP_LOGE("WIFI", "register WIFI_EVENT handler failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = esp_event_handler_instance_register(IP_EVENT,
+                                              IP_EVENT_STA_GOT_IP,
+                                              &wifi_event_handler,
+                                              NULL,
+                                              &instance_got_ip);
+    if (err != ESP_OK) {
+        ESP_LOGE("WIFI", "register IP_EVENT handler failed: %s", esp_err_to_name(err));
+        return err;
+    }
 
     // Simple WiFi config — updated with requested credentials
     wifi_config_t wifi_config = {
@@ -851,11 +860,24 @@ void wifi_init_sta(void)
             .password = "epdc1984",
         },
     };
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        ESP_LOGE("WIFI", "esp_wifi_set_mode failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    if (err != ESP_OK) {
+        ESP_LOGE("WIFI", "esp_wifi_set_config failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+        ESP_LOGE("WIFI", "esp_wifi_start failed: %s", esp_err_to_name(err));
+        return err;
+    }
 
     ESP_LOGI("WIFI", "WiFi initialization completed. Connecting...");
+    return ESP_OK;
 }
 
 // SD card initialization function
@@ -877,7 +899,7 @@ esp_err_t sd_card_init(void)
 
     ESP_LOGI("SD", "Initializing SD card using SPI peripheral");
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.max_freq_khz = 1000;  // Lower frequency for better compatibility
+    host.max_freq_khz = 400;  // 降低到 400kHz 提高兼容性（原 1000kHz）
 
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = PIN_NUM_CS;
@@ -887,14 +909,37 @@ esp_err_t sd_card_init(void)
     ESP_LOGI("SD", "Attaching SD card to existing SPI bus");
 
     ESP_LOGI("SD", "Mounting FAT filesystem at %s", sd_mount_point);
-    ret = esp_vfs_fat_sdspi_mount(sd_mount_point, &host, &slot_config, &mount_config, &card);
+    
+    // 尝试挂载，最多重试 3 次
+    int retry_count = 0;
+    const int max_retries = 3;
+    
+    while (retry_count < max_retries) {
+        ret = esp_vfs_fat_sdspi_mount(sd_mount_point, &host, &slot_config, &mount_config, &card);
+        
+        if (ret == ESP_OK) {
+            break;
+        }
+        
+        retry_count++;
+        ESP_LOGW("SD", "Mount attempt %d/%d failed: %s", retry_count, max_retries, esp_err_to_name(ret));
+        
+        if (retry_count < max_retries) {
+            vTaskDelay(pdMS_TO_TICKS(500));  // 等待 500ms 后重试
+        }
+    }
 
     if (ret != ESP_OK) {
         if (ret == ESP_FAIL) {
-            ESP_LOGE("SD", "Failed to mount filesystem. Set format_if_mount_failed = true to format.");
+            ESP_LOGE("SD", "Failed to mount filesystem after %d attempts.", max_retries);
+            ESP_LOGE("SD", "Possible reasons: 1) No SD card inserted, 2) Card not formatted as FAT");
+        } else if (ret == ESP_ERR_TIMEOUT) {
+            ESP_LOGE("SD", "SD card communication timeout after %d attempts.", max_retries);
+            ESP_LOGE("SD", "Possible reasons: 1) SD card not inserted, 2) Poor connection, 3) Incompatible card");
         } else {
-            ESP_LOGE("SD", "Failed to initialize the card (%s). Ensure SD card lines have pull-ups.", esp_err_to_name(ret));
+            ESP_LOGE("SD", "Failed to initialize the card (%s) after %d attempts.", esp_err_to_name(ret), max_retries);
         }
+        ESP_LOGW("SD", "System will continue without SD card functionality");
         return ret;
     }
 
@@ -1134,16 +1179,14 @@ static void display_welcome_screen(void) {
     // 初始化墨水屏
     EPD_4in26_Init();
 
-    // 创建图像缓冲区
-    UWORD Imagesize = ((EPD_4in26_WIDTH % 8 == 0) ? (EPD_4in26_WIDTH / 8) : (EPD_4in26_WIDTH / 8 + 1)) * EPD_4in26_HEIGHT;
-    UBYTE *Image = (UBYTE *)malloc(Imagesize);
-    if (Image == NULL) {
-        ESP_LOGE("EPD", "Failed to allocate memory for welcome screen");
+    // 使用全局图像缓冲区
+    if (BlackImage == NULL) {
+        ESP_LOGE("EPD", "BlackImage buffer not allocated!");
         return;
     }
 
     // 初始化 Paint - 使用 ROTATE_270 实现旋转效果
-    Paint_NewImage(Image, EPD_4in26_WIDTH, EPD_4in26_HEIGHT, ROTATE_270, WHITE);
+    Paint_NewImage(BlackImage, EPD_4in26_WIDTH, EPD_4in26_HEIGHT, ROTATE_270, WHITE);
     Paint_SetRotate(ROTATE_270);
     Paint_Clear(WHITE);
 
@@ -1274,13 +1317,10 @@ static void display_welcome_screen(void) {
 
     // 刷新显示
     ESP_LOGI("EPD", "Displaying welcome screen...");
-    EPD_4in26_Display(Image);
+    EPD_4in26_Display(BlackImage);
 
     // 等待刷新完成
     vTaskDelay(1000 / portTICK_PERIOD_MS);
-
-    // 释放内存
-    free(Image);
 
     ESP_LOGI("EPD", "Welcome screen displayed successfully");
 }
@@ -1414,12 +1454,22 @@ void app_main(void)
     // 初始化 SPI 和 e-Paper (在 BLE/WiFi 之前初始化以避免电源问题)
     DEV_Module_Init();
 
-    // 显示欢迎页面
-    display_welcome_screen();
+    // 分配全局 EPD 图像缓冲区（用于 LVGL 和传统绘图）
+    // 黑白：1bpp（每像素 1bit），每字节 8 像素 => widthByte = width/8
+    uint32_t Imagesize = ((EPD_4in26_WIDTH % 8 == 0)? (EPD_4in26_WIDTH / 8 ): (EPD_4in26_WIDTH / 8 + 1)) * (uint32_t)EPD_4in26_HEIGHT;
+    ESP_LOGI("MAIN", "Allocating EPD buffer: %" PRIu32 " bytes", Imagesize);
+    if ((BlackImage = (UBYTE *)malloc(Imagesize)) == NULL) {
+        ESP_LOGE("MAIN", "Failed to allocate EPD buffer! Rebooting...");
+        esp_restart();
+    }
+    ESP_LOGI("MAIN", "EPD buffer allocated successfully");
 
-    // ESP32 进入低功耗模式以节省电量
-    ESP_LOGI("EPD", "Putting EPD to sleep...");
-    EPD_4in26_Sleep();
+    // 重要：传统欢迎页里会执行 EPD_4in26_Init()。
+    // 如果不初始化，后续 LVGL 的 EPD_4in26_Display() 可能不会生效，屏幕会保持旧画面。
+    ESP_LOGI("EPD", "Initializing EPD (BW)...");
+    EPD_4in26_Init();
+
+    // 传统欢迎页已被 LVGL 版本替代
 
     // Add delay before initializing high-power components to prevent brownout
     ESP_LOGI("MAIN", "Waiting 1 second before initializing BLE/WiFi to prevent brownout...");
@@ -1431,32 +1481,83 @@ void app_main(void)
 
     // WiFi initialization - re-enabled for web interface
     ESP_LOGI("MAIN", "Initializing WiFi...");
-    wifi_init_sta();
+    esp_err_t wifi_ret = wifi_init_sta();
+    if (wifi_ret != ESP_OK) {
+        ESP_LOGW("MAIN", "WiFi init failed (%s); continuing without WiFi", esp_err_to_name(wifi_ret));
+    }
 
     // Initialize SD card
     ESP_LOGI("MAIN", "Initializing SD card...");
-    sd_card_init();
+    esp_err_t sd_ret = sd_card_init();
+    if (sd_ret != ESP_OK) {
+        ESP_LOGW("MAIN", "SD card initialization failed, but system will continue");
+        ESP_LOGW("MAIN", "File browser and SD-related features will be unavailable");
+    }
 
     // HTTP server will be started automatically after WiFi connects
     // ESP_LOGI("MAIN", "Starting HTTP server...");
     // start_webserver();
 
-    // EPD test commented out - only BLE and WiFi
-    /*
-    // Test different drivers
-    test_driver(CURRENT_DRIVER);
+    // ============================================================================
+    // LVGL GUI 初始化
+    // ============================================================================
+    ESP_LOGI("MAIN", "Initializing LVGL GUI system...");
+    
+    // 1. 重新初始化 Paint（使用已分配的 BlackImage）
+    // 旧版 welcome 使用 ROTATE_270（竖屏 480x800 逻辑坐标）。
+    // 这里保持一致，让 LVGL 的坐标也按竖屏布局来写。
+    Paint_NewImage(BlackImage, EPD_4in26_WIDTH, EPD_4in26_HEIGHT, ROTATE_270, WHITE);
+    Paint_SetRotate(ROTATE_270);
+    // 黑白：设置 scale=2（1bpp），并清屏为白色（WHITE）
+    Paint_SetScale(2);
+    Paint_Clear(WHITE);
+    ESP_LOGI("LVGL", "Paint buffer reinitialized for LVGL");
+    
+    // 2. 初始化 LVGL 显示驱动
+    lvgl_display_init();
+    
+    // 3. 初始化 LVGL 输入设备（按键）
+    lv_indev_t *indev = lvgl_input_init();
+    (void)indev;
+    
+    // 4. 创建 LVGL tick 任务（10ms tick）
+    // 降低优先级到 3，避免阻塞 IDLE 任务
+    xTaskCreate(lvgl_tick_task, "lvgl_tick", 2048, NULL, 3, NULL);
 
-    printf("Test completed!\n");
-    */
+    // 5. 创建欢迎屏幕（替代 display_welcome_screen）
+    ESP_LOGI("LVGL", "Creating welcome screen with system info...");
+    lvgl_demo_create_welcome_screen(
+        read_battery_voltage_mv(),
+        read_battery_percentage(),
+        is_charging(),
+        VERSION_FULL
+    );
 
-    // Start button monitoring for deep sleep and file browser
-    check_button_and_sleep();
-}
+    // 6. 在启动 LVGL timer 任务之前，先在当前线程渲染一次。
+    // 重要：LVGL 不是线程安全的，不能同时在多个任务里调用 lv_timer_handler/lv_task_handler。
+    ESP_LOGI("LVGL", "Rendering UI (single-threaded) before starting LVGL timer task...");
+    for (int i = 0; i < 6; i++) {
+        lv_timer_handler();
+        vTaskDelay(30 / portTICK_PERIOD_MS);
+    }
 
-// BLE related functions
-static void bleprph_on_reset(int reason)
-{
-    ESP_LOGI("BLE", "Resetting state; reason=%d\n", reason);
+    // 7. 刷新EPD显示
+    ESP_LOGI("LVGL", "Refreshing EPD with welcome screen...");
+    lvgl_display_refresh();
+    
+    // 8. 等待EPD刷新完成（约2秒）
+    ESP_LOGI("LVGL", "Waiting for EPD refresh to complete...");
+    vTaskDelay(2500 / portTICK_PERIOD_MS);
+
+    // 9. 创建 LVGL 定时器任务（处理 UI 更新）
+    // 放到初次渲染/EPD 刷新之后，避免与上面的 lv_timer_handler 并发。
+    xTaskCreate(lvgl_timer_task, "lvgl_timer", 4096, NULL, 2, NULL);
+    
+    ESP_LOGI("MAIN", "LVGL GUI initialized successfully!");
+    ESP_LOGI("MAIN", "Use UP/DOWN buttons to navigate, CONFIRM to select");
+    
+    ESP_LOGI("MAIN", "System initialized. LVGL is handling UI events.");
+    ESP_LOGI("MAIN", "Main task ending, FreeRTOS tasks continue running...");
 }
 
 // HTTP server functions
