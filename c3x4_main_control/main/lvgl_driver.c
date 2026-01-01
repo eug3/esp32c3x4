@@ -75,8 +75,8 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
 {
     int32_t x, y;
 
-    ESP_LOGI(TAG, "Flushing area: x1=%d, y1=%d, x2=%d, y2=%d",
-             area->x1, area->y1, area->x2, area->y2);
+    // ESP_LOGI(TAG, "Flushing area: x1=%d, y1=%d, x2=%d, y2=%d",
+    //          area->x1, area->y1, area->x2, area->y2);
 
     // 获取显示颜色格式
     lv_color_format_t cf = lv_display_get_color_format(disp);
@@ -154,8 +154,6 @@ lv_display_t* lvgl_display_init(void)
 // 强制完整刷新EPD
 void lvgl_display_refresh(void)
 {
-    ESP_LOGI(TAG, "Refreshing EPD display");
-
     if (s_dirty_valid) {
         // LVGL logical coords: 480x800 with ROTATE_270 mapping.
         // Physical mapping (ROTATE_270): memX = y, memY = (EPD_HEIGHT - 1 - x)
@@ -184,7 +182,13 @@ void lvgl_display_refresh(void)
         // If too large, fall back to full BW refresh.
         const uint32_t screen_area = (uint32_t)EPD_WIDTH * (uint32_t)EPD_HEIGHT;
         const uint32_t dirty_area = mem_w * mem_h;
-        if (dirty_area > (screen_area * 2) / 5) {
+
+        ESP_LOGI(TAG, "EPD refresh: dirty_area=%u (%.1f%% of screen)",
+                 (unsigned)dirty_area, (float)dirty_area * 100.0f / (float)screen_area);
+
+        if (dirty_area > (screen_area * 3) / 5) {
+            // 提高阈值到 60%，只有更大的区域才使用全刷
+            ESP_LOGI(TAG, "Using full refresh");
             EPD_4in26_Display(s_epd_framebuffer);
         } else {
             // BW partial: crop the 1bpp framebuffer window into a contiguous buffer
@@ -209,7 +213,8 @@ void lvgl_display_refresh(void)
                     memcpy(bw + (uint32_t)row * out_stride, s_epd_framebuffer + in_base, out_stride);
                 }
 
-                ESP_LOGI(TAG, "BW partial refresh: x=%u y=%u w=%u h=%u", (unsigned)x0, (unsigned)y0, (unsigned)w0, (unsigned)h0);
+                ESP_LOGI(TAG, "BW partial refresh: x=%u y=%u w=%u h=%u area=%u",
+                         (unsigned)x0, (unsigned)y0, (unsigned)w0, (unsigned)h0, (unsigned)dirty_area);
                 EPD_4in26_Display_Part(bw, x0, y0, w0, h0);
                 free(bw);
             }
@@ -218,6 +223,7 @@ void lvgl_display_refresh(void)
         s_dirty_valid = false;
     } else {
         // No dirty area recorded; do a full refresh.
+        ESP_LOGI(TAG, "EPD refresh: no dirty area, using full refresh");
         EPD_4in26_Display(s_epd_framebuffer);
     }
 
@@ -268,6 +274,13 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         btn_state.last_key = btn;
 
         // 根据按键发送不同的输入事件
+        // 按键映射方案：
+        // - BTN_RIGHT (1)     -> LV_KEY_RIGHT     (右键)
+        // - BTN_LEFT (2)      -> LV_KEY_LEFT      (左键)
+        // - BTN_CONFIRM (3)   -> LV_KEY_ENTER     (确认)
+        // - BTN_BACK (4)      -> LV_KEY_ESC       (返回)
+        // - BTN_VOLUME_UP (5) -> LV_KEY_UP        (上)
+        // - BTN_VOLUME_DOWN (6)-> LV_KEY_DOWN      (下)
         switch (btn) {
             case BTN_CONFIRM:
                 data->key = LV_KEY_ENTER;
@@ -282,12 +295,10 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
                 data->key = LV_KEY_RIGHT;
                 break;
             case BTN_VOLUME_UP:
-                // LVGL group navigation expects PREV/NEXT rather than UP/DOWN
-                data->key = LV_KEY_PREV;
+                data->key = LV_KEY_UP;
                 break;
             case BTN_VOLUME_DOWN:
-                // LVGL group navigation expects PREV/NEXT rather than UP/DOWN
-                data->key = LV_KEY_NEXT;
+                data->key = LV_KEY_DOWN;
                 break;
             default:
                 data->key = 0;
@@ -296,7 +307,7 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 
         data->state = LV_INDEV_STATE_PRESSED;
         s_last_lvgl_key = data->key;
-        ESP_LOGI(TAG, "Key pressed: %d -> LVGL key: %d", btn, (int)data->key);
+        ESP_LOGI(TAG, "Key pressed: btn=%d -> LVGL key=%d", btn, (int)data->key);
     } else if (btn == BTN_NONE && btn_state.pressed) {
         // 按键释放
         btn_state.pressed = false;
@@ -321,10 +332,10 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
                 data->key = LV_KEY_RIGHT;
                 break;
             case BTN_VOLUME_UP:
-                data->key = LV_KEY_PREV;
+                data->key = LV_KEY_UP;
                 break;
             case BTN_VOLUME_DOWN:
-                data->key = LV_KEY_NEXT;
+                data->key = LV_KEY_DOWN;
                 break;
             default:
                 data->key = 0;

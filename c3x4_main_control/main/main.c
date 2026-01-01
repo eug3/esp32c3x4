@@ -1236,7 +1236,8 @@ void app_main(void)
         read_battery_voltage_mv(),
         read_battery_percentage(),
         is_charging(),
-        VERSION_FULL
+        VERSION_FULL,
+        indev  // 传入输入设备，用于设置焦点
     );
 
     // 5. 在启动 LVGL timer 任务之前，先在当前线程渲染一次。
