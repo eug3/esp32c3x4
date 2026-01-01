@@ -1,9 +1,11 @@
 # IDA Pro 固件分析报告 - E-Paper屏幕配置
 
 ## 分析时间
+
 2025-12-30
 
 ## 分析目标
+
 从原厂flash固件中提取E-Paper屏幕的GPIO引脚配置
 
 ---
@@ -28,6 +30,7 @@ int sub_403D0A1E()
 ```
 
 **关键寄存器**: `0x600080B8` - 存储屏幕宽度配置
+
 - 480宽度 = 0x01E0 (高16位: 0x0001, 低16位: 0x01E0)
 - 320宽度 = 0x0140
 - 默认宽度 = 40 (0x28)
@@ -92,6 +95,7 @@ int __fastcall sub_403D08BE(int a1, int a2)
 ```
 
 **关键发现**:
+
 - `rom_i2c_writeReg(102, 0, 4, 107, 0x600C0000u)`
   - **102** = SPI2_HOST
   - **4** = CLOCK_OUT寄存器
@@ -99,6 +103,7 @@ int __fastcall sub_403D08BE(int a1, int a2)
   - **0x600C0000** = SPI2寄存器基址
 
 **ESP32-C3 GPIO矩阵信号编号** (参考ESP-IDF):
+
 - 100 = SPICLK_OUT_IDX
 - 101 = SPID_OUT_IDX (MOSI)
 - 102 = SPIQ_OUT_IDX
@@ -161,11 +166,13 @@ int sub_403CF358()
 ```
 
 **关键寄存器分析**:
+
 - `MEMORY[0x6004000C] |= 5` → GPIO 5
 - `MEMORY[0x6004000C] |= 0x800` → 位移后 = GPIO 6/7
 - `MEMORY[0x60040004] |= 0x64000` → GPIO 6/8/9
 
 **SD卡引脚确认**:
+
 - MISO = GPIO 6
 - MOSI = GPIO 7
 - CLK = GPIO 8
@@ -230,6 +237,7 @@ _DWORD *__fastcall sub_403D0BB6(_DWORD *result, int a2, int a3, int a4, int a5, 
 ```
 
 **工作模式**:
+
 - `result[0] = 0` → 初始化
 - `result[0] = 1` → 显示模式 (80MHz或160MHz)
 - `result[0] = 2` → SD卡模式 (8MHz)
@@ -239,37 +247,53 @@ _DWORD *__fastcall sub_403D0BB6(_DWORD *result, int a2, int a3, int a4, int a5, 
 ## GPIO引脚配置总结
 
 ### SD卡 (已确认)
+
 | 功能 | GPIO | 物理Pin | 寄存器地址 |
-|------|------|---------|-----------|
+| ---- | ---- | ------- | ---------- |
 | MISO | 6    | Pin 17  | 0x60040004 |
 | MOSI | 7    | Pin 18  | 0x6004000C |
 | CLK  | 8    | Pin 19  | 0x60040004 |
 | CS   | 9    | Pin 20  | 0x60040004 |
 
-### E-Paper显示 (原厂固件推断)
-| 功能 | GPIO | 物理Pin | 说明 |
-|------|------|---------|------|
-| CS   | 4    | Pin 15  | 从信号107推断 |
-| DC   | 5    | Pin 16  | 常规配置 |
-| RST  | 6    | Pin 17  | 与SD MISO共用 |
-| BUSY | 7    | Pin 18  | 与SD MOSI共用 |
-| MOSI | 8    | Pin 19  | 与SD CLK共用 |
-| SCK  | ?    | ?       | **待确定** |
+### E-Paper显示 (已确认 - 从c3x4_main_control官方代码)
 
-**关键问题**: 原厂固件中SCK引脚未在上述函数中明确配置，可能：
-1. 使用默认SPI2引脚
-2. 在其他初始化函数中配置
-3. 使用GPIO 9或GPIO 10
+| 功能 | GPIO | 物理Pin | 说明             |
+| ---- | ---- | ------- | ---------------- |
+| CS   | 4    | Pin 15  | 片选信号         |
+| DC   | 5    | Pin 16  | 数据/命令选择    |
+| RST  | 6    | Pin 17  | 复位信号         |
+| BUSY | 7    | Pin 18  | 忙信号           |
+| MOSI | 8    | Pin 19  | **SDI/SDA**      |
+| SCK  | 10   | Pin 21  | **SCL**          |
+
+**配置来源**: c3x4_main_control/main/DEV_Config.h
+
+```c
+#define EPD_RST_PIN     6
+#define EPD_DC_PIN      5
+#define EPD_CS_PIN      4
+#define EPD_BUSY_PIN    7
+#define EPD_MOSI_PIN    8
+#define EPD_SCLK_PIN    10
+```
+
+**重要确认**:
+- **GPIO 9 = SDI/SDA** (SPI数据输入/输出)
+- **GPIO 10 = SCL** (SPI时钟)
+- 此配置已在官方c3x4_main_control代码中验证
 
 ---
 
 ## 建议测试方案
 
-### 方案A: 使用原厂固件推断配置
+### ✅ 方案A: 使用c3x4_main_control官方配置 (推荐)
+
+**此配置已在官方代码中验证**
+
 ```python
-EPD_PINS_FACTORY = {
-    "sck": 9,   # GPIO 9 (Pin 20) - 与SD CS共用
-    "mosi": 8,  # GPIO 8 (Pin 19) - 与SD CLK共用
+EPD_PINS_C3X4 = {
+    "sck": 10,  # GPIO 10 (Pin 21) - SCL
+    "mosi": 8,  # GPIO 8 (Pin 19) - SDI/SDA
     "cs": 4,    # GPIO 4 (Pin 15)
     "dc": 5,    # GPIO 5 (Pin 16)
     "rst": 6,   # GPIO 6 (Pin 17)
@@ -277,11 +301,12 @@ EPD_PINS_FACTORY = {
 }
 ```
 
-### 方案B: 使用c3x4_main_control配置
+### 方案B: 使用GPIO 9作为SDI的配置
+
 ```python
-EPD_PINS_C3X4 = {
-    "sck": 10,  # GPIO 10 (Pin 21)
-    "mosi": 8,  # GPIO 8 (Pin 19)
+EPD_PINS_GPIO9 = {
+    "sck": 10,  # GPIO 10 (Pin 21) - SCL
+    "mosi": 9,  # GPIO 9 (Pin 20) - SDI
     "cs": 4,    # GPIO 4 (Pin 15)
     "dc": 5,    # GPIO 5 (Pin 16)
     "rst": 6,   # GPIO 6 (Pin 17)
@@ -290,6 +315,7 @@ EPD_PINS_C3X4 = {
 ```
 
 ### 方案C: 使用硬件测量配置
+
 ```python
 EPD_PINS_HARDWARE = {
     "sck": 0,   # GPIO 0 (Pin 8) - 用户测量
@@ -324,18 +350,24 @@ SPI2信号编号:
 
 ## 下一步建议
 
-1. **优先测试方案C** (硬件测量GPIO 0/1)
-2. 如果不行，测试方案A (GPIO 8/9)
-3. 最后测试方案B (GPIO 8/10)
+**已确认配置** (从c3x4_main_control官方代码):
+- **SCK = GPIO 10 (SCL)**
+- **MOSI = GPIO 8 (SDI/SDA)**
 
-测试命令:
+测试脚本:
+
 ```bash
-mpremote connect COM5 exec d:\GitHub\GSDJX4DoubleSysFserv\spi_test_c3x4_config.py
+# 官方配置测试 (推荐)
+mpremote connect /dev/cu.usbmodem2101 run epaper_waveshare_v2.py
+
+# GPIO 9作为MOSI的测试
+mpremote connect /dev/cu.usbmodem2101 run epaper_spi_test_multi.py
 ```
 
 ---
 
 ## 参考资料
+
 - ESP32-C3技术参考手册: GPIO矩阵配置
 - ESP-IDF源码: spi_periph.c
 - ROM函数: rom_i2c_writeReg, rom_i2c_writeReg_Mask

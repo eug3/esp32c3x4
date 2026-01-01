@@ -244,7 +244,7 @@ void EPD_4in26_Init(void)
 	EPD_4in26_SendData(0x01);
 
 	EPD_4in26_SendCommand(0x11);        //    data  entry  mode
-	EPD_4in26_SendData(0x01);           //       X-mode  x+ y-    
+	EPD_4in26_SendData(0x01);           //       X-mode  x+ y- (original)
 
 	EPD_4in26_SetWindows(0, EPD_4in26_HEIGHT-1, EPD_4in26_WIDTH-1, 0);
 
@@ -281,7 +281,7 @@ void EPD_4in26_Init_Fast(void)
 	EPD_4in26_SendData(0x01);
 
 	EPD_4in26_SendCommand(0x11);        //    data  entry  mode
-	EPD_4in26_SendData(0x01);           //       X-mode  x+ y-    
+	EPD_4in26_SendData(0x01);           //       X-mode  x+ y- (original)
 
 	EPD_4in26_SetWindows(0, EPD_4in26_HEIGHT-1, EPD_4in26_WIDTH-1, 0);
 
@@ -328,7 +328,7 @@ void EPD_4in26_Init_4GRAY(void)
 	EPD_4in26_SendData(0x01);
 
 	EPD_4in26_SendCommand(0x11);        //    data  entry  mode
-	EPD_4in26_SendData(0x01);           //       X-mode  x+ y-    
+	EPD_4in26_SendData(0x01);           //       X-mode  x+ y- (original)
 
 	EPD_4in26_SetWindows(0, EPD_4in26_HEIGHT-1, EPD_4in26_WIDTH-1, 0);
 

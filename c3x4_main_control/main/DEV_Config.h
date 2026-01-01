@@ -27,15 +27,16 @@
 #define UDOUBLE uint32_t
 
 /**
- * GPIO config
+ * GPIO config - Xteink X4
 **/
-#define EPD_RST_PIN     6
-#define EPD_DC_PIN      5
-#define EPD_CS_PIN      4
-#define EPD_BUSY_PIN    7
+#define EPD_RST_PIN     5
+#define EPD_DC_PIN      4
+#define EPD_CS_PIN      21
+#define EPD_BUSY_PIN    6
 #define EPD_PWR_PIN     -1  // Not used
-#define EPD_MOSI_PIN    8
-#define EPD_SCLK_PIN    10
+#define EPD_MOSI_PIN    10
+#define EPD_SCLK_PIN    8
+#define EPD_MISO_PIN    7   // SD card data output
 
 /*------------------------------------------------------------------------------------------------------*/
 void DEV_Digital_Write(UWORD Pin, UBYTE Value);

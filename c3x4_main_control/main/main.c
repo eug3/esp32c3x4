@@ -2,7 +2,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include <time.h>
-#include "esp_littlefs.h"
+#include <dirent.h>
 #include <sys/stat.h>
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
@@ -38,6 +38,52 @@
 #include "EPD_4in26.h"
 #include "GUI_Paint.h"
 #include "ImageData.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_adc/adc_cali.h"
+
+// ============================================================================
+// Xteink X4 引脚定义 - 参考 examples/xteink-x4-sample
+// ============================================================================
+
+// 按钮引脚 (ADC电阻分压方案)
+#define BTN_GPIO1      GPIO_NUM_1  // 4个按钮: Back, Confirm, Left, Right
+#define BTN_GPIO2      GPIO_NUM_2  // 2个按钮: Volume Up, Volume Down
+#define BTN_GPIO3      GPIO_NUM_3  // 电源按钮 (数字输入)
+
+// 电池和USB检测
+#define BAT_GPIO0      GPIO_NUM_0  // 电池电压检测
+#define UART0_RXD      GPIO_NUM_20 // USB连接检测 (HIGH = USB已连接)
+
+// 按钮ADC阈值
+#define BTN_THRESHOLD           100    // 阈值容差
+#define BTN_RIGHT_VAL           3      // Right按钮ADC值
+#define BTN_LEFT_VAL            1470   // Left按钮ADC值
+#define BTN_CONFIRM_VAL         2655   // Confirm按钮ADC值
+#define BTN_BACK_VAL            3470   // Back按钮ADC值
+#define BTN_VOLUME_DOWN_VAL     3      // Volume Down按钮ADC值
+#define BTN_VOLUME_UP_VAL       2205   // Volume Up按钮ADC值
+
+// 按钮枚举
+typedef enum {
+    BTN_NONE = 0,
+    BTN_RIGHT,
+    BTN_LEFT,
+    BTN_CONFIRM,
+    BTN_BACK,
+    BTN_VOLUME_UP,
+    BTN_VOLUME_DOWN,
+    BTN_POWER
+} button_t;
+
+// 电源按钮时间定义
+#define POWER_BUTTON_WAKEUP_MS    1000  // 从睡眠唤醒需要按下时间
+#define POWER_BUTTON_SLEEP_MS     1000  // 进入睡眠需要按下时间
+
+// 电池监测 - ESP-IDF 6.1 新 API
+static adc_oneshot_unit_handle_t adc1_handle = NULL;
+static adc_cali_handle_t adc1_cali_handle = NULL;
+static bool do_calibration = true;
 
 // BLE connection state management
 static bool ble_connected = false;
@@ -48,8 +94,9 @@ static bool ble_pending_connection = false;
 static char ble_local_addr[18] = {0};
 static uint8_t own_addr_type;
 
-// Define button pin for sleep (using GPIO 9, which is available and not used by EPD)
-#define SLEEP_BUTTON_PIN GPIO_NUM_9
+// 按钮状态
+static button_t last_button = BTN_NONE;
+static volatile button_t current_pressed_button = BTN_NONE;
 
 // Define driver selection
 #define TEST_DRIVER_SSD1677 1
@@ -64,15 +111,16 @@ static int start_advertising(void);
 esp_err_t sd_card_init(void);
 esp_err_t save_image_to_sd(const uint8_t *image_data, size_t data_len);
 void sd_card_test_read_write(const char *mount_point);
+static void file_browser_main(void);
 
-#define STORAGE_MOUNT_POINT "/littlefs"
+#define SDCARD_MOUNT_POINT "/sdcard"
 #define SPI_DMA_CHAN    1
 
-// SD card pins (adjust according to your hardware setup for ESP32-C3)
-#define PIN_NUM_MISO  GPIO_NUM_6
-#define PIN_NUM_MOSI  GPIO_NUM_7
+// SD card pins - Xteink X4 (与 EPD 共用 SPI 总线)
+#define PIN_NUM_MISO  GPIO_NUM_7
+#define PIN_NUM_MOSI  GPIO_NUM_10
 #define PIN_NUM_CLK   GPIO_NUM_8
-#define PIN_NUM_CS    GPIO_NUM_9
+#define PIN_NUM_CS    GPIO_NUM_12   // SD_CS 专用引脚
 
 // BLE initialization function — use esp_nimble_hci_and_controller_init() to avoid
 // controller state conflicts on ESP32-C3
@@ -120,6 +168,157 @@ static bool json_data_ready = false;
 static uint16_t control_cmd_chr_val_handle = 0;
 static char last_control_cmd[16] = {0};
 static bool cmd_notify_enabled = false;
+
+// ============================================================================
+// Xteink X4 按钮和电池功能函数
+// ============================================================================
+
+// 获取按钮名称字符串
+static const char* get_button_name(button_t btn) {
+    switch (btn) {
+        case BTN_NONE:        return "None";
+        case BTN_RIGHT:       return "RIGHT";
+        case BTN_LEFT:        return "LEFT";
+        case BTN_CONFIRM:     return "CONFIRM";
+        case BTN_BACK:        return "BACK";
+        case BTN_VOLUME_UP:   return "VOLUME_UP";
+        case BTN_VOLUME_DOWN: return "VOLUME_DOWN";
+        case BTN_POWER:       return "POWER";
+        default:              return "Unknown";
+    }
+}
+
+// 读取当前按下的按钮 (ADC电阻分压方案) - ESP-IDF 6.1
+static button_t get_pressed_button(void) {
+    int btn1_adc, btn2_adc;
+    int btn1 = 0, btn2 = 0;
+
+    // 读取ADC值多次取平均
+    for (int i = 0; i < 3; i++) {
+        adc_oneshot_read(adc1_handle, ADC_CHANNEL_1, &btn1_adc); // GPIO1
+        adc_oneshot_read(adc1_handle, ADC_CHANNEL_2, &btn2_adc); // GPIO2
+        btn1 += btn1_adc;
+        btn2 += btn2_adc;
+    }
+    btn1 /= 3;
+    btn2 /= 3;
+
+    // 检查电源按钮 (数字输入)
+    if (gpio_get_level(BTN_GPIO3) == 0) {
+        return BTN_POWER;
+    }
+
+    // 检查 BTN_GPIO1 (4个按钮通过电阻分压)
+    if (btn1 < BTN_RIGHT_VAL + BTN_THRESHOLD) {
+        return BTN_RIGHT;
+    } else if (btn1 < BTN_LEFT_VAL + BTN_THRESHOLD) {
+        return BTN_LEFT;
+    } else if (btn1 < BTN_CONFIRM_VAL + BTN_THRESHOLD) {
+        return BTN_CONFIRM;
+    } else if (btn1 < BTN_BACK_VAL + BTN_THRESHOLD) {
+        return BTN_BACK;
+    }
+
+    // 检查 BTN_GPIO2 (2个按钮通过电阻分压)
+    if (btn2 < BTN_VOLUME_DOWN_VAL + BTN_THRESHOLD) {
+        return BTN_VOLUME_DOWN;
+    } else if (btn2 < BTN_VOLUME_UP_VAL + BTN_THRESHOLD) {
+        return BTN_VOLUME_UP;
+    }
+
+    return BTN_NONE;
+}
+
+// 初始化按钮和ADC - ESP-IDF 6.1
+static void buttons_adc_init(void) {
+    ESP_LOGI("BTN", "Initializing buttons and ADC...");
+
+    // 配置 ADC Oneshot 模式
+    adc_oneshot_unit_init_cfg_t init_config1 = {
+        .unit_id = ADC_UNIT_1,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
+
+    // 配置 ADC 通道
+    adc_oneshot_chan_cfg_t config = {
+        .bitwidth = ADC_BITWIDTH_12,
+        .atten = ADC_ATTEN_DB_12,  // ESP-IDF 6.1 使用 DB_12 而不是 DB_11
+    };
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_0, &config)); // GPIO0 - 电池
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_1, &config)); // GPIO1 - 按钮1
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_2, &config)); // GPIO2 - 按钮2
+
+    // ADC 校准
+    if (do_calibration) {
+        adc_cali_curve_fitting_config_t cali_config = {
+            .unit_id = ADC_UNIT_1,
+            .atten = ADC_ATTEN_DB_12,
+            .bitwidth = ADC_BITWIDTH_12,
+        };
+        esp_err_t ret = adc_cali_create_scheme_curve_fitting(&cali_config, &adc1_cali_handle);
+        if (ret == ESP_OK) {
+            ESP_LOGI("BTN", "ADC calibration enabled");
+        } else {
+            ESP_LOGW("BTN", "ADC calibration failed, skipping");
+            do_calibration = false;
+        }
+    }
+
+    // 配置按钮引脚
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << BTN_GPIO3),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+
+    // 配置电池检测引脚
+    gpio_set_direction(BAT_GPIO0, GPIO_MODE_INPUT);
+
+    // 配置USB检测引脚
+    gpio_set_direction(UART0_RXD, GPIO_MODE_INPUT);
+
+    ESP_LOGI("BTN", "Buttons and ADC initialized");
+}
+
+// 检查是否正在充电 (USB连接检测)
+static bool is_charging(void) {
+    return gpio_get_level(UART0_RXD) == 1;
+}
+
+// 读取电池电压 (mV) - ESP-IDF 6.1
+static uint32_t read_battery_voltage_mv(void) {
+    int adc_raw = 0;
+    int adc_result;
+    for (int i = 0; i < 10; i++) {
+        adc_oneshot_read(adc1_handle, ADC_CHANNEL_0, &adc_result);
+        adc_raw += adc_result;
+    }
+    adc_raw /= 10;
+
+    int voltage = adc_raw;
+    if (do_calibration && adc1_cali_handle) {
+        adc_cali_raw_to_voltage(adc1_cali_handle, adc_raw, &voltage);
+    } else {
+        // 未校准时的近似值: ADC值 * 1.1mV * 2 (分压系数)
+        voltage = (adc_raw * 1100) / 2048 * 2;
+    }
+
+    // 分压系数: Xteink X4 使用电阻分压，实际电压需要乘以系数
+    // 通常分压比为 2:1，所以实际电压 = ADC电压 * 2
+    return (uint32_t)voltage * 2;
+}
+
+// 读取电池百分比
+static uint8_t read_battery_percentage(void) {
+    uint32_t voltage_mv = read_battery_voltage_mv();
+    // 简单线性映射: 3.0V = 0%, 4.2V = 100%
+    if (voltage_mv < 3000) return 0;
+    if (voltage_mv > 4200) return 100;
+    return (voltage_mv - 3000) * 100 / (4200 - 3000);
+}
 
 static uint32_t read_le_u32(const uint8_t *p) {
     return ((uint32_t)p[0]) | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
@@ -673,31 +872,6 @@ esp_err_t sd_card_init(void)
 
     esp_err_t ret;
 
-    // First, try mounting LittleFS at STORAGE_MOUNT_POINT
-    ESP_LOGI("STORAGE", "Attempting to mount LittleFS at %s", STORAGE_MOUNT_POINT);
-    
-    esp_vfs_littlefs_conf_t littlefs_conf = {
-        .base_path = STORAGE_MOUNT_POINT,
-        .partition_label = "littlefs",
-        .format_if_mount_failed = true,
-        .dont_mount = false,
-    };
-
-    ret = esp_vfs_littlefs_register(&littlefs_conf);
-    if (ret == ESP_OK) {
-        size_t total = 0, used = 0;
-        ret = esp_littlefs_info(littlefs_conf.partition_label, &total, &used);
-        if (ret == ESP_OK) {
-            ESP_LOGI("STORAGE", "LittleFS mounted successfully");
-            ESP_LOGI("STORAGE", "Partition size: total: %d, used: %d", total, used);
-        }
-        // Run basic tests on the mounted FS
-        sd_card_test_read_write(STORAGE_MOUNT_POINT);
-        return ESP_OK;
-    }
-
-    ESP_LOGW("STORAGE", "LittleFS mount failed (%s), falling back to SD card", esp_err_to_name(ret));
-
     // Options for mounting the FAT filesystem on SD card.
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = false,
@@ -706,7 +880,7 @@ esp_err_t sd_card_init(void)
     };
 
     sdmmc_card_t *card;
-    const char sd_mount_point[] = "/sdcard";
+    const char sd_mount_point[] = SDCARD_MOUNT_POINT;
 
     ESP_LOGI("SD", "Initializing SD card using SPI peripheral");
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
@@ -716,23 +890,8 @@ esp_err_t sd_card_init(void)
     slot_config.gpio_cs = PIN_NUM_CS;
     slot_config.host_id = host.slot;
 
-    // Initialize SPI bus - GPIO 6/7/8/9 are not all IOMUX pins, so use GPIO matrix
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num = PIN_NUM_MOSI,
-        .miso_io_num = PIN_NUM_MISO,
-        .sclk_io_num = PIN_NUM_CLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 4000,
-        .flags = SPICOMMON_BUSFLAG_MASTER,
-    };
-
-    ret = spi_bus_initialize(host.slot, &bus_cfg, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK) {
-        ESP_LOGE("SD", "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    ESP_LOGI("SD", "SPI bus initialized successfully");
+    // SPI 总线已在 DEV_Module_Init() 中初始化，尝试添加设备
+    ESP_LOGI("SD", "Attaching SD card to existing SPI bus");
 
     ESP_LOGI("SD", "Mounting FAT filesystem at %s", sd_mount_point);
     ret = esp_vfs_fat_sdspi_mount(sd_mount_point, &host, &slot_config, &mount_config, &card);
@@ -959,50 +1118,277 @@ void test_driver(int driver) {
     }
 }
 
-// Button press detection and deep sleep function
-void check_button_and_sleep(void) {
-    // Configure button pin as input with pull-up
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << SLEEP_BUTTON_PIN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
+// ============================================================================
+// Xteink X4 欢迎页面显示函数
+// ============================================================================
+
+// 菜单选项
+typedef enum {
+    MENU_FILE_BROWSER = 0,
+    MENU_BLE_READER = 1,
+    MENU_COUNT = 2
+} menu_item_t;
+
+static menu_item_t current_menu = MENU_FILE_BROWSER;
+
+/**
+ * @brief 显示欢迎页面（带菜单）
+ * 显示 Xteink X4 标志、系统信息和可选择的菜单
+ */
+static void display_welcome_screen(void) {
+    ESP_LOGI("EPD", "Initializing display for welcome screen...");
+
+    // 初始化墨水屏
+    EPD_4in26_Init();
+
+    // 创建图像缓冲区
+    UWORD Imagesize = ((EPD_4in26_WIDTH % 8 == 0) ? (EPD_4in26_WIDTH / 8) : (EPD_4in26_WIDTH / 8 + 1)) * EPD_4in26_HEIGHT;
+    UBYTE *Image = (UBYTE *)malloc(Imagesize);
+    if (Image == NULL) {
+        ESP_LOGE("EPD", "Failed to allocate memory for welcome screen");
+        return;
+    }
+
+    // 初始化 Paint - 使用 ROTATE_270 实现旋转效果
+    Paint_NewImage(Image, EPD_4in26_WIDTH, EPD_4in26_HEIGHT, ROTATE_270, WHITE);
+    Paint_SetRotate(ROTATE_270);
+    Paint_Clear(WHITE);
+
+    // 270度旋转：竖屏 480x800
+    const UWORD LOGICAL_WIDTH = 480;
+    const UWORD LOGICAL_HEIGHT = 800;
+
+    // 设置字体
+    sFONT *font_title = &Font24;
+    sFONT *font_medium = &Font16;
+    sFONT *font_small = &Font12;
+
+    // ========================================
+    // 第1部分: 顶部标题区域 (竖屏)
+    // ========================================
+    // 显示主标题 "Xteink X4" - 居中
+    const char *title = "Monster of Pan";
+    UWORD title_width = strlen(title) * font_title->Width;
+    UWORD title_x = (LOGICAL_WIDTH - title_width) / 2;
+    Paint_DrawString_EN(title_x, 25, title, font_title, BLACK, WHITE);
+
+    // 显示副标题 "ESP32-C3 System"
+    const char *subtitle = "ESP32-C3 System";
+    UWORD subtitle_width = strlen(subtitle) * font_medium->Width;
+    UWORD subtitle_x = (LOGICAL_WIDTH - subtitle_width) / 2;
+    Paint_DrawString_EN(subtitle_x, 60, subtitle, font_medium, BLACK, WHITE);
+
+    // 绘制顶部分隔线
+    Paint_DrawLine(10, 90, LOGICAL_WIDTH - 10, 90, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
+
+    // ========================================
+    // 第2部分: 系统信息区域
+    // ========================================
+    UWORD info_y = 110;
+    UWORD info_x = 20;
+    UWORD line_height = 26;
+
+    Paint_DrawString_EN(info_x, info_y, "System Info:", font_medium, BLACK, WHITE);
+    info_y += line_height + 2;
+
+    // 获取电池信息
+    uint32_t battery_mv = read_battery_voltage_mv();
+    uint8_t battery_pct = read_battery_percentage();
+    bool charging = is_charging();
+
+    // 显示电池状态
+    char bat_str[64];
+    snprintf(bat_str, sizeof(bat_str), "Battery: %lu mV (%u%%)", battery_mv, battery_pct);
+    Paint_DrawString_EN(info_x, info_y, bat_str, font_small, BLACK, WHITE);
+    info_y += line_height;
+
+    // 显示充电状态
+    Paint_DrawString_EN(info_x, info_y, charging ? "Status: Charging" : "Status: On Battery", font_small, BLACK, WHITE);
+    info_y += line_height;
+
+    // ========================================
+    // 第3部分: 菜单选择区域
+    // ========================================
+    info_y += 15;
+    Paint_DrawLine(10, info_y, LOGICAL_WIDTH - 10, info_y, BLACK, DOT_PIXEL_1X1, LINE_STYLE_SOLID);
+    info_y += 20;
+
+    Paint_DrawString_EN(info_x, info_y, "Main Menu:", font_medium, BLACK, WHITE);
+    info_y += line_height + 10;
+
+    // 菜单选项配置
+    const char *menu_items[] = {
+        "File Browser",
+        "BLE Reader"
     };
-    gpio_config(&io_conf);
 
-    printf("Press button on GPIO %d to enter deep sleep...\n", SLEEP_BUTTON_PIN);
-    // EPD re-test commented out - only BLE and WiFi
-    // printf("Double-click button on GPIO %d to re-test EPD display...\n", SLEEP_BUTTON_PIN);
+    const char *menu_desc[] = {
+        "Browse SD Card files",
+        "Receive images via BLE"
+    };
 
-    int last_button_state = 1;  // Button not pressed (high with pull-up)
+    // 绘制菜单项
+    UWORD menu_start_y = info_y;
+    UWORD menu_item_height = 80;
 
-    while (1) {
-        int button_state = gpio_get_level(SLEEP_BUTTON_PIN);
+    for (int i = 0; i < MENU_COUNT; i++) {
+        UWORD item_y = menu_start_y + i * menu_item_height;
+        UWORD item_x = 30;
+        UWORD item_width = LOGICAL_WIDTH - 60;
+        UWORD item_height = 65;
 
-        // Detect button press (falling edge)
-        if (last_button_state == 1 && button_state == 0) {
-            // Debounce delay
-            vTaskDelay(50 / portTICK_PERIOD_MS);
-
-            // Wait for button release
-            while (gpio_get_level(SLEEP_BUTTON_PIN) == 0) {
-                vTaskDelay(10 / portTICK_PERIOD_MS);
+        // 如果是当前选中项，绘制边框
+        if (i == current_menu) {
+            Paint_DrawRectangle(item_x - 5, item_y - 5, item_x + item_width + 5, item_y + item_height + 5, BLACK, DOT_PIXEL_2X2, DRAW_FILL_EMPTY);
+            // 填充背景
+            for (UWORD fy = item_y; fy < item_y + item_height; fy += 2) {
+                Paint_DrawLine(item_x - 4, fy, item_x + item_width + 4, fy, BLACK, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
             }
-
-            // Single click - enter deep sleep
-            printf("Button pressed! Entering deep sleep in 1 second...\n");
-            vTaskDelay(1000 / portTICK_PERIOD_MS);  // Final confirmation delay
-
-            printf("Entering deep sleep now. Press reset button to wake up.\n");
-
-            // For ESP32-C3, ext0 wakeup may not be available, so we'll just enter deep sleep
-            // User needs to press reset button to wake up
-            esp_deep_sleep_start();
         }
 
-        last_button_state = button_state;
-        vTaskDelay(10 / portTICK_PERIOD_MS);  // Poll every 10ms for better responsiveness
+        // 绘制选项编号
+        char num_str[8];
+        snprintf(num_str, sizeof(num_str), "%d.", i + 1);
+        Paint_DrawString_EN(item_x, item_y + 10, num_str, font_medium, (i == current_menu) ? WHITE : BLACK, (i == current_menu) ? BLACK : WHITE);
+
+        // 绘制选项名称
+        Paint_DrawString_EN(item_x + 40, item_y + 10, menu_items[i], font_title, (i == current_menu) ? WHITE : BLACK, (i == current_menu) ? BLACK : WHITE);
+
+        // 绘制选项描述
+        Paint_DrawString_EN(item_x + 40, item_y + 40, menu_desc[i], font_small, (i == current_menu) ? WHITE : BLACK, (i == current_menu) ? BLACK : WHITE);
+    }
+
+    // ========================================
+    // 第4部分: 底部操作提示
+    // ========================================
+    Paint_DrawLine(10, LOGICAL_HEIGHT - 60, LOGICAL_WIDTH - 10, LOGICAL_HEIGHT - 60, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
+
+    // 操作提示
+    const char *controls[] = {
+        "UP/DOWN: Select",
+        "CONFIRM: Enter",
+        "POWER: Sleep (1s)"
+    };
+
+    UWORD tip_y = LOGICAL_HEIGHT - 50;
+    for (int i = 0; i < 3; i++) {
+        Paint_DrawString_EN(20, tip_y, controls[i], font_small, BLACK, WHITE);
+        tip_y += 16;
+    }
+
+    // 显示版本信息
+    const char *version = "v1.0.0 - ESP-IDF";
+    Paint_DrawString_EN(LOGICAL_WIDTH - strlen(version) * font_small->Width - 10, LOGICAL_HEIGHT - 12, version, font_small, BLACK, WHITE);
+
+    // 刷新显示
+    ESP_LOGI("EPD", "Displaying welcome screen...");
+    EPD_4in26_Display(Image);
+
+    // 等待刷新完成
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+    // 释放内存
+    free(Image);
+
+    ESP_LOGI("EPD", "Welcome screen displayed successfully");
+}
+
+// Button press detection and deep sleep function - Xteink X4
+void check_button_and_sleep(void) {
+    printf("Xteink X4 Button System\n");
+    printf("Press POWER button (GPIO %d) for 1 second to enter deep sleep...\n", BTN_GPIO3);
+    printf("Use UP/DOWN to select menu, CONFIRM to enter\n");
+
+    int64_t power_press_start = 0;
+    bool power_pressed = false;
+
+    while (1) {
+        button_t current_btn = get_pressed_button();
+
+        // 检测按钮按下 (从NONE到有按钮)
+        if (current_btn != BTN_NONE && last_button == BTN_NONE) {
+            ESP_LOGI("BTN", "Button pressed: %s", get_button_name(current_btn));
+            current_pressed_button = current_btn;
+
+            // 处理电源按钮长按进入睡眠
+            if (current_btn == BTN_POWER) {
+                power_press_start = esp_timer_get_time();
+                power_pressed = true;
+            }
+
+            // UP 按钮：选择上一个菜单
+            if (current_btn == BTN_VOLUME_UP) {
+                if (current_menu > 0) {
+                    current_menu--;
+                } else {
+                    current_menu = MENU_COUNT - 1;  // 循环到最后一个
+                }
+                ESP_LOGI("BTN", "Menu changed to: %d", current_menu);
+                // 重新显示欢迎页面（带更新后的菜单）
+                DEV_Module_Init();
+                display_welcome_screen();
+                EPD_4in26_Sleep();
+            }
+
+            // DOWN 按钮：选择下一个菜单
+            if (current_btn == BTN_VOLUME_DOWN) {
+                if (current_menu < MENU_COUNT - 1) {
+                    current_menu++;
+                } else {
+                    current_menu = 0;  // 循环到第一个
+                }
+                ESP_LOGI("BTN", "Menu changed to: %d", current_menu);
+                // 重新显示欢迎页面（带更新后的菜单）
+                DEV_Module_Init();
+                display_welcome_screen();
+                EPD_4in26_Sleep();
+            }
+
+            // CONFIRM 按钮：进入选中的菜单
+            if (current_btn == BTN_CONFIRM) {
+                ESP_LOGI("BTN", "Confirming menu item: %d", current_menu);
+
+                switch (current_menu) {
+                    case MENU_FILE_BROWSER:
+                        ESP_LOGI("BTN", "Opening file browser...");
+                        file_browser_main();
+                        break;
+
+                    case MENU_BLE_READER:
+                        ESP_LOGI("BTN", "BLE Reader mode - waiting for images...");
+                        // TODO: 实现 BLE 阅读器模式
+                        // 目前只是显示提示，实际功能已存在于现有代码中
+                        break;
+
+                    default:
+                        break;
+                }
+
+                // 功能关闭后，重新显示欢迎屏幕
+                DEV_Module_Init();
+                display_welcome_screen();
+                EPD_4in26_Sleep();
+            }
+        }
+
+        // 检测电源按钮释放
+        if (power_pressed && current_btn == BTN_POWER) {
+            int64_t press_duration = (esp_timer_get_time() - power_press_start) / 1000;
+            // 持续按下超过1秒
+            if (press_duration >= POWER_BUTTON_SLEEP_MS) {
+                ESP_LOGI("BTN", "POWER button held for %lld ms, entering deep sleep...", press_duration);
+                vTaskDelay(1000 / portTICK_PERIOD_MS);
+                ESP_LOGI("BTN", "Entering deep sleep now. Press reset button to wake up.");
+                esp_deep_sleep_start();
+            }
+        } else if (power_pressed && current_btn != BTN_POWER) {
+            // 电源按钮提前释放
+            power_pressed = false;
+            ESP_LOGI("BTN", "POWER button released (short press)");
+        }
+
+        last_button = current_btn;
+        vTaskDelay(50 / portTICK_PERIOD_MS);  // 每50ms轮询一次
     }
 }
 
@@ -1018,46 +1404,34 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
-    // EPD initialization commented out - only BLE and WiFi
-    /*
-    // Initialize SPI and e-Paper FIRST (before BLE/WiFi to avoid power issues)
-    printf("Initializing DEV_Module...\n");
+    // ============================================================================
+    // Xteink X4: 先初始化按钮和ADC（因为欢迎页面需要读取电池信息）
+    // ============================================================================
+    ESP_LOGI("MAIN", "Initializing Xteink X4 button system and battery monitoring...");
+    buttons_adc_init();
+    ESP_LOGI("BAT", "Battery: %lu mV, %u%%, Charging: %s",
+             read_battery_voltage_mv(),
+             read_battery_percentage(),
+             is_charging() ? "Yes" : "No");
+
+    // ============================================================================
+    // Xteink X4: 初始化 EPD 墨水屏并显示欢迎页面
+    // ============================================================================
+    ESP_LOGI("MAIN", "Initializing EPD for welcome screen...");
+
+    // 初始化 SPI 和 e-Paper (在 BLE/WiFi 之前初始化以避免电源问题)
     DEV_Module_Init();
-    printf("DEV_Module_Init done\n");
 
-    // Test SPI communication
-    printf("Testing SPI communication...\n");
-    DEV_SPI_WriteByte(0x00);  // Send a test byte
-    printf("SPI test done\n");
+    // 显示欢迎页面
+    display_welcome_screen();
 
-    // Low-level hardware self-check: pulse RST, toggle CS, send SPI pattern, read BUSY
-    printf("Starting low-level hardware self-check...\n");
-    // Pulse RST
-    DEV_Digital_Write(EPD_RST_PIN, 0);
-    vTaskDelay(100 / portTICK_PERIOD_MS);
-    DEV_Digital_Write(EPD_RST_PIN, 1);
-    vTaskDelay(100 / portTICK_PERIOD_MS);
-
-    // Toggle CS and send pattern
-    for (int pass = 0; pass < 3; pass++) {
-        printf("Self-check pass %d: CS LOW, send 0xAA,0x55 then CS HIGH\n", pass+1);
-        DEV_Digital_Write(EPD_CS_PIN, 0);
-        DEV_SPI_WriteByte(0xAA);
-        DEV_SPI_WriteByte(0x55);
-        DEV_Digital_Write(EPD_CS_PIN, 1);
-        // Read BUSY 10 times
-        for (int i = 0; i < 10; i++) {
-            int busy = DEV_Digital_Read(EPD_BUSY_PIN);
-            printf("BUSY read %d: %d\n", i, busy);
-            vTaskDelay(50 / portTICK_PERIOD_MS);
-        }
-    }
-    printf("Low-level self-check finished.\n");
-    */
+    // ESP32 进入低功耗模式以节省电量
+    ESP_LOGI("EPD", "Putting EPD to sleep...");
+    EPD_4in26_Sleep();
 
     // Add delay before initializing high-power components to prevent brownout
-    ESP_LOGI("MAIN", "Waiting 2 seconds before initializing BLE/WiFi to prevent brownout...");
-    vTaskDelay(2000 / portTICK_PERIOD_MS);
+    ESP_LOGI("MAIN", "Waiting 1 second before initializing BLE/WiFi to prevent brownout...");
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
 
     // Initialize BLE AFTER EPD (ESP32-C3 requires BLE controller init before Wi-Fi)
     ESP_LOGI("MAIN", "Initializing BLE...");
@@ -1083,8 +1457,8 @@ void app_main(void)
     printf("Test completed!\n");
     */
 
-    // Start button monitoring for deep sleep
-    // check_button_and_sleep();  // Commented out to allow normal operation
+    // Start button monitoring for deep sleep and file browser
+    check_button_and_sleep();
 }
 
 // BLE related functions
@@ -1441,4 +1815,324 @@ esp_err_t save_image_to_sd(const uint8_t *image_data, size_t data_len) {
     return ESP_OK;
 }
 
+// ============================================================================
+// SD Card File Browser
+// ============================================================================
+
+#define MAX_FILES_PER_PAGE  12
+#define MAX_FILENAME_LEN    64
+
+typedef struct {
+    char name[MAX_FILENAME_LEN];
+    bool is_dir;
+    size_t size;
+} file_info_t;
+
+typedef struct {
+    file_info_t files[MAX_FILES_PER_PAGE];
+    int count;
+    int total_files;
+    int current_page;
+    int total_pages;
+    char current_path[256];
+} file_browser_t;
+
+static file_browser_t browser = {0};
+
+/**
+ * @brief 刷新文件浏览器当前页
+ */
+static void browser_refresh_page(void) {
+    DIR *dir = opendir(browser.current_path);
+    if (dir == NULL) {
+        browser.count = 0;
+        browser.total_files = 0;
+        return;
+    }
+
+    // 先计算总文件数
+    rewinddir(dir);
+    browser.total_files = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+            browser.total_files++;
+        }
+    }
+
+    // 计算总页数
+    browser.total_pages = (browser.total_files + MAX_FILES_PER_PAGE - 1) / MAX_FILES_PER_PAGE;
+    if (browser.total_pages == 0) browser.total_pages = 1;
+
+    // 读取当前页的文件
+    closedir(dir);
+    dir = opendir(browser.current_path);
+
+    int skip = browser.current_page * MAX_FILES_PER_PAGE;
+    int skipped = 0;
+    browser.count = 0;
+
+    while ((entry = readdir(dir)) != NULL && browser.count < MAX_FILES_PER_PAGE) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        if (skipped < skip) {
+            skipped++;
+            continue;
+        }
+
+        char full_path[512];
+        snprintf(full_path, sizeof(full_path), "%s/%s", browser.current_path, entry->d_name);
+
+        struct stat st;
+        if (stat(full_path, &st) == 0) {
+            strncpy(browser.files[browser.count].name, entry->d_name, MAX_FILENAME_LEN - 1);
+            browser.files[browser.count].name[MAX_FILENAME_LEN - 1] = '\0';
+            browser.files[browser.count].is_dir = S_ISDIR(st.st_mode);
+            browser.files[browser.count].size = st.st_size;
+            browser.count++;
+        }
+    }
+
+    closedir(dir);
+}
+
+/**
+ * @brief 初始化文件浏览器
+ */
+static void browser_init(const char *path) {
+    strncpy(browser.current_path, path, sizeof(browser.current_path) - 1);
+    browser.current_page = 0;
+    browser_refresh_page();
+}
+
+/**
+ * @brief 下一页
+ */
+static void browser_next_page(void) {
+    if (browser.current_page < browser.total_pages - 1) {
+        browser.current_page++;
+        browser_refresh_page();
+    }
+}
+
+/**
+ * @brief 上一页
+ */
+static void browser_prev_page(void) {
+    if (browser.current_page > 0) {
+        browser.current_page--;
+        browser_refresh_page();
+    }
+}
+
+/**
+ * @brief 进入目录
+ */
+static bool browser_enter_directory(int index) {
+    if (index < 0 || index >= browser.count) {
+        return false;
+    }
+
+    if (!browser.files[index].is_dir) {
+        return false;
+    }
+
+    char new_path[512];
+    snprintf(new_path, sizeof(new_path), "%s/%s", browser.current_path, browser.files[index].name);
+
+    strncpy(browser.current_path, new_path, sizeof(browser.current_path) - 1);
+    browser.current_page = 0;
+    browser_refresh_page();
+    return true;
+}
+
+/**
+ * @brief 返回上级目录
+ */
+static bool browser_go_up(void) {
+    if (strcmp(browser.current_path, "/sdcard") == 0) {
+        return false;
+    }
+
+    // 找到最后一个 '/'
+    char *last_slash = strrchr(browser.current_path, '/');
+    if (last_slash != NULL && last_slash != browser.current_path) {
+        *last_slash = '\0';
+        browser.current_page = 0;
+        browser_refresh_page();
+        return true;
+    }
+    return false;
+}
+
+/**
+ * @brief 格式化文件大小
+ */
+static const char* format_size(size_t size) {
+    static char buf[32];
+    if (size < 1024) {
+        snprintf(buf, sizeof(buf), "%zu B", size);
+    } else if (size < 1024 * 1024) {
+        snprintf(buf, sizeof(buf), "%zu KB", size / 1024);
+    } else {
+        snprintf(buf, sizeof(buf), "%zu MB", size / (1024 * 1024));
+    }
+    return buf;
+}
+
+/**
+ * @brief 在墨水屏上显示文件浏览器
+ */
+static void display_file_browser(void) {
+    ESP_LOGI("BROWSER", "Displaying file browser: %s (page %d/%d, %d files)",
+             browser.current_path, browser.current_page + 1, browser.total_pages, browser.count);
+
+    EPD_4in26_Init();
+
+    UWORD Imagesize = ((EPD_4in26_WIDTH % 8 == 0) ? (EPD_4in26_WIDTH / 8) : (EPD_4in26_WIDTH / 8 + 1)) * EPD_4in26_HEIGHT;
+    UBYTE *Image = (UBYTE *)malloc(Imagesize);
+    if (Image == NULL) {
+        ESP_LOGE("EPD", "Failed to allocate memory for file browser");
+        return;
+    }
+
+    Paint_NewImage(Image, EPD_4in26_WIDTH, EPD_4in26_HEIGHT, ROTATE_270, WHITE);
+    Paint_SetRotate(ROTATE_270);
+    Paint_Clear(WHITE);
+
+    const UWORD LOGICAL_WIDTH = 480;
+    const UWORD LOGICAL_HEIGHT = 800;
+
+    sFONT *font_small = &Font12;
+
+    // 标题栏
+    Paint_DrawLine(0, 25, LOGICAL_WIDTH, 25, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
+
+    // 显示路径（截断以适应屏幕）
+    char display_path[64];
+    display_path[0] = '\0';
+    size_t path_len = strlen(browser.current_path);
+    if (path_len > 60) {
+        // 只显示最后 60 个字符
+        display_path[0] = '.'; display_path[1] = '.'; display_path[2] = '.';
+        memcpy(display_path + 3, browser.current_path + path_len - 57, 57);
+        display_path[60] = '\0';
+    } else {
+        memcpy(display_path, browser.current_path, path_len);
+        display_path[path_len] = '\0';
+    }
+    Paint_DrawString_EN(5, 8, display_path, font_small, BLACK, WHITE);
+
+    // 文件列表
+    UWORD y = 35;
+    UWORD line_height = 20;
+    UWORD col1_x = 5;   // 文件名列
+    UWORD col2_x = 350; // 大小列
+
+    for (int i = 0; i < browser.count && y < LOGICAL_HEIGHT - 40; i++) {
+        char line[64];
+
+        // 文件名（截断）
+        char name_short[32];
+        strncpy(name_short, browser.files[i].name, 28);
+        name_short[28] = '\0';
+        if (browser.files[i].is_dir) {
+            snprintf(line, sizeof(line), "[%s]", name_short);
+        } else {
+            snprintf(line, sizeof(line), "%s", name_short);
+        }
+        Paint_DrawString_EN(col1_x, y, line, font_small, BLACK, WHITE);
+
+        // 文件大小
+        if (!browser.files[i].is_dir) {
+            Paint_DrawString_EN(col2_x, y, format_size(browser.files[i].size), font_small, BLACK, WHITE);
+        } else {
+            Paint_DrawString_EN(col2_x, y, "<DIR>", font_small, BLACK, WHITE);
+        }
+
+        y += line_height;
+    }
+
+    // 底部状态栏
+    Paint_DrawLine(0, LOGICAL_HEIGHT - 30, LOGICAL_WIDTH, LOGICAL_HEIGHT - 30, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
+
+    char status[64];
+    snprintf(status, sizeof(status), "Page %d/%d  Files: %d", browser.current_page + 1, browser.total_pages, browser.total_files);
+    Paint_DrawString_EN(5, LOGICAL_HEIGHT - 25, status, font_small, BLACK, WHITE);
+
+    // 操作提示
+    Paint_DrawString_EN(5, LOGICAL_HEIGHT - 10, "UP/DOWN:page  LEFT:back  RIGHT:enter", font_small, BLACK, WHITE);
+
+    EPD_4in26_Display(Image);
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    free(Image);
+}
+
+/**
+ * @brief 文件浏览器主界面（按键控制）
+ */
+static void file_browser_main(void) {
+    ESP_LOGI("BROWSER", "Starting file browser at /sdcard");
+
+    // 检查 SD 卡是否可访问（不重复初始化）
+    DIR *dir = opendir("/sdcard");
+    if (dir == NULL) {
+        ESP_LOGE("BROWSER", "SD card not accessible. Make sure it's initialized.");
+        return;
+    }
+    closedir(dir);
+
+    browser_init("/sdcard");
+    display_file_browser();
+
+    bool running = true;
+    while (running) {
+        button_t btn = get_pressed_button();
+        if (btn == BTN_NONE) {
+            vTaskDelay(50 / portTICK_PERIOD_MS);
+            continue;
+        }
+
+        switch (btn) {
+            case BTN_VOLUME_DOWN:
+                browser_next_page();
+                display_file_browser();
+                break;
+
+            case BTN_VOLUME_UP:
+                browser_prev_page();
+                display_file_browser();
+                break;
+
+            case BTN_RIGHT: {
+                // 尝试进入目录（默认第一个文件/目录）
+                if (browser.count > 0) {
+                    if (browser_enter_directory(0)) {
+                        display_file_browser();
+                    }
+                }
+                break;
+            }
+
+            case BTN_LEFT:
+                if (browser_go_up()) {
+                    display_file_browser();
+                }
+                break;
+
+            case BTN_BACK:
+                running = false;
+                break;
+
+            default:
+                break;
+        }
+
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+    }
+
+    ESP_LOGI("BROWSER", "File browser closed");
+}
 
