@@ -41,6 +41,8 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_cali.h"
+#include "lvgl_driver.h"  // 包含按钮类型定义和函数声明
+#include "version.h"       // 自动生成的版本信息
 
 // ============================================================================
 // Xteink X4 引脚定义 - 参考 examples/xteink-x4-sample
@@ -64,17 +66,7 @@
 #define BTN_VOLUME_DOWN_VAL     3      // Volume Down按钮ADC值
 #define BTN_VOLUME_UP_VAL       2205   // Volume Up按钮ADC值
 
-// 按钮枚举
-typedef enum {
-    BTN_NONE = 0,
-    BTN_RIGHT,
-    BTN_LEFT,
-    BTN_CONFIRM,
-    BTN_BACK,
-    BTN_VOLUME_UP,
-    BTN_VOLUME_DOWN,
-    BTN_POWER
-} button_t;
+// 按钮枚举定义在 lvgl_driver.h 中
 
 // 电源按钮时间定义
 #define POWER_BUTTON_WAKEUP_MS    1000  // 从睡眠唤醒需要按下时间
@@ -189,7 +181,8 @@ static const char* get_button_name(button_t btn) {
 }
 
 // 读取当前按下的按钮 (ADC电阻分压方案) - ESP-IDF 6.1
-static button_t get_pressed_button(void) {
+// 注意：此函数被lvgl_driver.c调用，所以不能是static
+button_t get_pressed_button(void) {
     int btn1_adc, btn2_adc;
     int btn1 = 0, btn2 = 0;
 
@@ -1167,7 +1160,7 @@ static void display_welcome_screen(void) {
     // 第1部分: 顶部标题区域 (竖屏)
     // ========================================
     // 显示主标题 "Xteink X4" - 居中
-    const char *title = "Monster of Pan";
+    const char *title = "Monster For Pan";
     UWORD title_width = strlen(title) * font_title->Width;
     UWORD title_x = (LOGICAL_WIDTH - title_width) / 2;
     Paint_DrawString_EN(title_x, 25, title, font_title, BLACK, WHITE);
@@ -1276,9 +1269,8 @@ static void display_welcome_screen(void) {
         tip_y += 16;
     }
 
-    // 显示版本信息
-    const char *version = "v1.0.0 - ESP-IDF";
-    Paint_DrawString_EN(LOGICAL_WIDTH - strlen(version) * font_small->Width - 10, LOGICAL_HEIGHT - 12, version, font_small, BLACK, WHITE);
+    // 显示版本信息 (自动生成)
+    Paint_DrawString_EN(LOGICAL_WIDTH - strlen(VERSION_FULL) * font_small->Width - 10, LOGICAL_HEIGHT - 12, VERSION_FULL, font_small, BLACK, WHITE);
 
     // 刷新显示
     ESP_LOGI("EPD", "Displaying welcome screen...");

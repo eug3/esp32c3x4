@@ -10,6 +10,7 @@
 #include "DEV_Config.h"
 
 static spi_device_handle_t spi_handle;
+static bool spi_bus_initialized = false;  // 跟踪SPI总线是否已初始化
 
 /**
  * GPIO read and write
@@ -66,27 +67,31 @@ void DEV_Delay_ms(UDOUBLE xms) {
  * Module Init
 **/
 UBYTE DEV_Module_Init(void) {
-    // Initialize SPI bus
-    spi_bus_config_t buscfg = {
-        .mosi_io_num = EPD_MOSI_PIN,
-        .miso_io_num = -1,  // Not used
-        .sclk_io_num = EPD_SCLK_PIN,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 4096,
-    };
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
+    // Initialize SPI bus only if not already initialized
+    if (!spi_bus_initialized) {
+        spi_bus_config_t buscfg = {
+            .mosi_io_num = EPD_MOSI_PIN,
+            .miso_io_num = -1,  // Not used
+            .sclk_io_num = EPD_SCLK_PIN,
+            .quadwp_io_num = -1,
+            .quadhd_io_num = -1,
+            .max_transfer_sz = 4096,
+        };
+        ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
-    // Add SPI device
-    spi_device_interface_config_t devcfg = {
-        .clock_speed_hz = 10 * 1000 * 1000,  // 10MHz
-        .mode = 0,  // SPI mode 0
-        .spics_io_num = EPD_CS_PIN,
-        .queue_size = 7,
-    };
-    ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &devcfg, &spi_handle));
+        // Add SPI device
+        spi_device_interface_config_t devcfg = {
+            .clock_speed_hz = 10 * 1000 * 1000,  // 10MHz
+            .mode = 0,  // SPI mode 0
+            .spics_io_num = EPD_CS_PIN,
+            .queue_size = 7,
+        };
+        ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &devcfg, &spi_handle));
+        
+        spi_bus_initialized = true;
+    }
 
-    // Initialize GPIO
+    // Initialize GPIO (always do this as it's idempotent)
     DEV_GPIO_Mode(EPD_RST_PIN, GPIO_MODE_OUTPUT);
     DEV_GPIO_Mode(EPD_DC_PIN, GPIO_MODE_OUTPUT);
     DEV_GPIO_Mode(EPD_BUSY_PIN, GPIO_MODE_INPUT);
