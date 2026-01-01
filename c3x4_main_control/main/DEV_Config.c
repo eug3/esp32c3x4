@@ -71,7 +71,7 @@ UBYTE DEV_Module_Init(void) {
     if (!spi_bus_initialized) {
         spi_bus_config_t buscfg = {
             .mosi_io_num = EPD_MOSI_PIN,
-            .miso_io_num = -1,  // Not used
+            .miso_io_num = EPD_MISO_PIN,  // Required for SD card (shared SPI bus)
             .sclk_io_num = EPD_SCLK_PIN,
             .quadwp_io_num = -1,
             .quadhd_io_num = -1,

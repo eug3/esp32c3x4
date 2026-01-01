@@ -87,12 +87,8 @@ static bool ble_pending_connection = false;
 static char ble_local_addr[18] = {0};
 static uint8_t own_addr_type;
 
-// 按钮状态
-static button_t last_button = BTN_NONE;
+// 按钮状态（保留 current_pressed_button 供未来使用）
 static volatile button_t current_pressed_button = BTN_NONE;
-
-// EPD 图像缓冲区（用于 LVGL 和传统绘图）
-UBYTE *BlackImage = NULL;
 
 // Define driver selection
 #define TEST_DRIVER_SSD1677 1
@@ -170,6 +166,7 @@ static bool cmd_notify_enabled = false;
 // ============================================================================
 
 // 获取按钮名称字符串
+__attribute__((unused))
 static const char* get_button_name(button_t btn) {
     switch (btn) {
         case BTN_NONE:        return "None";
@@ -1156,274 +1153,6 @@ void test_driver(int driver) {
     }
 }
 
-// ============================================================================
-// Xteink X4 欢迎页面显示函数
-// ============================================================================
-
-// 菜单选项
-typedef enum {
-    MENU_FILE_BROWSER = 0,
-    MENU_BLE_READER = 1,
-    MENU_COUNT = 2
-} menu_item_t;
-
-static menu_item_t current_menu = MENU_FILE_BROWSER;
-
-/**
- * @brief 显示欢迎页面（带菜单）
- * 显示 Xteink X4 标志、系统信息和可选择的菜单
- */
-static void display_welcome_screen(void) {
-    ESP_LOGI("EPD", "Initializing display for welcome screen...");
-
-    // 初始化墨水屏
-    EPD_4in26_Init();
-
-    // 使用全局图像缓冲区
-    if (BlackImage == NULL) {
-        ESP_LOGE("EPD", "BlackImage buffer not allocated!");
-        return;
-    }
-
-    // 初始化 Paint - 使用 ROTATE_270 实现旋转效果
-    Paint_NewImage(BlackImage, EPD_4in26_WIDTH, EPD_4in26_HEIGHT, ROTATE_270, WHITE);
-    Paint_SetRotate(ROTATE_270);
-    Paint_Clear(WHITE);
-
-    // 270度旋转：竖屏 480x800
-    const UWORD LOGICAL_WIDTH = 480;
-    const UWORD LOGICAL_HEIGHT = 800;
-
-    // 设置字体
-    sFONT *font_title = &Font24;
-    sFONT *font_medium = &Font16;
-    sFONT *font_small = &Font12;
-
-    // ========================================
-    // 第1部分: 顶部标题区域 (竖屏)
-    // ========================================
-    // 显示主标题 "Xteink X4" - 居中
-    const char *title = "Monster For Pan";
-    UWORD title_width = strlen(title) * font_title->Width;
-    UWORD title_x = (LOGICAL_WIDTH - title_width) / 2;
-    Paint_DrawString_EN(title_x, 25, title, font_title, BLACK, WHITE);
-
-    // 显示副标题 "ESP32-C3 System"
-    const char *subtitle = "ESP32-C3 System";
-    UWORD subtitle_width = strlen(subtitle) * font_medium->Width;
-    UWORD subtitle_x = (LOGICAL_WIDTH - subtitle_width) / 2;
-    Paint_DrawString_EN(subtitle_x, 60, subtitle, font_medium, BLACK, WHITE);
-
-    // 绘制顶部分隔线
-    Paint_DrawLine(10, 90, LOGICAL_WIDTH - 10, 90, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
-
-    // ========================================
-    // 第2部分: 系统信息区域
-    // ========================================
-    UWORD info_y = 110;
-    UWORD info_x = 20;
-    UWORD line_height = 26;
-
-    Paint_DrawString_EN(info_x, info_y, "System Info:", font_medium, BLACK, WHITE);
-    info_y += line_height + 2;
-
-    // 获取电池信息
-    uint32_t battery_mv = read_battery_voltage_mv();
-    uint8_t battery_pct = read_battery_percentage();
-    bool charging = is_charging();
-
-    // 显示电池状态
-    char bat_str[64];
-    snprintf(bat_str, sizeof(bat_str), "Battery: %lu mV (%u%%)", battery_mv, battery_pct);
-    Paint_DrawString_EN(info_x, info_y, bat_str, font_small, BLACK, WHITE);
-    info_y += line_height;
-
-    // 显示充电状态
-    Paint_DrawString_EN(info_x, info_y, charging ? "Status: Charging" : "Status: On Battery", font_small, BLACK, WHITE);
-    info_y += line_height;
-
-    // ========================================
-    // 第3部分: 菜单选择区域
-    // ========================================
-    info_y += 15;
-    Paint_DrawLine(10, info_y, LOGICAL_WIDTH - 10, info_y, BLACK, DOT_PIXEL_1X1, LINE_STYLE_SOLID);
-    info_y += 20;
-
-    Paint_DrawString_EN(info_x, info_y, "Main Menu:", font_medium, BLACK, WHITE);
-    info_y += line_height + 10;
-
-    // 菜单选项配置
-    const char *menu_items[] = {
-        "File Browser",
-        "BLE Reader"
-    };
-
-    const char *menu_desc[] = {
-        "Browse SD Card files",
-        "Receive images via BLE"
-    };
-
-    // 绘制菜单项
-    UWORD menu_start_y = info_y;
-    UWORD menu_item_height = 80;
-
-    for (int i = 0; i < MENU_COUNT; i++) {
-        UWORD item_y = menu_start_y + i * menu_item_height;
-        UWORD item_x = 30;
-        UWORD item_width = LOGICAL_WIDTH - 60;
-        UWORD item_height = 65;
-
-        // 如果是当前选中项，绘制边框
-        if (i == current_menu) {
-            Paint_DrawRectangle(item_x - 5, item_y - 5, item_x + item_width + 5, item_y + item_height + 5, BLACK, DOT_PIXEL_2X2, DRAW_FILL_EMPTY);
-            // 填充背景
-            for (UWORD fy = item_y; fy < item_y + item_height; fy += 2) {
-                Paint_DrawLine(item_x - 4, fy, item_x + item_width + 4, fy, BLACK, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
-            }
-        }
-
-        // 绘制选项编号
-        char num_str[8];
-        snprintf(num_str, sizeof(num_str), "%d.", i + 1);
-        Paint_DrawString_EN(item_x, item_y + 10, num_str, font_medium, (i == current_menu) ? WHITE : BLACK, (i == current_menu) ? BLACK : WHITE);
-
-        // 绘制选项名称
-        Paint_DrawString_EN(item_x + 40, item_y + 10, menu_items[i], font_title, (i == current_menu) ? WHITE : BLACK, (i == current_menu) ? BLACK : WHITE);
-
-        // 绘制选项描述
-        Paint_DrawString_EN(item_x + 40, item_y + 40, menu_desc[i], font_small, (i == current_menu) ? WHITE : BLACK, (i == current_menu) ? BLACK : WHITE);
-    }
-
-    // ========================================
-    // 第4部分: 底部操作提示
-    // ========================================
-    Paint_DrawLine(10, LOGICAL_HEIGHT - 60, LOGICAL_WIDTH - 10, LOGICAL_HEIGHT - 60, BLACK, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
-
-    // 操作提示
-    const char *controls[] = {
-        "UP/DOWN: Select",
-        "CONFIRM: Enter",
-        "POWER: Sleep (1s)"
-    };
-
-    UWORD tip_y = LOGICAL_HEIGHT - 50;
-    for (int i = 0; i < 3; i++) {
-        Paint_DrawString_EN(20, tip_y, controls[i], font_small, BLACK, WHITE);
-        tip_y += 16;
-    }
-
-    // 显示版本信息 (自动生成)
-    Paint_DrawString_EN(LOGICAL_WIDTH - strlen(VERSION_FULL) * font_small->Width - 10, LOGICAL_HEIGHT - 12, VERSION_FULL, font_small, BLACK, WHITE);
-
-    // 刷新显示
-    ESP_LOGI("EPD", "Displaying welcome screen...");
-    EPD_4in26_Display(BlackImage);
-
-    // 等待刷新完成
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-
-    ESP_LOGI("EPD", "Welcome screen displayed successfully");
-}
-
-// Button press detection and deep sleep function - Xteink X4
-void check_button_and_sleep(void) {
-    printf("Xteink X4 Button System\n");
-    printf("Press POWER button (GPIO %d) for 1 second to enter deep sleep...\n", BTN_GPIO3);
-    printf("Use UP/DOWN to select menu, CONFIRM to enter\n");
-
-    int64_t power_press_start = 0;
-    bool power_pressed = false;
-
-    while (1) {
-        button_t current_btn = get_pressed_button();
-
-        // 检测按钮按下 (从NONE到有按钮)
-        if (current_btn != BTN_NONE && last_button == BTN_NONE) {
-            ESP_LOGI("BTN", "Button pressed: %s", get_button_name(current_btn));
-            current_pressed_button = current_btn;
-
-            // 处理电源按钮长按进入睡眠
-            if (current_btn == BTN_POWER) {
-                power_press_start = esp_timer_get_time();
-                power_pressed = true;
-            }
-
-            // UP 按钮：选择上一个菜单
-            if (current_btn == BTN_VOLUME_UP) {
-                if (current_menu > 0) {
-                    current_menu--;
-                } else {
-                    current_menu = MENU_COUNT - 1;  // 循环到最后一个
-                }
-                ESP_LOGI("BTN", "Menu changed to: %d", current_menu);
-                // 重新显示欢迎页面（带更新后的菜单）
-                DEV_Module_Init();
-                display_welcome_screen();
-                EPD_4in26_Sleep();
-            }
-
-            // DOWN 按钮：选择下一个菜单
-            if (current_btn == BTN_VOLUME_DOWN) {
-                if (current_menu < MENU_COUNT - 1) {
-                    current_menu++;
-                } else {
-                    current_menu = 0;  // 循环到第一个
-                }
-                ESP_LOGI("BTN", "Menu changed to: %d", current_menu);
-                // 重新显示欢迎页面（带更新后的菜单）
-                DEV_Module_Init();
-                display_welcome_screen();
-                EPD_4in26_Sleep();
-            }
-
-            // CONFIRM 按钮：进入选中的菜单
-            if (current_btn == BTN_CONFIRM) {
-                ESP_LOGI("BTN", "Confirming menu item: %d", current_menu);
-
-                switch (current_menu) {
-                    case MENU_FILE_BROWSER:
-                        ESP_LOGI("BTN", "Opening file browser...");
-                        file_browser_main();
-                        break;
-
-                    case MENU_BLE_READER:
-                        ESP_LOGI("BTN", "BLE Reader mode - waiting for images...");
-                        // TODO: 实现 BLE 阅读器模式
-                        // 目前只是显示提示，实际功能已存在于现有代码中
-                        break;
-
-                    default:
-                        break;
-                }
-
-                // 功能关闭后，重新显示欢迎屏幕
-                DEV_Module_Init();
-                display_welcome_screen();
-                EPD_4in26_Sleep();
-            }
-        }
-
-        // 检测电源按钮释放
-        if (power_pressed && current_btn == BTN_POWER) {
-            int64_t press_duration = (esp_timer_get_time() - power_press_start) / 1000;
-            // 持续按下超过1秒
-            if (press_duration >= POWER_BUTTON_SLEEP_MS) {
-                ESP_LOGI("BTN", "POWER button held for %lld ms, entering deep sleep...", press_duration);
-                vTaskDelay(1000 / portTICK_PERIOD_MS);
-                ESP_LOGI("BTN", "Entering deep sleep now. Press reset button to wake up.");
-                esp_deep_sleep_start();
-            }
-        } else if (power_pressed && current_btn != BTN_POWER) {
-            // 电源按钮提前释放
-            power_pressed = false;
-            ESP_LOGI("BTN", "POWER button released (short press)");
-        }
-
-        last_button = current_btn;
-        vTaskDelay(50 / portTICK_PERIOD_MS);  // 每50ms轮询一次
-    }
-}
-
 void app_main(void)
 {
     printf("ESP32 BLE and WiFi System Starting...\n");
@@ -1447,29 +1176,16 @@ void app_main(void)
              is_charging() ? "Yes" : "No");
 
     // ============================================================================
-    // Xteink X4: 初始化 EPD 墨水屏并显示欢迎页面
+    // Xteink X4: 初始化 EPD 墨水屏
     // ============================================================================
-    ESP_LOGI("MAIN", "Initializing EPD for welcome screen...");
+    ESP_LOGI("MAIN", "Initializing EPD...");
 
     // 初始化 SPI 和 e-Paper (在 BLE/WiFi 之前初始化以避免电源问题)
     DEV_Module_Init();
 
-    // 分配全局 EPD 图像缓冲区（用于 LVGL 和传统绘图）
-    // 黑白：1bpp（每像素 1bit），每字节 8 像素 => widthByte = width/8
-    uint32_t Imagesize = ((EPD_4in26_WIDTH % 8 == 0)? (EPD_4in26_WIDTH / 8 ): (EPD_4in26_WIDTH / 8 + 1)) * (uint32_t)EPD_4in26_HEIGHT;
-    ESP_LOGI("MAIN", "Allocating EPD buffer: %" PRIu32 " bytes", Imagesize);
-    if ((BlackImage = (UBYTE *)malloc(Imagesize)) == NULL) {
-        ESP_LOGE("MAIN", "Failed to allocate EPD buffer! Rebooting...");
-        esp_restart();
-    }
-    ESP_LOGI("MAIN", "EPD buffer allocated successfully");
-
-    // 重要：传统欢迎页里会执行 EPD_4in26_Init()。
-    // 如果不初始化，后续 LVGL 的 EPD_4in26_Display() 可能不会生效，屏幕会保持旧画面。
-    ESP_LOGI("EPD", "Initializing EPD (BW)...");
+    // 初始化 EPD 硬件
     EPD_4in26_Init();
-
-    // 传统欢迎页已被 LVGL 版本替代
+    EPD_4in26_Clear();
 
     // Add delay before initializing high-power components to prevent brownout
     ESP_LOGI("MAIN", "Waiting 1 second before initializing BLE/WiFi to prevent brownout...");
@@ -1502,29 +1218,19 @@ void app_main(void)
     // LVGL GUI 初始化
     // ============================================================================
     ESP_LOGI("MAIN", "Initializing LVGL GUI system...");
-    
-    // 1. 重新初始化 Paint（使用已分配的 BlackImage）
-    // 旧版 welcome 使用 ROTATE_270（竖屏 480x800 逻辑坐标）。
-    // 这里保持一致，让 LVGL 的坐标也按竖屏布局来写。
-    Paint_NewImage(BlackImage, EPD_4in26_WIDTH, EPD_4in26_HEIGHT, ROTATE_270, WHITE);
-    Paint_SetRotate(ROTATE_270);
-    // 黑白：设置 scale=2（1bpp），并清屏为白色（WHITE）
-    Paint_SetScale(2);
-    Paint_Clear(WHITE);
-    ESP_LOGI("LVGL", "Paint buffer reinitialized for LVGL");
-    
-    // 2. 初始化 LVGL 显示驱动
+
+    // 1. 初始化 LVGL 显示驱动（framebuffer 在 lvgl_driver.c 中静态分配）
     lvgl_display_init();
-    
-    // 3. 初始化 LVGL 输入设备（按键）
+
+    // 2. 初始化 LVGL 输入设备（按键）
     lv_indev_t *indev = lvgl_input_init();
     (void)indev;
-    
-    // 4. 创建 LVGL tick 任务（10ms tick）
+
+    // 3. 创建 LVGL tick 任务（10ms tick）
     // 降低优先级到 3，避免阻塞 IDLE 任务
     xTaskCreate(lvgl_tick_task, "lvgl_tick", 2048, NULL, 3, NULL);
 
-    // 5. 创建欢迎屏幕（替代 display_welcome_screen）
+    // 4. 创建欢迎屏幕（替代 display_welcome_screen）
     ESP_LOGI("LVGL", "Creating welcome screen with system info...");
     lvgl_demo_create_welcome_screen(
         read_battery_voltage_mv(),
@@ -1533,7 +1239,7 @@ void app_main(void)
         VERSION_FULL
     );
 
-    // 6. 在启动 LVGL timer 任务之前，先在当前线程渲染一次。
+    // 5. 在启动 LVGL timer 任务之前，先在当前线程渲染一次。
     // 重要：LVGL 不是线程安全的，不能同时在多个任务里调用 lv_timer_handler/lv_task_handler。
     ESP_LOGI("LVGL", "Rendering UI (single-threaded) before starting LVGL timer task...");
     for (int i = 0; i < 6; i++) {
@@ -1541,21 +1247,21 @@ void app_main(void)
         vTaskDelay(30 / portTICK_PERIOD_MS);
     }
 
-    // 7. 刷新EPD显示
+    // 6. 刷新EPD显示
     ESP_LOGI("LVGL", "Refreshing EPD with welcome screen...");
     lvgl_display_refresh();
-    
-    // 8. 等待EPD刷新完成（约2秒）
+
+    // 7. 等待EPD刷新完成（约2秒）
     ESP_LOGI("LVGL", "Waiting for EPD refresh to complete...");
     vTaskDelay(2500 / portTICK_PERIOD_MS);
 
-    // 9. 创建 LVGL 定时器任务（处理 UI 更新）
+    // 8. 创建 LVGL 定时器任务（处理 UI 更新）
     // 放到初次渲染/EPD 刷新之后，避免与上面的 lv_timer_handler 并发。
     xTaskCreate(lvgl_timer_task, "lvgl_timer", 4096, NULL, 2, NULL);
-    
+
     ESP_LOGI("MAIN", "LVGL GUI initialized successfully!");
     ESP_LOGI("MAIN", "Use UP/DOWN buttons to navigate, CONFIRM to select");
-    
+
     ESP_LOGI("MAIN", "System initialized. LVGL is handling UI events.");
     ESP_LOGI("MAIN", "Main task ending, FreeRTOS tasks continue running...");
 }
@@ -2166,6 +1872,7 @@ static void display_file_browser(void) {
 /**
  * @brief 文件浏览器主界面（按键控制）
  */
+__attribute__((unused))
 static void file_browser_main(void) {
     ESP_LOGI("BROWSER", "Starting file browser at /sdcard");
 

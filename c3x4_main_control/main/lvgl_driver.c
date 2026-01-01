@@ -29,8 +29,9 @@ static const char *TAG = "LVGL_DRV";
 static lv_disp_draw_buf_t disp_buf;
 static lv_color_t buf1[DISP_HOR_RES * DISP_BUF_LINES];
 
-// EPD图像缓冲区（用于GUI_Paint）
-extern UBYTE *BlackImage;
+// 1bpp framebuffer for EPD (directly operated by LVGL)
+// 使用静态分配，避免依赖外部的 BlackImage
+static uint8_t s_epd_framebuffer[(EPD_WIDTH * EPD_HEIGHT) / 8];
 
 // Track the union of flushed areas since last EPD refresh.
 static lv_area_t s_dirty_area;
@@ -50,18 +51,37 @@ static void dirty_area_add(const lv_area_t *area)
     if (area->y2 > s_dirty_area.y2) s_dirty_area.y2 = area->y2;
 }
 
+// 直接写入 1bpp framebuffer 的辅助函数
+// 坐标映射：LVGL 逻辑坐标 (x, y) -> 物理屏幕坐标 (memX, memY) 使用 ROTATE_270
+static inline void set_epd_pixel(int32_t x, int32_t y, bool black)
+{
+    if (x < 0 || x >= DISP_HOR_RES || y < 0 || y >= DISP_VER_RES) return;
+
+    // ROTATE_270 映射: memX = y, memY = EPD_HEIGHT - 1 - x
+    const int32_t memX = y;
+    const int32_t memY = EPD_HEIGHT - 1 - x;
+
+    const uint32_t byte_index = (uint32_t)memY * (EPD_WIDTH / 8) + (uint32_t)(memX / 8);
+    const uint8_t bit_mask = 1 << (7 - (memX % 8));
+
+    if (black) {
+        s_epd_framebuffer[byte_index] |= bit_mask;  // Set bit = black
+    } else {
+        s_epd_framebuffer[byte_index] &= ~bit_mask; // Clear bit = white
+    }
+}
+
 // 显示刷新回调函数
 static void disp_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p)
 {
     int32_t x, y;
-    
-    ESP_LOGI(TAG, "Flushing area: x1=%d, y1=%d, x2=%d, y2=%d", 
+
+    ESP_LOGI(TAG, "Flushing area: x1=%d, y1=%d, x2=%d, y2=%d",
              area->x1, area->y1, area->x2, area->y2);
-    
-    // 将 LVGL 的缓冲区数据写入到 EPD 的图像缓冲区。
-    // 注意：坐标为 LVGL 逻辑坐标（竖屏 480x800）。
-    // Paint 已在 main.c 中配置为 ROTATE_270，因此 Paint_SetPixel 会负责映射到物理屏幕。
-    // 黑白：把 LVGL 的颜色（RGB565）阈值化为 BLACK/WHITE。
+
+    // 将 LVGL 的缓冲区数据直接写入到 1bpp framebuffer。
+    // 坐标为 LVGL 逻辑坐标（竖屏 480x800）。
+    // 使用 set_epd_pixel 直接操作 framebuffer，无需 Paint 层。
     for (y = area->y1; y <= area->y2; y++) {
         for (x = area->x1; x <= area->x2; x++) {
             // RGB565 -> 亮度 (0..255)
@@ -78,15 +98,15 @@ static void disp_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_col
 
             // 阈值：亮->白，暗->黑
             // 经验值：128 在多数 UI 上对比更清晰；如需更黑可降到 150~170。
-            const UWORD bw = (y8 >= 128) ? WHITE : BLACK;
-            Paint_SetPixel(x, y, bw);
+            const bool black = (y8 < 128);
+            set_epd_pixel(x, y, black);
             color_p++;
         }
     }
 
     // Record dirty area for partial EPD refresh later.
     dirty_area_add(area);
-    
+
     // 通知LVGL刷新完成
     lv_disp_flush_ready(disp_drv);
 }
@@ -145,7 +165,7 @@ void lvgl_display_refresh(void)
 
     if (s_dirty_valid) {
         // LVGL logical coords: 480x800 with ROTATE_270 mapping.
-        // Paint mapping (ROTATE_270): memX = y, memY = (EPD_HEIGHT - 1 - x)
+        // Physical mapping (ROTATE_270): memX = y, memY = (EPD_HEIGHT - 1 - x)
         int32_t mem_x1 = s_dirty_area.y1;
         int32_t mem_x2 = s_dirty_area.y2;
         int32_t mem_y1 = (EPD_HEIGHT - 1) - s_dirty_area.x2;
@@ -156,7 +176,7 @@ void lvgl_display_refresh(void)
             mem_y2 = tmp;
         }
 
-        // Align to 8 pixels along the physical X axis for safe 2bpp->1bpp conversion.
+        // Align to 8 pixels along the physical X axis for safe 1bpp conversion.
         mem_x1 = mem_x1 & ~0x7;
         mem_x2 = (mem_x2 + 7) & ~0x7;
 
@@ -172,7 +192,7 @@ void lvgl_display_refresh(void)
         const uint32_t screen_area = (uint32_t)EPD_WIDTH * (uint32_t)EPD_HEIGHT;
         const uint32_t dirty_area = mem_w * mem_h;
         if (dirty_area > (screen_area * 2) / 5) {
-            EPD_4in26_Display(BlackImage);
+            EPD_4in26_Display(s_epd_framebuffer);
         } else {
             // BW partial: crop the 1bpp framebuffer window into a contiguous buffer
             // and use the driver's BW partial update API.
@@ -186,14 +206,14 @@ void lvgl_display_refresh(void)
             UBYTE *bw = (UBYTE *)malloc(out_size);
             if (!bw) {
                 ESP_LOGW(TAG, "BW partial buffer alloc failed (%u bytes); falling back to full refresh", (unsigned)out_size);
-                EPD_4in26_Display(BlackImage);
+                EPD_4in26_Display(s_epd_framebuffer);
             } else {
                 const uint32_t in_stride = (uint32_t)(EPD_WIDTH / 8);
                 const uint32_t in_x_byte = (uint32_t)(x0 / 8);
 
                 for (UWORD row = 0; row < h0; row++) {
                     const uint32_t in_base = (uint32_t)(y0 + row) * in_stride + in_x_byte;
-                    memcpy(bw + (uint32_t)row * out_stride, BlackImage + in_base, out_stride);
+                    memcpy(bw + (uint32_t)row * out_stride, s_epd_framebuffer + in_base, out_stride);
                 }
 
                 ESP_LOGI(TAG, "BW partial refresh: x=%u y=%u w=%u h=%u", (unsigned)x0, (unsigned)y0, (unsigned)w0, (unsigned)h0);
@@ -205,9 +225,9 @@ void lvgl_display_refresh(void)
         s_dirty_valid = false;
     } else {
         // No dirty area recorded; do a full refresh.
-        EPD_4in26_Display(BlackImage);
+        EPD_4in26_Display(s_epd_framebuffer);
     }
-    
+
     // 不再阻塞等待，让 EPD 异步刷新
     // EPD 刷新大约需要 2 秒，但我们不需要等待
     ESP_LOGI(TAG, "EPD refresh started (async)");
