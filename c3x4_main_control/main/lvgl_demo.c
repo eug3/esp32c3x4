@@ -501,11 +501,15 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     welcome_last_epd_refresh_ms = lv_tick_get();
 
     // 获取输入设备并设置组
-    lv_indev_t *indev = lv_indev_get_next(NULL);
-    if (indev) {
-        lv_indev_set_group(indev, group);
-        ESP_LOGI(TAG, "Input device group set for welcome screen");
+    uint32_t bound = 0;
+    for (lv_indev_t *indev = lv_indev_get_next(NULL); indev != NULL; indev = lv_indev_get_next(indev)) {
+        const lv_indev_type_t t = lv_indev_get_type(indev);
+        if (t == LV_INDEV_TYPE_KEYPAD || t == LV_INDEV_TYPE_ENCODER) {
+            lv_indev_set_group(indev, group);
+            bound++;
+        }
     }
+    ESP_LOGI(TAG, "Input device group set for welcome screen (bound=%u)", (unsigned)bound);
 
     ESP_LOGI(TAG, "Welcome screen created successfully");
 }

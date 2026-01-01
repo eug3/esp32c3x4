@@ -250,6 +250,10 @@ static button_state_t btn_state = {
     .point = {0, 0}
 };
 
+// LVGL keypad expects the last key to be reported even on RELEASED.
+// If key is cleared to 0 too early, some widgets/group navigation may not receive KEY events reliably.
+static uint32_t s_last_lvgl_key = 0;
+
 // 输入设备读取回调
 static void keypad_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
 {
@@ -298,13 +302,15 @@ static void keypad_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
         }
 
         data->state = LV_INDEV_STATE_PRESSED;
+        s_last_lvgl_key = data->key;
         ESP_LOGI(TAG, "Key pressed: %d -> LVGL key: %d", btn, (int)data->key);
     } else if (btn == BTN_NONE && btn_state.pressed) {
         // 按键释放
         btn_state.pressed = false;
         btn_state.last_key = BTN_NONE;
         data->state = LV_INDEV_STATE_RELEASED;
-        data->key = 0;
+        // Keep reporting the last key on release.
+        data->key = s_last_lvgl_key;
         ESP_LOGI(TAG, "Key released");
     } else if (btn_state.pressed && btn_state.last_key != BTN_NONE) {
         // 按键持续按下 - 保持发送相同的 key
@@ -332,10 +338,11 @@ static void keypad_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
                 break;
         }
         data->state = LV_INDEV_STATE_PRESSED;
+        s_last_lvgl_key = data->key;
     } else {
         // 无按键
         data->state = LV_INDEV_STATE_RELEASED;
-        data->key = 0;
+        data->key = s_last_lvgl_key;
     }
 
     data->continue_reading = false;
