@@ -30,9 +30,14 @@ button_t get_pressed_button(void);
 lv_display_t* lvgl_display_init(void);
 
 /**
- * @brief 刷新EPD显示
+ * @brief 刷新EPD显示（异步，非阻塞）
  */
 void lvgl_display_refresh(void);
+
+/**
+ * @brief 强制完整刷新EPD（异步，非阻塞）
+ */
+void lvgl_display_refresh_full(void);
 
 /**
  * @brief 初始化LVGL输入设备驱动

@@ -108,15 +108,13 @@ parameter:
 ******************************************************************************/
 void EPD_4in26_ReadBusy(void)
 {
-    Debug("e-Paper busy\r\n");
 	while(1)
 	{	 //=1 BUSY
-		if(DEV_Digital_Read(EPD_BUSY_PIN)==0) 
+		if(DEV_Digital_Read(EPD_BUSY_PIN)==0)
 			break;
 		DEV_Delay_ms(20);
 	}
 	DEV_Delay_ms(20);
-    Debug("e-Paper busy release\r\n");
 }
 
 /******************************************************************************
@@ -423,13 +421,23 @@ void EPD_4in26_Display(UBYTE *Image)
 	UWORD i;
 	UWORD height = EPD_4in26_HEIGHT;
 	UWORD width = EPD_4in26_WIDTH/8;
-	
+
+	// 写入当前图像缓冲区 (0x24)
 	EPD_4in26_SendCommand(0x24);   //write RAM for black(0)/white (1)
 	for(i=0; i<height; i++)
 	{
         EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
 	}
-	EPD_4in26_TurnOnDisplay();	
+
+	// 同时写入上一帧缓冲区 (0x26)，确保局部刷新时对比正确
+	// 这是关键：如果不写 0x26，局部刷新会和旧数据对比，导致显示错误
+	EPD_4in26_SendCommand(0x26);   //write RAM for previous frame
+	for(i=0; i<height; i++)
+	{
+        EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
+	}
+
+	EPD_4in26_TurnOnDisplay();
 }
 
 void EPD_4in26_Display_Base(UBYTE *Image)
@@ -472,12 +480,13 @@ void EPD_4in26_Display_Part(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD l)
 	UWORD height = l;
 	UWORD width =  (w % 8 == 0)? (w / 8 ): (w / 8 + 1);
 
-    EPD_4in26_Reset();
+	// 移除 EPD_4in26_Reset() - 避免清除 EPD 内部状态导致鬼影
+	// 局刷不需要硬件复位，EPD 在全刷后已正确初始化
 
 	EPD_4in26_SendCommand(0x18); // use the internal temperature sensor
 	EPD_4in26_SendData(0x80);
 
-	EPD_4in26_SendCommand(0x3C);        // Border       Border setting 
+	EPD_4in26_SendCommand(0x3C);        // Border       Border setting
 	EPD_4in26_SendData(0x80);
 
 	EPD_4in26_SetWindows(x, y, x+w-1, y+l-1);
@@ -489,7 +498,46 @@ void EPD_4in26_Display_Part(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD l)
 	{
 		EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
 	}
-	EPD_4in26_TurnOnDisplay_Part();	
+	EPD_4in26_TurnOnDisplay_Part();
+}
+
+// 优化：流式发送局部刷新
+// 直接从完整的 framebuffer 按行发送，避免使用中间缓冲区
+// 参数：
+//   full_framebuffer: 完整的 800x480 framebuffer
+//   x, y: 局部刷新区域的起始坐标
+//   w, h: 局部刷新区域的宽度和高度
+//   fb_stride: framebuffer 的行字节宽度 (800/8 = 100)
+//   x_offset: 起始 x 坐标的字节偏移 (x/8)
+//   row_stride: 局部区域的行字节宽度 ((w+7)/8)
+void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, UWORD x, UWORD y, UWORD w, UWORD h,
+                                     uint32_t fb_stride, uint32_t x_offset, UWORD row_stride)
+{
+	UWORD i;
+
+	// 移除 EPD_4in26_Reset() - 避免清除 EPD 内部状态导致鬼影
+	// 局刷不需要硬件复位，EPD 在全刷后已正确初始化
+
+	EPD_4in26_SendCommand(0x18); // use the internal temperature sensor
+	EPD_4in26_SendData(0x80);
+
+	EPD_4in26_SendCommand(0x3C);        // Border       Border setting
+	EPD_4in26_SendData(0x80);
+
+	EPD_4in26_SetWindows(x, y, x+w-1, y+h-1);
+
+	EPD_4in26_SetCursor(x, y);
+
+	EPD_4in26_SendCommand(0x24);   //write RAM for black(0)/white (1)
+
+	// 流式发送：直接从 framebuffer 逐行发送
+	for(i=0; i<h; i++)
+	{
+		// 计算当前行在 framebuffer 中的起始位置
+		UBYTE *row_ptr = full_framebuffer + (y + i) * fb_stride + x_offset;
+		EPD_4in26_SendData2(row_ptr, row_stride);
+	}
+	EPD_4in26_TurnOnDisplay_Part();
 }
 
 void EPD_4in26_4GrayDisplay(UBYTE *Image)
@@ -533,7 +581,6 @@ void EPD_4in26_4GrayDisplay(UBYTE *Image)
 
         }
         EPD_4in26_SendData(temp3);
-        // printf("%x",temp3);
     }
 
     EPD_4in26_SendCommand(0x26);   //write RAM for black(0)/white (1)
@@ -570,7 +617,6 @@ void EPD_4in26_4GrayDisplay(UBYTE *Image)
             }
         }
         EPD_4in26_SendData(temp3);
-        // printf("%x",temp3);
     }
 
     EPD_4in26_TurnOnDisplay_4GRAY();

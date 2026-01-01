@@ -48,5 +48,10 @@ void EPD_4in26_Display_Part(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD l);
 void EPD_4in26_4GrayDisplay(UBYTE *Image);
 void EPD_4in26_Sleep(void);
 
+// 优化：流式发送局部刷新，避免使用中间缓冲区
+// 直接从完整的 framebuffer 按行发送数据到 EPD
+void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, UWORD x, UWORD y, UWORD w, UWORD h,
+                                    uint32_t fb_stride, uint32_t x_offset, UWORD row_stride);
+
 
 #endif

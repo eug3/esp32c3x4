@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ESP32 EPD Control</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .status {
+            background-color: #f0f0f0;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        .status p {
+            margin: 10px 0;
+            font-size: 16px;
+        }
+        .btns {
+            margin: 20px 0;
+        }
+        .btns button {
+            padding: 12px 24px;
+            margin: 0 8px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            background-color: #4CAF50;
+            color: white;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .btns button:hover {
+            background-color: #45a049;
+        }
+        .btns button:active {
+            background-color: #3d8b40;
+        }
+        #jsonDisplay {
+            border: 1px solid #ddd;
+            max-width: 100%;
+            height: 500px;
+            overflow: auto;
+            background: #fff;
+            text-align: left;
+            padding: 15px;
+            white-space: pre-wrap;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            border-radius: 5px;
+            margin-top: 15px;
+        }
+        .ble-connected { color: green; font-weight: bold; }
+        .ble-disconnected { color: orange; }
+        .ble-error { color: red; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>ESP32 EPD Control System</h1>
+
+        <div class="status">
+            <h2>System Status</h2>
+            <p id="bleStatus">BLE: Checking...</p>
+            <p>BLE MAC: <span id="bleMac">Loading...</span></p>
+            <p>WiFi: Connected</p>
+
+            <div class="btns">
+                <button onclick="sendCmd('prev')">Previous</button>
+                <button onclick="sendCmd('next')">Next</button>
+                <button onclick="sendCmd('capture')">Refresh</button>
+            </div>
+
+            <p id="imgStatus">Layout: (unknown)</p>
+            <div id="jsonDisplay">Waiting for layout data...</div>
+        </div>
+    </div>
+
+    <script>
+        const statusEl = document.getElementById('imgStatus');
+        const bleStatusEl = document.getElementById('bleStatus');
+        const bleMacEl = document.getElementById('bleMac');
+        const jsonDisplayEl = document.getElementById('jsonDisplay');
+
+        // Fetch BLE MAC address from server
+        fetch('/cmd?cmd=get_ble_mac')
+            .then(r => r.json())
+            .then(data => {
+                if (data.ble_mac) {
+                    bleMacEl.textContent = data.ble_mac;
+                }
+            })
+            .catch(e => {
+                bleMacEl.textContent = 'Error';
+            });
+
+        async function sendCmd(cmd) {
+            try {
+                await fetch('/cmd?cmd=' + encodeURIComponent(cmd));
+            } catch(e) {
+                console.error('Command failed:', e);
+            }
+            pollAndRender();
+        }
+
+        async function checkBleStatus() {
+            try {
+                const st = await (await fetch('/cmd?cmd=ble_status')).json();
+                let statusText = 'BLE: ';
+                let statusClass = 'ble-disconnected';
+
+                if (st.ble_connected) {
+                    statusText += 'Connected to ' + st.peer_addr;
+                    statusClass = 'ble-connected';
+                } else if (st.ble_advertising) {
+                    statusText += 'Advertising...';
+                } else {
+                    statusText += 'Disconnected';
+                }
+
+                bleStatusEl.textContent = statusText;
+                bleStatusEl.className = statusClass;
+            } catch(e) {
+                bleStatusEl.textContent = 'BLE: Error checking status';
+                bleStatusEl.className = 'ble-error';
+            }
+        }
+
+        async function renderJson() {
+            try {
+                const json = await (await fetch('/cmd?cmd=get_layout')).text();
+                if (json && json.length > 0) {
+                    jsonDisplayEl.textContent = json;
+                    statusEl.textContent = 'Layout: Loaded (' + json.length + ' bytes)';
+                } else {
+                    jsonDisplayEl.textContent = 'No layout data';
+                    statusEl.textContent = 'Layout: No data';
+                }
+            } catch(e) {
+                jsonDisplayEl.textContent = 'Error loading layout: ' + e;
+                statusEl.textContent = 'Layout: Error';
+            }
+        }
+
+        async function pollAndRender() {
+            await renderJson();
+            checkBleStatus();
+        }
+
+        // Poll every 2 seconds
+        setInterval(pollAndRender, 2000);
+        pollAndRender();
+    </script>
+</body>
+</html>

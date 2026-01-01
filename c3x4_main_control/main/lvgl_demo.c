@@ -11,8 +11,7 @@
 
 static const char *TAG = "LVGL_DEMO";
 
-// UI对象
-static lv_obj_t *main_screen = NULL;
+// UI对象 (未使用，已移除以节省内存)
 
 // Welcome screen helpers (EPD refresh scheduling)
 static lv_timer_t *welcome_refresh_timer = NULL;
@@ -62,13 +61,29 @@ static void welcome_activate_menu(uint16_t menu_index)
 
 static void welcome_btnm_set_selected(lv_obj_t *btnm, uint16_t new_index)
 {
-    if (btnm == NULL) return;
-    if (new_index > 2) return;
+    if (btnm == NULL) {
+        ESP_LOGW(TAG, "ERROR: welcome_menu_btnm is NULL, cannot set selection");
+        return;
+    }
+    
+    if (new_index > 2) {
+        ESP_LOGW(TAG, "ERROR: new_index=%u exceeds menu size (0-2)", new_index);
+        return;
+    }
 
-    lv_btnmatrix_clear_btn_ctrl(btnm, welcome_menu_selected, LV_BTNMATRIX_CTRL_CHECKED);
+    uint16_t old_index = welcome_menu_selected;
+    
+    // Clear old selection
+    lv_btnmatrix_clear_btn_ctrl(btnm, old_index, LV_BTNMATRIX_CTRL_CHECKED);
+    
+    // Update global state
     welcome_menu_selected = new_index;
+    
+    // Set new selection
     lv_btnmatrix_set_selected_btn(btnm, welcome_menu_selected);
     lv_btnmatrix_set_btn_ctrl(btnm, welcome_menu_selected, LV_BTNMATRIX_CTRL_CHECKED);
+    
+    ESP_LOGD(TAG, "Menu selection changed: %u -> %u", old_index, new_index);
 }
 
 static void welcome_menu_btnm_event_cb(lv_event_t *e)
@@ -76,8 +91,11 @@ static void welcome_menu_btnm_event_cb(lv_event_t *e)
     const lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t *btnm = lv_event_get_target(e);
 
-    // 只记录 KEY 事件，减少日志输出
-    // ESP_LOGI(TAG, "Event received: code=%d", code);
+    // 检查btnm有效性
+    if (btnm == NULL) {
+        ESP_LOGW(TAG, "Event callback: btnm is NULL");
+        return;
+    }
 
     // FOCUSED/DEFOCUSED 事件：触发 EPD 刷新
     if (code == LV_EVENT_FOCUSED || code == LV_EVENT_DEFOCUSED) {
@@ -89,25 +107,27 @@ static void welcome_menu_btnm_event_cb(lv_event_t *e)
     if (code == LV_EVENT_KEY) {
         const uint32_t key = lv_event_get_key(e);
 
-        // 向上选择（按键5：音量+）
-        if (key == LV_KEY_UP) {
-            ESP_LOGI(TAG, "Key UP: select item %d -> %d", welcome_menu_selected,
-                     welcome_menu_selected > 0 ? welcome_menu_selected - 1 : 0);
-            if (welcome_menu_selected > 0) {
-                welcome_btnm_set_selected(btnm, welcome_menu_selected - 1);
-                welcome_schedule_epd_refresh(250);
-            }
+        // 检查key有效性
+        if (key == 0) {
+            ESP_LOGW(TAG, "Received invalid key (0)");
             return;
         }
 
-        // 向下选择（按键6：音量-）
+        // 向上选择（按键5：音量+）- 循环滚动
+        if (key == LV_KEY_UP) {
+            uint16_t new_index = welcome_menu_selected > 0 ? welcome_menu_selected - 1 : 2;
+            ESP_LOGI(TAG, "Key UP: select item %d -> %d", welcome_menu_selected, new_index);
+            welcome_btnm_set_selected(btnm, new_index);
+            welcome_schedule_epd_refresh(250);
+            return;
+        }
+
+        // 向下选择（按键6：音量-）- 循环滚动
         if (key == LV_KEY_DOWN) {
-            ESP_LOGI(TAG, "Key DOWN: select item %d -> %d", welcome_menu_selected,
-                     welcome_menu_selected < 2 ? welcome_menu_selected + 1 : 2);
-            if (welcome_menu_selected < 2) {
-                welcome_btnm_set_selected(btnm, welcome_menu_selected + 1);
-                welcome_schedule_epd_refresh(250);
-            }
+            uint16_t new_index = welcome_menu_selected < 2 ? welcome_menu_selected + 1 : 0;
+            ESP_LOGI(TAG, "Key DOWN: select item %d -> %d", welcome_menu_selected, new_index);
+            welcome_btnm_set_selected(btnm, new_index);
+            welcome_schedule_epd_refresh(250);
             return;
         }
 
@@ -125,18 +145,46 @@ static void welcome_menu_btnm_event_cb(lv_event_t *e)
             welcome_schedule_epd_refresh(250);
             return;
         }
+
+        // 未知的KEY事件
+        ESP_LOGW(TAG, "Unknown key event: %u", (unsigned)key);
+        return;
     }
 
     // 处理点击事件
     if (code == LV_EVENT_VALUE_CHANGED || code == LV_EVENT_CLICKED) {
         const uint16_t sel = lv_btnmatrix_get_selected_btn(btnm);
-        if (sel <= 2) {
-            welcome_btnm_set_selected(btnm, sel);
+        
+        // 添加范围检查
+        if (sel > 2) {
+            ESP_LOGW(TAG, "Invalid button selection: %u (expected 0-2)", sel);
+            return;
         }
+        
+        ESP_LOGD(TAG, "Button selection event: sel=%u", sel);
+        welcome_btnm_set_selected(btnm, sel);
         welcome_activate_menu(welcome_menu_selected);
         welcome_schedule_epd_refresh(250);
         return;
     }
+}
+
+// 屏幕销毁回调 - 清理资源和状态
+static void welcome_screen_destroy_cb(lv_event_t *e)
+{
+    (void)e;
+    ESP_LOGI(TAG, "Welcome screen destroyed, resetting state");
+    
+    // 重置全局状态
+    welcome_menu_selected = 0;
+    welcome_menu_btnm = NULL;
+    
+    // 停止刷新定时器
+    if (welcome_refresh_timer != NULL) {
+        lv_timer_delete(welcome_refresh_timer);
+        welcome_refresh_timer = NULL;
+    }
+    welcome_last_epd_refresh_ms = 0;
 }
 
 // 创建主屏幕（Monster For Pan 菜单）
@@ -148,8 +196,11 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     lv_obj_t *screen = lv_obj_create(NULL);
     lv_scr_load(screen);
 
-    // 设置背景为黑色
-    lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
+    // 注册屏幕销毁回调 - 清理资源和状态
+    lv_obj_add_event_cb(screen, welcome_screen_destroy_cb, LV_EVENT_DELETE, NULL);
+
+    // 设置背景为白色（EPD 默认背景）
+    lv_obj_set_style_bg_color(screen, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(screen, 0, 0);
     lv_obj_set_style_pad_all(screen, 0, 0);
@@ -161,14 +212,14 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     lv_obj_t *title = lv_label_create(screen);
     lv_label_set_text(title, "Monster For Pan");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_set_style_text_color(title, lv_color_black(), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 12);
 
     // 副标题 "ESP32-C3 System"
     lv_obj_t *subtitle = lv_label_create(screen);
     lv_label_set_text(subtitle, "ESP32-C3 System");
     lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(subtitle, lv_color_white(), 0);
+    lv_obj_set_style_text_color(subtitle, lv_color_black(), 0);
     lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 40);
 
     // 顶部分隔线
@@ -176,7 +227,7 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     static lv_point_precise_t line_top_points[] = {{10, 70}, {470, 70}};
     lv_line_set_points(line_top, line_top_points, 2);
     lv_obj_set_style_line_width(line_top, 2, 0);
-    lv_obj_set_style_line_color(line_top, lv_color_white(), 0);
+    lv_obj_set_style_line_color(line_top, lv_color_black(), 0);
     lv_obj_set_style_line_opa(line_top, LV_OPA_COVER, 0);
 
     // ========================================
@@ -185,7 +236,7 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     lv_obj_t *info_label = lv_label_create(screen);
     lv_label_set_text(info_label, "System Info:");
     lv_obj_set_style_text_font(info_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(info_label, lv_color_white(), 0);
+    lv_obj_set_style_text_color(info_label, lv_color_black(), 0);
     lv_obj_align(info_label, LV_ALIGN_TOP_LEFT, 20, 85);
 
     // 电池信息
@@ -194,14 +245,14 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     lv_obj_t *bat_label = lv_label_create(screen);
     lv_label_set_text(bat_label, bat_str);
     lv_obj_set_style_text_font(bat_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(bat_label, lv_color_white(), 0);
+    lv_obj_set_style_text_color(bat_label, lv_color_black(), 0);
     lv_obj_align(bat_label, LV_ALIGN_TOP_LEFT, 20, 108);
 
     // 充电状态
     lv_obj_t *status_label = lv_label_create(screen);
     lv_label_set_text(status_label, charging ? "Status: Charging" : "Status: On Battery");
     lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(status_label, lv_color_white(), 0);
+    lv_obj_set_style_text_color(status_label, lv_color_black(), 0);
     lv_obj_align(status_label, LV_ALIGN_TOP_LEFT, 20, 128);
 
     // ========================================
@@ -212,16 +263,16 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     static lv_point_precise_t line_menu_points[] = {{10, 158}, {470, 158}};
     lv_line_set_points(line_menu, line_menu_points, 2);
     lv_obj_set_style_line_width(line_menu, 1, 0);
-    lv_obj_set_style_line_color(line_menu, lv_color_white(), 0);
+    lv_obj_set_style_line_color(line_menu, lv_color_black(), 0);
     lv_obj_set_style_line_opa(line_menu, LV_OPA_COVER, 0);
 
     lv_obj_t *menu_title = lv_label_create(screen);
     lv_label_set_text(menu_title, "Main Menu:");
     lv_obj_set_style_text_font(menu_title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(menu_title, lv_color_white(), 0);
+    lv_obj_set_style_text_color(menu_title, lv_color_black(), 0);
     lv_obj_align(menu_title, LV_ALIGN_TOP_LEFT, 20, 170);
 
-    // Menu: use btnmatrix so there are NO per-item label objects to style.
+    // Menu: use btnmatrix
     static const char *welcome_btnm_map[] = {
         "1. File Browser", "\n",
         "2. BLE Reader", "\n",
@@ -230,33 +281,29 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
 
     welcome_menu_btnm = lv_btnmatrix_create(screen);
     lv_btnmatrix_set_map(welcome_menu_btnm, welcome_btnm_map);
-    lv_obj_set_size(welcome_menu_btnm, 420, 200);
-    lv_obj_align(welcome_menu_btnm, LV_ALIGN_TOP_LEFT, 30, 200);
+    lv_obj_set_size(welcome_menu_btnm, 440, 200);
+    lv_obj_align(welcome_menu_btnm, LV_ALIGN_TOP_LEFT, 20, 200);
 
-    lv_obj_set_style_bg_color(welcome_menu_btnm, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(welcome_menu_btnm, LV_OPA_COVER, 0);
+    // Minimal styling - just padding and text properties
+    lv_obj_set_style_pad_all(welcome_menu_btnm, 4, 0);
+    lv_obj_set_style_pad_row(welcome_menu_btnm, 10, 0);
+    lv_obj_set_style_pad_column(welcome_menu_btnm, 0, 0);
     lv_obj_set_style_border_width(welcome_menu_btnm, 0, 0);
-    lv_obj_set_style_pad_all(welcome_menu_btnm, 6, 0);
-    lv_obj_set_style_pad_row(welcome_menu_btnm, 12, 0);
-    lv_obj_set_style_pad_column(welcome_menu_btnm, 12, 0);
+    lv_obj_set_style_radius(welcome_menu_btnm, 0, 0);
 
-    // Items (buttons) - default state (黑底白字，无边框，文字靠左)
-    lv_obj_set_style_text_font(welcome_menu_btnm, &lv_font_montserrat_14, LV_PART_ITEMS | LV_STATE_DEFAULT);
+    // Button items - default state (白底黑字)
+    lv_obj_set_style_bg_color(welcome_menu_btnm, lv_color_white(), LV_PART_ITEMS | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(welcome_menu_btnm, LV_OPA_COVER, LV_PART_ITEMS | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(welcome_menu_btnm, lv_color_black(), LV_PART_ITEMS | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(welcome_menu_btnm, lv_color_white(), LV_PART_ITEMS | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(welcome_menu_btnm, 0, LV_PART_ITEMS | LV_STATE_DEFAULT);
-    lv_obj_set_style_radius(welcome_menu_btnm, 0, LV_PART_ITEMS | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_align(welcome_menu_btnm, LV_TEXT_ALIGN_LEFT, LV_PART_ITEMS | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(welcome_menu_btnm, lv_color_black(), LV_PART_ITEMS | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(welcome_menu_btnm, &lv_font_montserrat_14, LV_PART_ITEMS);
+    lv_obj_set_style_text_align(welcome_menu_btnm, LV_TEXT_ALIGN_LEFT, LV_PART_ITEMS);
 
-    // Selected/checked item: 白底黑字 (反转，无边框，文字靠左)
-    lv_obj_set_style_bg_color(welcome_menu_btnm, lv_color_white(), LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_set_style_text_color(welcome_menu_btnm, lv_color_black(), LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_set_style_border_width(welcome_menu_btnm, 0, LV_PART_ITEMS | LV_STATE_CHECKED);
+    // Checked/selected item: 黑底白字 (反转)
+    lv_obj_set_style_bg_color(welcome_menu_btnm, lv_color_black(), LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_text_color(welcome_menu_btnm, lv_color_white(), LV_PART_ITEMS | LV_STATE_CHECKED);
     lv_obj_set_style_radius(welcome_menu_btnm, 0, LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_set_style_text_align(welcome_menu_btnm, LV_TEXT_ALIGN_LEFT, LV_PART_ITEMS | LV_STATE_CHECKED);
 
-    // Make buttons checkable and keep only one checked
+    // Make buttons checkable
     lv_btnmatrix_set_btn_ctrl_all(welcome_menu_btnm, LV_BTNMATRIX_CTRL_CHECKABLE);
     lv_btnmatrix_set_one_checked(welcome_menu_btnm, true);
 
@@ -272,26 +319,26 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
     static lv_point_precise_t line_bottom_points[] = {{10, 720}, {470, 720}};
     lv_line_set_points(line_bottom, line_bottom_points, 2);
     lv_obj_set_style_line_width(line_bottom, 2, 0);
-    lv_obj_set_style_line_color(line_bottom, lv_color_white(), 0);
+    lv_obj_set_style_line_color(line_bottom, lv_color_black(), 0);
     lv_obj_set_style_line_opa(line_bottom, LV_OPA_COVER, 0);
 
     // 操作提示
     lv_obj_t *hint1 = lv_label_create(screen);
     lv_label_set_text(hint1, "Vol+/-: Select menu");
     lv_obj_set_style_text_font(hint1, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(hint1, lv_color_white(), 0);
+    lv_obj_set_style_text_color(hint1, lv_color_black(), 0);
     lv_obj_align(hint1, LV_ALIGN_TOP_LEFT, 20, 730);
 
     lv_obj_t *hint2 = lv_label_create(screen);
     lv_label_set_text(hint2, "Confirm(3): Enter");
     lv_obj_set_style_text_font(hint2, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(hint2, lv_color_white(), 0);
+    lv_obj_set_style_text_color(hint2, lv_color_black(), 0);
     lv_obj_align(hint2, LV_ALIGN_TOP_LEFT, 20, 750);
 
     lv_obj_t *hint3 = lv_label_create(screen);
     lv_label_set_text(hint3, "Back(4): Return");
     lv_obj_set_style_text_font(hint3, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(hint3, lv_color_white(), 0);
+    lv_obj_set_style_text_color(hint3, lv_color_black(), 0);
     lv_obj_align(hint3, LV_ALIGN_TOP_LEFT, 20, 770);
 
     // 版本信息 (右下角)
@@ -299,7 +346,7 @@ void lvgl_demo_create_welcome_screen(uint32_t battery_mv, uint8_t battery_pct, b
         lv_obj_t *version_label = lv_label_create(screen);
         lv_label_set_text(version_label, version_str);
         lv_obj_set_style_text_font(version_label, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(version_label, lv_color_white(), 0);
+        lv_obj_set_style_text_color(version_label, lv_color_black(), 0);
         lv_obj_align(version_label, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
     }
 

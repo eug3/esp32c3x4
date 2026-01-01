@@ -197,30 +197,40 @@ button_t get_pressed_button(void) {
     btn1 /= 3;
     btn2 /= 3;
 
+    // 调试：记录上一次的按钮状态
+    static button_t last_btn = BTN_NONE;
+
+    button_t detected_btn = BTN_NONE;  // 预先检测按钮
+
     // 检查电源按钮 (数字输入)
     if (gpio_get_level(BTN_GPIO3) == 0) {
-        return BTN_POWER;
+        detected_btn = BTN_POWER;
     }
-
     // 检查 BTN_GPIO1 (4个按钮通过电阻分压)
-    if (btn1 < BTN_RIGHT_VAL + BTN_THRESHOLD) {
-        return BTN_RIGHT;
+    else if (btn1 < BTN_RIGHT_VAL + BTN_THRESHOLD) {
+        detected_btn = BTN_RIGHT;
     } else if (btn1 < BTN_LEFT_VAL + BTN_THRESHOLD) {
-        return BTN_LEFT;
+        detected_btn = BTN_LEFT;
     } else if (btn1 < BTN_CONFIRM_VAL + BTN_THRESHOLD) {
-        return BTN_CONFIRM;
+        detected_btn = BTN_CONFIRM;
     } else if (btn1 < BTN_BACK_VAL + BTN_THRESHOLD) {
-        return BTN_BACK;
+        detected_btn = BTN_BACK;
     }
-
     // 检查 BTN_GPIO2 (2个按钮通过电阻分压)
-    if (btn2 < BTN_VOLUME_DOWN_VAL + BTN_THRESHOLD) {
-        return BTN_VOLUME_DOWN;
+    else if (btn2 < BTN_VOLUME_DOWN_VAL + BTN_THRESHOLD) {
+        detected_btn = BTN_VOLUME_DOWN;
     } else if (btn2 < BTN_VOLUME_UP_VAL + BTN_THRESHOLD) {
-        return BTN_VOLUME_UP;
+        detected_btn = BTN_VOLUME_UP;
     }
 
-    return BTN_NONE;
+    // 只在按钮变化时打印（调试用）
+    if (detected_btn != last_btn) {
+        ESP_LOGD("BTN_ADC", "GPIO1=%4d, GPIO2=%4d | Detected: %d (%s)",
+                 btn1, btn2, detected_btn, get_button_name(detected_btn));
+        last_btn = detected_btn;
+    }
+
+    return detected_btn;
 }
 
 // 初始化按钮和ADC - ESP-IDF 6.1
@@ -1248,13 +1258,13 @@ void app_main(void)
         vTaskDelay(30 / portTICK_PERIOD_MS);
     }
 
-    // 6. 刷新EPD显示
-    ESP_LOGI("LVGL", "Refreshing EPD with welcome screen...");
+    // 6. 刷新EPD显示（异步，非阻塞）
+    ESP_LOGI("LVGL", "Refreshing EPD with welcome screen (async)...");
     lvgl_display_refresh();
 
-    // 7. 等待EPD刷新完成（约2秒）
-    ESP_LOGI("LVGL", "Waiting for EPD refresh to complete...");
-    vTaskDelay(2500 / portTICK_PERIOD_MS);
+    // 7. 等待EPD刷新完成（异步刷新在后台进行）
+    ESP_LOGI("LVGL", "EPD refresh started in background, continuing initialization...");
+    vTaskDelay(500 / portTICK_PERIOD_MS);  // 短暂等待确保刷新任务已启动
 
     // 8. 创建 LVGL 定时器任务（处理 UI 更新）
     // 放到初次渲染/EPD 刷新之后，避免与上面的 lv_timer_handler 并发。
@@ -1268,100 +1278,59 @@ void app_main(void)
 }
 
 // HTTP server functions
-// Large HTML content moved to global constant to avoid stack overflow
-static const char* html_template =
-    "<!DOCTYPE html>"
-    "<html>"
-    "<head>"
-    "<title>ESP32 EPD Control</title>"
-    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-    "<style>"
-    "body { font-family: Arial, sans-serif; text-align: center; margin: 20px; }"
-    ".status { background-color: #f0f0f0; padding: 20px; border-radius: 10px; margin: 20px auto; max-width: 800px; }"
-    ".btns { margin: 12px 0; }"
-    ".btns button { padding: 10px 16px; margin: 0 6px; font-size: 16px; }"
-    "#jsonDisplay { border: 1px solid #ddd; max-width: 100%%; height: 600px; overflow: auto; background: #fff; text-align: left; padding: 10px; white-space: pre-wrap; font-family: monospace; font-size: 12px; }"
-    "</style>"
-    "</head>"
-    "<body>"
-    "<h1>ESP32 EPD Control System</h1>"
-    "<div class=\"status\">"
-    "<h2>System Status</h2>"
-    "<p id=\"bleStatus\">BLE: Checking...</p>"
-    "<p>BLE MAC: %s</p>"
-    "<p>WiFi: Connected</p>"
-    "<div class=\"btns\">"
-    "<button onclick=\"sendCmd('prev')\">Previous</button>"
-    "<button onclick=\"sendCmd('next')\">Next</button>"
-    "<button onclick=\"sendCmd('capture')\">Refresh</button>"
-    "</div>"
-    "<p id=\"imgStatus\">Layout: (unknown)</p>"
-    "<div id=\"jsonDisplay\">Waiting for layout data...</div>"
-    "</div>"
-    "<script>"
-    "const statusEl=document.getElementById('imgStatus');"
-    "const bleStatusEl=document.getElementById('bleStatus');"
-    "const jsonDisplayEl=document.getElementById('jsonDisplay');"
-    "async function sendCmd(cmd){"
-    "  try{ await fetch('/cmd?cmd='+encodeURIComponent(cmd)); }catch(e){}"
-    "  pollAndRender();"
-    "}"
-    "async function checkBleStatus(){"
-    "  try{"
-    "    const st=await (await fetch('/cmd?cmd=ble_status')).json();"
-    "    let statusText='BLE: ';"
-    "    if(st.ble_connected){"
-    "      statusText+='Connected to ' + st.peer_addr;"
-    "    }else if(st.ble_advertising){"
-    "      statusText+='Advertising...';"
-    "    }else{"
-    "      statusText+='Disconnected';"
-    "    }"
-    "    bleStatusEl.textContent=statusText;"
-    "  }catch(e){ bleStatusEl.textContent='BLE: Error checking status'; }"
-    "}"
-    "async function renderJson(){"
-    "  try{"
-    "    const json=await (await fetch('/cmd?cmd=get_layout')).text();"
-    "    if(json && json.length > 0){"
-    "      jsonDisplayEl.textContent=json;"
-    "      statusEl.textContent='Layout: Loaded ('+json.length+' bytes)';"
-    "    }else{"
-    "      jsonDisplayEl.textContent='No layout data';"
-    "      statusEl.textContent='Layout: No data';"
-    "    }"
-    "  }catch(e){"
-    "    jsonDisplayEl.textContent='Error loading layout: '+e;"
-    "    statusEl.textContent='Layout: Error';"
-    "  }"
-    "}"
-    "async function pollAndRender(){"
-    "  await renderJson();"
-    "  checkBleStatus();"
-    "}"
-    "setInterval(pollAndRender, 2000);"
-    "pollAndRender();"
-    "</script>"
-    "</body>"
-    "</html>";
+// HTML content now loaded from SD card to save memory
 
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
-    char *resp = malloc(4096);  // Use heap allocation instead of stack
+    FILE *f = fopen("/sdcard/web_files/index.html", "r");
+    if (!f) {
+        ESP_LOGE("HTTP", "Failed to open /sdcard/web_files/index.html");
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found (web_files/index.html)");
+        return ESP_FAIL;
+    }
+
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    // Use smaller buffer to reduce memory pressure (8KB chunks)
+    char *resp = malloc(8192);
     if (!resp) {
-        ESP_LOGE("HTTP", "Failed to allocate memory for HTML response");
+        ESP_LOGE("HTTP", "Failed to allocate buffer for file reading");
+        fclose(f);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
         return ESP_FAIL;
     }
 
-    int len = snprintf(resp, 4096, html_template, ble_local_addr);
+    // Set content type
+    httpd_resp_set_type(req, "text/html");
 
-    if (len >= 4096) {
-        ESP_LOGE("HTTP", "HTML response truncated, needed %d bytes", len);
+    // Send file in chunks
+    size_t total_sent = 0;
+    while (total_sent < file_size) {
+        size_t to_read = 8192;
+        if (file_size - total_sent < 8192) {
+            to_read = file_size - total_sent;
+        }
+
+        size_t read_size = fread(resp, 1, to_read, f);
+        if (read_size == 0) break;
+
+        esp_err_t err = httpd_resp_send_chunk(req, resp, read_size);
+        if (err != ESP_OK) {
+            ESP_LOGE("HTTP", "Failed to send chunk: %d", err);
+            break;
+        }
+        total_sent += read_size;
     }
 
-    httpd_resp_send(req, resp, strlen(resp));
+    // End response
+    httpd_resp_send_chunk(req, NULL, 0);
+
     free(resp);
+    fclose(f);
+    ESP_LOGI("HTTP", "Served index.html (%ld bytes)", file_size);
     return ESP_OK;
 }
 
@@ -1387,7 +1356,15 @@ static esp_err_t cmd_handler(httpd_req_t *req)
 
             // Handle ble_status command
             if (httpd_query_key_value(buf, "cmd", param, sizeof(param)) == ESP_OK) {
-                if (strcmp(param, "ble_status") == 0) {
+                if (strcmp(param, "get_ble_mac") == 0) {
+                    // Return BLE MAC address for web UI
+                    sprintf(response, "{\"ble_mac\":\"%s\"}", ble_local_addr);
+                    httpd_resp_set_type(req, "application/json");
+                    httpd_resp_send(req, response, strlen(response));
+                    free(buf);
+                    return ESP_OK;
+                }
+                else if (strcmp(param, "ble_status") == 0) {
                     sprintf(response, "{\"ble_connected\":%s,\"ble_advertising\":%s,\"ble_pending\":%s,\"peer_addr\":\"%s\",\"local_addr\":\"%s\",\"cmd_notify\":%s}",
                         ble_connected ? "true" : "false",
                         ble_advertising ? "true" : "false",
@@ -1561,9 +1538,19 @@ static const httpd_uri_t cmd = {
 
 httpd_handle_t start_webserver(void)
 {
+    // 打印当前可用堆内存
+    ESP_LOGI("HTTP", "Free heap before HTTP server: %u bytes", esp_get_free_heap_size());
+
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.lru_purge_enable = true;
+
+    // 减少内存占用以适应 ESP32-C3 的限制
+    config.task_priority = 5;  // 降低优先级
+    config.stack_size = 2048;  // 减小栈大小（默认 4096）
+    config.max_open_sockets = 3;  // 减少最大连接数（默认 5）
+    config.lru_purge_enable = true;  // 启用 LRU 清理
+    config.max_resp_headers = 8;  // 减少响应头数量（默认 16）
+    config.backlog_conn = 3;  // 减少连接队列（默认 5）
 
     ESP_LOGI("HTTP", "Starting server on port: '%d'", config.server_port);
     if (httpd_start(&server, &config) == ESP_OK) {
