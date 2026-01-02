@@ -1159,7 +1159,9 @@ void app_main(void)
 
     // 9. 创建 LVGL 定时器任务（手动刷新模式：不自动调用 lv_timer_handler）
     // 在手动刷新模式下，UI 更新后需要调用 lvgl_trigger_render() 触发渲染
-    xTaskCreate(lvgl_timer_task, "lvgl_timer", 4096, NULL, 2, NULL);
+    // 注意：文件浏览器等界面会触发 LVGL 的 image/alpha 混合绘制路径，栈占用明显增大。
+    // ESP32-C3 上 4096 往往不够，容易触发 stack protection fault。
+    xTaskCreate(lvgl_timer_task, "lvgl_timer", 8192, NULL, 2, NULL);
 
     ESP_LOGI("MAIN", "LVGL GUI initialized successfully! (Manual refresh mode for EPD)");
     ESP_LOGI("MAIN", "Use UP/DOWN buttons to navigate, CONFIRM to select");

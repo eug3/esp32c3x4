@@ -29,6 +29,21 @@ typedef struct {
     int selected_index;
     lv_obj_t *file_list;
     lv_obj_t *path_label;
+
+    lv_indev_t *indev;
+    lv_group_t *group;
+    lv_obj_t *row_btns[MAX_FILES + 1];
+    int row_btn_to_index[MAX_FILES + 1];
+    int row_btn_count;
+
+    // 避免在事件回调中直接 lv_obj_clean()/重建 UI（会删除正在处理事件的对象，导致崩溃）
+    enum {
+        FB_ACTION_NONE = 0,
+        FB_ACTION_OPEN_DIR,
+        FB_ACTION_GO_UP,
+        FB_ACTION_EXIT,
+    } pending_action;
+    int pending_index;
 } file_browser_state_t;
 
 static file_browser_state_t fb_state = {0};
@@ -36,8 +51,107 @@ static file_browser_state_t fb_state = {0};
 // 前置声明
 static bool read_directory(const char *path);
 static void update_file_list_display(void);
-static void file_browser_key_event_cb(lv_event_t *e);
+static void file_browser_row_key_event_cb(lv_event_t *e);
+static void file_browser_row_focused_cb(lv_event_t *e);
 static void file_browser_screen_destroy_cb(lv_event_t *e);
+static void file_browser_process_pending_action_cb(void *user_data);
+
+static void set_row_selected(lv_obj_t *btn, bool selected)
+{
+    if (btn == NULL) {
+        return;
+    }
+
+    lv_obj_t *icon_lbl = lv_obj_get_child(btn, 0);
+    lv_obj_t *text_lbl = lv_obj_get_child(btn, 1);
+
+    if (selected) {
+        lv_obj_set_style_bg_color(btn, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        if (icon_lbl) lv_obj_set_style_text_color(icon_lbl, lv_color_white(), 0);
+        if (text_lbl) lv_obj_set_style_text_color(text_lbl, lv_color_white(), 0);
+    } else {
+        lv_obj_set_style_bg_color(btn, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        if (icon_lbl) lv_obj_set_style_text_color(icon_lbl, lv_color_black(), 0);
+        if (text_lbl) lv_obj_set_style_text_color(text_lbl, lv_color_black(), 0);
+    }
+}
+
+static void file_browser_schedule_action(int action, int index)
+{
+    fb_state.pending_action = action;
+    fb_state.pending_index = index;
+    (void)lv_async_call(file_browser_process_pending_action_cb, NULL);
+}
+
+static void file_browser_process_pending_action_cb(void *user_data)
+{
+    (void)user_data;
+
+    const int action = fb_state.pending_action;
+    const int idx = fb_state.pending_index;
+
+    fb_state.pending_action = FB_ACTION_NONE;
+    fb_state.pending_index = 0;
+
+    if (action == FB_ACTION_NONE) {
+        return;
+    }
+
+    if (action == FB_ACTION_EXIT) {
+        ESP_LOGI(TAG, "Exiting file browser, returning to welcome screen");
+        lvgl_reset_refresh_state();
+        screen_manager_show_index();
+        return;
+    }
+
+    if (action == FB_ACTION_GO_UP) {
+        if (strcmp(fb_state.current_path, SDCARD_MOUNT_POINT) != 0) {
+            char *last_slash = strrchr(fb_state.current_path, '/');
+            if (last_slash != NULL && last_slash != fb_state.current_path) {
+                *last_slash = '\0';
+                if (strlen(fb_state.current_path) == 0) {
+                    strcpy(fb_state.current_path, SDCARD_MOUNT_POINT);
+                }
+                if (read_directory(fb_state.current_path)) {
+                    update_file_list_display();
+                    lvgl_trigger_render(NULL);
+                    lvgl_set_refresh_mode(EPD_REFRESH_FAST);
+                    lvgl_display_refresh();
+                }
+            }
+        }
+        return;
+    }
+
+    if (action == FB_ACTION_OPEN_DIR) {
+        if (idx < 0 || idx >= fb_state.file_count) {
+            return;
+        }
+
+        if (!fb_state.is_directory[idx]) {
+            ESP_LOGI(TAG, "Selected file: %s/%s", fb_state.current_path, fb_state.file_names[idx]);
+            return;
+        }
+
+        char new_path[MAX_PATH_LEN];
+        int new_path_len = snprintf(new_path, MAX_PATH_LEN - 1, "%s/%s",
+                                    fb_state.current_path,
+                                    fb_state.file_names[idx]);
+        if (new_path_len >= MAX_PATH_LEN - 1) {
+            new_path[MAX_PATH_LEN - 1] = '\0';
+        }
+
+        if (read_directory(new_path)) {
+            update_file_list_display();
+            lvgl_trigger_render(NULL);
+            lvgl_set_refresh_mode(EPD_REFRESH_FAST);
+            lvgl_display_refresh();
+        }
+        return;
+    }
+}
 
 // 读取目录内容
 static bool read_directory(const char *path)
@@ -124,47 +238,89 @@ static void update_file_list_display(void)
         return;
     }
 
-    // 删除并重新创建列表
-    lv_obj_t *parent = lv_obj_get_parent(fb_state.file_list);
-    int32_t x = lv_obj_get_x(fb_state.file_list);
-    int32_t y = lv_obj_get_y(fb_state.file_list);
-    int32_t w = lv_obj_get_width(fb_state.file_list);
-    int32_t h = lv_obj_get_height(fb_state.file_list);
+    // 重建 group，确保 group 内对象指针不悬挂（list 子项会被清空重建）
+    if (fb_state.indev != NULL) {
+        if (fb_state.group != NULL) {
+            lv_group_del(fb_state.group);
+            fb_state.group = NULL;
+        }
+        fb_state.group = lv_group_create();
+        lv_group_set_wrap(fb_state.group, true);
+        lv_indev_set_group(fb_state.indev, fb_state.group);
+    }
 
-    // 删除旧列表
-    lv_obj_delete(fb_state.file_list);
-
-    // 创建新列表
-    fb_state.file_list = lv_list_create(parent);
-    lv_obj_set_size(fb_state.file_list, w, h);
-    lv_obj_set_pos(fb_state.file_list, x, y);
+    // 不要删除/重建 list：
+    // - 会让 lv_group 里绑定的对象失效，导致按键事件不再投递
+    // - 也容易引入样式/布局的不可预期问题
+    // 这里仅清空子对象并重新填充
+    lv_obj_clean(fb_state.file_list);
 
     // 设置列表样式
     lv_obj_set_style_bg_color(fb_state.file_list, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(fb_state.file_list, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(fb_state.file_list, 1, 0);
     lv_obj_set_style_border_color(fb_state.file_list, lv_color_black(), 0);
+    // 关键：显式设置列表项文字颜色，避免主题/默认样式导致“白底白字看不见”
+    lv_obj_set_style_text_color(fb_state.file_list, lv_color_black(), LV_PART_ITEMS);
 
-    // 只添加键盘事件回调（无触摸屏）
-    lv_obj_add_event_cb(fb_state.file_list, file_browser_key_event_cb, LV_EVENT_KEY, NULL);
+    fb_state.row_btn_count = 0;
 
     // 添加 ".." 返回上一项（如果不是根目录）
     if (strcmp(fb_state.current_path, SDCARD_MOUNT_POINT) != 0) {
         lv_obj_t *btn = lv_list_add_button(fb_state.file_list, LV_SYMBOL_LEFT, "..");
-        lv_obj_set_style_text_font(btn, &lv_font_montserrat_14, 0);
+        // list button 内部包含两个 label（图标/文字），这里显式设置字体和颜色
+        lv_obj_t *icon = lv_obj_get_child(btn, 0);
+        lv_obj_t *txt = lv_obj_get_child(btn, 1);
+        if (icon) {
+            lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_color(icon, lv_color_black(), 0);
+        }
+        if (txt) {
+            lv_obj_set_style_text_font(txt, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_color(txt, lv_color_black(), 0);
+        }
+
+        lv_obj_add_event_cb(btn, file_browser_row_key_event_cb, LV_EVENT_KEY, &fb_state.row_btn_to_index[fb_state.row_btn_count]);
+        lv_obj_add_event_cb(btn, file_browser_row_focused_cb, LV_EVENT_FOCUSED, &fb_state.row_btn_to_index[fb_state.row_btn_count]);
+        fb_state.row_btns[fb_state.row_btn_count] = btn;
+        fb_state.row_btn_to_index[fb_state.row_btn_count] = -1;
+        fb_state.row_btn_count++;
+        if (fb_state.group) {
+            lv_group_add_obj(fb_state.group, btn);
+        }
     }
 
     // 添加文件和目录
     for (int i = 0; i < fb_state.file_count; i++) {
         const char *icon = fb_state.is_directory[i] ? LV_SYMBOL_DIRECTORY : LV_SYMBOL_FILE;
         lv_obj_t *btn = lv_list_add_button(fb_state.file_list, icon, fb_state.file_names[i]);
-        lv_obj_set_style_text_font(btn, &lv_font_montserrat_14, 0);
+        // 默认项：白底黑字（显式设置到子 label，避免继承不生效）
+        lv_obj_set_style_bg_color(btn, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
 
-        // 设置选中状态
+        lv_obj_t *icon_lbl = lv_obj_get_child(btn, 0);
+        lv_obj_t *text_lbl = lv_obj_get_child(btn, 1);
+        if (icon_lbl) {
+            lv_obj_set_style_text_font(icon_lbl, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_color(icon_lbl, lv_color_black(), 0);
+        }
+        if (text_lbl) {
+            lv_obj_set_style_text_font(text_lbl, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_color(text_lbl, lv_color_black(), 0);
+        }
+
+        lv_obj_add_event_cb(btn, file_browser_row_key_event_cb, LV_EVENT_KEY, &fb_state.row_btn_to_index[fb_state.row_btn_count]);
+        lv_obj_add_event_cb(btn, file_browser_row_focused_cb, LV_EVENT_FOCUSED, &fb_state.row_btn_to_index[fb_state.row_btn_count]);
+        fb_state.row_btns[fb_state.row_btn_count] = btn;
+        fb_state.row_btn_to_index[fb_state.row_btn_count] = i;
+        fb_state.row_btn_count++;
+        if (fb_state.group) {
+            lv_group_add_obj(fb_state.group, btn);
+        }
+
+        // 设置选中状态（用于 EPD 上更显著的高亮）
         if (i == fb_state.selected_index) {
-            lv_obj_set_style_bg_color(btn, lv_color_black(), 0);
-            lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-            lv_obj_set_style_text_color(btn, lv_color_white(), 0);
+            set_row_selected(btn, true);
         }
     }
 
@@ -190,95 +346,93 @@ static void update_file_list_display(void)
         lv_label_set_text(fb_state.path_label, path_text);
     }
 
+    // 把焦点显式放在当前选中的行（避免 NEXT/PREV 被 group 吞掉但焦点未建立）
+    if (fb_state.group && fb_state.row_btn_count > 0) {
+        lv_obj_t *focus_btn = NULL;
+        for (int j = 0; j < fb_state.row_btn_count; j++) {
+            if (fb_state.row_btn_to_index[j] == fb_state.selected_index) {
+                focus_btn = fb_state.row_btns[j];
+                break;
+            }
+        }
+        if (focus_btn == NULL) {
+            // 如果 selected_index 无效（比如目录变更后），默认聚焦第一项（跳过 ".."）
+            focus_btn = fb_state.row_btns[0];
+            if (fb_state.row_btn_to_index[0] == -1 && fb_state.row_btn_count > 1) {
+                focus_btn = fb_state.row_btns[1];
+            }
+        }
+        lv_group_focus_obj(focus_btn);
+    }
+
     // 手动刷新模式：触发渲染
     for (int i = 0; i < 3; i++) {
         lvgl_trigger_render(NULL);
     }
 }
 
-// 文件浏览器按键处理
-static void file_browser_key_event_cb(lv_event_t *e)
+static void file_browser_row_focused_cb(lv_event_t *e)
 {
-    lv_event_code_t code = lv_event_get_code(e);
+    if (lv_event_get_code(e) != LV_EVENT_FOCUSED) {
+        return;
+    }
 
-    if (code == LV_EVENT_KEY) {
-        const uint32_t key = lv_event_get_key(e);
+    int *p_idx = (int *)lv_event_get_user_data(e);
+    if (p_idx == NULL) {
+        return;
+    }
 
-        if (key == LV_KEY_UP) {
-            // 向上选择
-            if (fb_state.selected_index > 0) {
-                fb_state.selected_index--;
-                update_file_list_display();
-                // 手动刷新模式：先触发 LVGL 渲染
-                lvgl_trigger_render(NULL);
-                // 触发 EPD 局部刷新
-                lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
-                lvgl_display_refresh();
-            }
-        } else if (key == LV_KEY_DOWN) {
-            // 向下选择
-            if (fb_state.selected_index < fb_state.file_count - 1) {
-                fb_state.selected_index++;
-                update_file_list_display();
-                // 手动刷新模式：先触发 LVGL 渲染
-                lvgl_trigger_render(NULL);
-                // 触发 EPD 局部刷新
-                lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
-                lvgl_display_refresh();
-            }
-        } else if (key == LV_KEY_ENTER) {
-            // 确认键：进入目录或选择文件
-            if (fb_state.selected_index >= 0 && fb_state.selected_index < fb_state.file_count) {
-                if (fb_state.is_directory[fb_state.selected_index]) {
-                    // 进入目录
-                    char new_path[MAX_PATH_LEN];
-                    int new_path_len = snprintf(new_path, MAX_PATH_LEN - 1, "%s/%s",
-                                               fb_state.current_path,
-                                               fb_state.file_names[fb_state.selected_index]);
-                    if (new_path_len >= MAX_PATH_LEN - 1) {
-                        new_path[MAX_PATH_LEN - 1] = '\0';
-                    }
-                    read_directory(new_path);
-                    update_file_list_display();
-                    // 手动刷新模式：先触发 LVGL 渲染
-                    lvgl_trigger_render(NULL);
-                    // 进入目录时使用快速刷新（全屏变化）
-                    lvgl_set_refresh_mode(EPD_REFRESH_FAST);
-                    lvgl_display_refresh();
-                } else {
-                    // 选中文件
-                    ESP_LOGI(TAG, "Selected file: %s/%s",
-                             fb_state.current_path,
-                             fb_state.file_names[fb_state.selected_index]);
-                }
-            }
-        } else if (key == LV_KEY_ESC) {
-            // 返回键：返回上一级目录或退出
-            if (strcmp(fb_state.current_path, SDCARD_MOUNT_POINT) != 0) {
-                char *last_slash = strrchr(fb_state.current_path, '/');
-                if (last_slash != NULL && last_slash != fb_state.current_path) {
-                    *last_slash = '\0';
-                    if (strlen(fb_state.current_path) == 0) {
-                        strcpy(fb_state.current_path, SDCARD_MOUNT_POINT);
-                    }
-                    read_directory(fb_state.current_path);
-                    update_file_list_display();
-                    // 手动刷新模式：先触发 LVGL 渲染
-                    lvgl_trigger_render(NULL);
-                    // 返回上级目录时使用快速刷新
-                    lvgl_set_refresh_mode(EPD_REFRESH_FAST);
-                    lvgl_display_refresh();
-                }
-            } else {
-                // 已经在根目录，返回主菜单
-                ESP_LOGI(TAG, "Exiting file browser, returning to welcome screen");
+    const int new_idx = *p_idx;
+    if (new_idx == fb_state.selected_index) {
+        return;
+    }
 
-                // 重置刷新状态
-                lvgl_reset_refresh_state();
+    // 取消旧高亮
+    for (int i = 0; i < fb_state.row_btn_count; i++) {
+        if (fb_state.row_btn_to_index[i] == fb_state.selected_index) {
+            set_row_selected(fb_state.row_btns[i], false);
+            break;
+        }
+    }
 
-                // 返回主菜单（使用屏幕管理器）
-                screen_manager_show_index();
-            }
+    fb_state.selected_index = new_idx;
+
+    // 设置新高亮
+    for (int i = 0; i < fb_state.row_btn_count; i++) {
+        if (fb_state.row_btn_to_index[i] == fb_state.selected_index) {
+            set_row_selected(fb_state.row_btns[i], true);
+            break;
+        }
+    }
+
+    // 手动刷新模式：触发渲染 + 刷新
+    lvgl_trigger_render(NULL);
+    lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
+    lvgl_display_refresh();
+}
+
+// 行按钮按键处理：ENTER / ESC（导航键交给 lv_group）
+static void file_browser_row_key_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_KEY) {
+        return;
+    }
+
+    const uint32_t key = lv_event_get_key(e);
+    int *p_idx = (int *)lv_event_get_user_data(e);
+    const int idx = (p_idx != NULL) ? *p_idx : fb_state.selected_index;
+
+    if (key == LV_KEY_ENTER) {
+        if (idx == -1) {
+            file_browser_schedule_action(FB_ACTION_GO_UP, 0);
+        } else {
+            file_browser_schedule_action(FB_ACTION_OPEN_DIR, idx);
+        }
+    } else if (key == LV_KEY_ESC) {
+        if (strcmp(fb_state.current_path, SDCARD_MOUNT_POINT) != 0) {
+            file_browser_schedule_action(FB_ACTION_GO_UP, 0);
+        } else {
+            file_browser_schedule_action(FB_ACTION_EXIT, 0);
         }
     }
 }
@@ -288,6 +442,11 @@ static void file_browser_screen_destroy_cb(lv_event_t *e)
 {
     (void)e;
     ESP_LOGI(TAG, "File browser screen destroyed");
+
+    if (fb_state.group != NULL) {
+        lv_group_del(fb_state.group);
+        fb_state.group = NULL;
+    }
 
     // 重置状态
     memset(&fb_state, 0, sizeof(file_browser_state_t));
@@ -301,6 +460,9 @@ void file_browser_screen_create(lv_indev_t *indev)
     // 初始化状态
     memset(&fb_state, 0, sizeof(file_browser_state_t));
     strcpy(fb_state.current_path, SDCARD_MOUNT_POINT);
+    fb_state.indev = indev;
+    fb_state.pending_action = FB_ACTION_NONE;
+    fb_state.pending_index = 0;
 
     // 创建屏幕
     lv_obj_t *screen = lv_obj_create(NULL);
@@ -347,6 +509,9 @@ void file_browser_screen_create(lv_indev_t *indev)
     lv_obj_set_size(fb_state.file_list, 440, 620);
     lv_obj_align(fb_state.file_list, LV_ALIGN_TOP_LEFT, 20, 80);
 
+    // 允许通过按键聚焦到列表上（无触摸屏场景）
+    lv_obj_add_flag(fb_state.file_list, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+
     // 设置列表样式
     lv_obj_set_style_bg_color(fb_state.file_list, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(fb_state.file_list, LV_OPA_COVER, 0);
@@ -354,7 +519,7 @@ void file_browser_screen_create(lv_indev_t *indev)
     lv_obj_set_style_border_color(fb_state.file_list, lv_color_black(), 0);
 
     // 只添加键盘事件回调（无触摸屏）
-    lv_obj_add_event_cb(fb_state.file_list, file_browser_key_event_cb, LV_EVENT_KEY, NULL);
+    // 说明：不在 list 容器上处理按键；改为每一行按钮加入 group，由 group 响应 NEXT/PREV 导航
 
     // ========================================
     // 底部操作提示
@@ -386,10 +551,7 @@ void file_browser_screen_create(lv_indev_t *indev)
 
     // 设置焦点
     if (indev != NULL) {
-        lv_group_t *group = lv_group_create();
-        lv_group_add_obj(group, fb_state.file_list);
-        lv_group_set_wrap(group, true);  // 启用循环导航
-        lv_indev_set_group(indev, group);
+        // group 在 update_file_list_display() 内按当前列表重建
     }
 
     // 读取根目录并显示
