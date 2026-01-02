@@ -40,7 +40,7 @@
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_cali.h"
 #include "lvgl_driver.h"  // LVGL驱动适配层
-#include "lvgl_demo.h"     // LVGL示例UI
+#include "ui/screen_manager.h"  // 屏幕管理器
 #include "version.h"       // 自动生成的版本信息
 
 // ============================================================================
@@ -822,7 +822,15 @@ esp_err_t wifi_init_sta(void)
     }
     esp_netif_create_default_wifi_sta();
 
+    // 优化WiFi配置以减少内存使用(ESP32-C3只有100KB RAM)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    // 减少RX缓冲区(默认10→4,节省约6KB)
+    cfg.static_rx_buf_num = 4;     // 从默认10减到4
+    cfg.dynamic_rx_buf_num = 8;    // 从默认32减到8
+    cfg.dynamic_tx_buf_num = 8;    // 从默认32减到8
+    cfg.tx_buf_type = 1;           // 使用动态分配
+    cfg.cache_tx_buf_num = 1;      // 减少缓存
+    
     err = esp_wifi_init(&cfg);
     if (err != ESP_OK) {
         ESP_LOGE("WIFI", "esp_wifi_init failed: %s", esp_err_to_name(err));
@@ -1075,14 +1083,24 @@ void app_main(void)
     ESP_LOGI("MAIN", "Initializing BLE...");
     bt_init();
 
-    // WiFi initialization - re-enabled for web interface
+    // ========================================================================
+    // CRITICAL: ESP32-C3只有100KB RAM,无法同时运行WiFi+BLE+SD+LVGL
+    // 优先级: BLE(必须) > SD卡(必须) > WiFi(可选)
+    // 方案: 完全跳过WiFi初始化,避免内存耗尽导致SD卡SPI DMA分配失败
+    // ========================================================================
+    ESP_LOGI("MAIN", "Skipping WiFi initialization to conserve memory for SD card and LVGL");
+    ESP_LOGI("MAIN", "Use BLE for data transfer instead of WiFi");
+    
+    // WiFi初始化已禁用 - 取消注释以下代码以重新启用(需要足够RAM)
+    /*
     ESP_LOGI("MAIN", "Initializing WiFi...");
     esp_err_t wifi_ret = wifi_init_sta();
     if (wifi_ret != ESP_OK) {
         ESP_LOGW("MAIN", "WiFi init failed (%s); continuing without WiFi", esp_err_to_name(wifi_ret));
     }
+    */
 
-    // Initialize SD card
+    // Initialize SD card (CRITICAL: 必须在WiFi之后或WiFi禁用时初始化)
     ESP_LOGI("MAIN", "Initializing SD card...");
     esp_err_t sd_ret = sd_card_init();
     if (sd_ret != ESP_OK) {
@@ -1096,7 +1114,7 @@ void app_main(void)
     ESP_LOGI("MAIN", "Initializing LVGL GUI system...");
 
     // 1. 初始化 LVGL 显示驱动（framebuffer 在 lvgl_driver.c 中静态分配）
-    lvgl_display_init();
+    lv_display_t *disp = lvgl_display_init();
 
     // 2. 初始化 LVGL 输入设备（按键）
     lv_indev_t *indev = lvgl_input_init();
@@ -1106,37 +1124,44 @@ void app_main(void)
     // 降低优先级到 3，避免阻塞 IDLE 任务
     xTaskCreate(lvgl_tick_task, "lvgl_tick", 2048, NULL, 3, NULL);
 
-    // 4. 创建欢迎屏幕（替代 display_welcome_screen）
-    ESP_LOGI("LVGL", "Creating welcome screen with system info...");
-    lvgl_demo_create_welcome_screen(
-        read_battery_voltage_mv(),
-        read_battery_percentage(),
-        is_charging(),
-        VERSION_FULL,
-        indev  // 传入输入设备，用于设置焦点
-    );
+    // 4. 初始化屏幕管理器
+    ESP_LOGI("LVGL", "Initializing screen manager...");
+    static screen_context_t screen_ctx;
+    screen_ctx.battery_mv = read_battery_voltage_mv();
+    screen_ctx.battery_pct = read_battery_percentage();
+    screen_ctx.charging = is_charging();
+    screen_ctx.version_str = VERSION_FULL;
+    screen_ctx.indev = indev;
+    screen_ctx.read_battery_voltage_mv = read_battery_voltage_mv;
+    screen_ctx.read_battery_percentage = read_battery_percentage;
+    screen_ctx.is_charging = is_charging;
+    screen_manager_init(&screen_ctx);
 
-    // 5. 在启动 LVGL timer 任务之前，先在当前线程渲染一次。
-    // 重要：LVGL 不是线程安全的，不能同时在多个任务里调用 lv_timer_handler/lv_task_handler。
-    ESP_LOGI("LVGL", "Rendering UI (single-threaded) before starting LVGL timer task...");
+    // 5. 创建首页
+    ESP_LOGI("LVGL", "Creating index screen with system info...");
+    screen_manager_show_index();
+
+    // 6. 手动刷新模式：在启动 LVGL timer 任务之前，先在当前线程渲染一次。
+    // 重要：使用 lvgl_trigger_render() 而不是直接调用 lv_timer_handler()
+    ESP_LOGI("LVGL", "Rendering UI (manual refresh mode) before starting LVGL timer task...");
     for (int i = 0; i < 6; i++) {
-        lv_timer_handler();
+        lvgl_trigger_render(disp);  // 使用手动刷新模式
         vTaskDelay(30 / portTICK_PERIOD_MS);
     }
 
-    // 6. 刷新EPD显示（异步，非阻塞）
+    // 7. 刷新EPD显示（异步，非阻塞）
     ESP_LOGI("LVGL", "Refreshing EPD with welcome screen (async)...");
     lvgl_display_refresh();
 
-    // 7. 等待EPD刷新完成（异步刷新在后台进行）
+    // 8. 等待EPD刷新完成（异步刷新在后台进行）
     ESP_LOGI("LVGL", "EPD refresh started in background, continuing initialization...");
     vTaskDelay(500 / portTICK_PERIOD_MS);  // 短暂等待确保刷新任务已启动
 
-    // 8. 创建 LVGL 定时器任务（处理 UI 更新）
-    // 放到初次渲染/EPD 刷新之后，避免与上面的 lv_timer_handler 并发。
+    // 9. 创建 LVGL 定时器任务（手动刷新模式：不自动调用 lv_timer_handler）
+    // 在手动刷新模式下，UI 更新后需要调用 lvgl_trigger_render() 触发渲染
     xTaskCreate(lvgl_timer_task, "lvgl_timer", 4096, NULL, 2, NULL);
 
-    ESP_LOGI("MAIN", "LVGL GUI initialized successfully!");
+    ESP_LOGI("MAIN", "LVGL GUI initialized successfully! (Manual refresh mode for EPD)");
     ESP_LOGI("MAIN", "Use UP/DOWN buttons to navigate, CONFIRM to select");
 
     ESP_LOGI("MAIN", "System initialized. LVGL is handling UI events.");

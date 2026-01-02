@@ -585,6 +585,37 @@ void EPD_4in26_Display_Partial(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h)
 	UWORD i;
 	UWORD width = EPD_4in26_WIDTH/8;
 
+	// 参数验证：确保坐标和尺寸在有效范围内
+	if (x >= EPD_4in26_WIDTH || y >= EPD_4in26_HEIGHT) {
+		ESP_LOGE("EPD", "Invalid partial refresh coordinates: x=%u, y=%u (max: %u, %u)",
+		         x, y, EPD_4in26_WIDTH-1, EPD_4in26_HEIGHT-1);
+		return;
+	}
+
+	// 确保宽度和高度不超出边界
+	if (x + w > EPD_4in26_WIDTH) {
+		ESP_LOGW("EPD", "Width overflow: x=%u, w=%u, adjusting to fit", x, w);
+		w = EPD_4in26_WIDTH - x;
+	}
+	if (y + h > EPD_4in26_HEIGHT) {
+		ESP_LOGW("EPD", "Height overflow: y=%u, h=%u, adjusting to fit", y, h);
+		h = EPD_4in26_HEIGHT - y;
+	}
+
+	// 确保 x 是 8 的倍数（字节对齐）
+	if (x % 8 != 0) {
+		ESP_LOGW("EPD", "X coordinate not aligned to byte boundary: x=%u, aligning down", x);
+		x = (x / 8) * 8;
+	}
+
+	// 确保宽度是 8 的倍数
+	if (w % 8 != 0) {
+		ESP_LOGW("EPD", "Width not aligned to byte boundary: w=%u, aligning up", w);
+		w = ((w + 7) / 8) * 8;
+	}
+
+	ESP_LOGI("EPD", "Adjusted partial refresh area: x=%u, y=%u, w=%u, h=%u", x, y, w, h);
+
 	// 根据 GxEPD2：Y 坐标需要反转
 	// y = HEIGHT - y - h (reversed partial window)
 	UWORD y_reversed = EPD_4in26_HEIGHT - y - h;
