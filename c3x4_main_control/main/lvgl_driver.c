@@ -132,13 +132,6 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
 {
     int32_t x, y;
 
-    // 如果 EPD 正在刷新，跳过这次 flush（避免数据竞争）
-    if (s_epd_refreshing) {
-        ESP_LOGW(TAG, "EPD is refreshing, skipping flush");
-        lv_display_flush_ready(disp);
-        return;
-    }
-
     // 获取显示颜色格式
     lv_color_format_t cf = lv_display_get_color_format(disp);
 

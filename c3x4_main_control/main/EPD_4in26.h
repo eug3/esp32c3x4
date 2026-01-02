@@ -41,6 +41,7 @@ void EPD_4in26_Init(void);
 void EPD_4in26_Init_Fast(void);
 void EPD_4in26_Init_4GRAY(void);
 void EPD_4in26_Clear(void);
+void EPD_4in26_Clear_Fast(void);
 void EPD_4in26_Display(UBYTE *Image);
 void EPD_4in26_Display_Base(UBYTE *Image);
 void EPD_4in26_Display_Fast(UBYTE *Image);

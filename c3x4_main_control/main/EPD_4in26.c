@@ -393,12 +393,12 @@ void EPD_4in26_Clear(void)
 {
 	UWORD i;
 	UWORD height = EPD_4in26_HEIGHT;
-	UWORD width = EPD_4in26_WIDTH/8;	
+	UWORD width = EPD_4in26_WIDTH/8;
 	UBYTE image[EPD_4in26_WIDTH / 8] = {0x00};
     for(i=0; i<width; i++) {
         image[i] = 0xff;
     }
-    
+
 	EPD_4in26_SendCommand(0x24);   //write RAM for black(0)/white (1)
 	for(i=0; i<height; i++)
 	{
@@ -411,6 +411,32 @@ void EPD_4in26_Clear(void)
 		EPD_4in26_SendData2(image, width);
 	}
 	EPD_4in26_TurnOnDisplay();
+}
+
+/******************************************************************************
+function :	Clear screen using fast refresh mode
+parameter:
+******************************************************************************/
+void EPD_4in26_Clear_Fast(void)
+{
+	UWORD i;
+	UWORD height = EPD_4in26_HEIGHT;
+	UWORD width = EPD_4in26_WIDTH/8;
+	UBYTE image[EPD_4in26_WIDTH / 8] = {0x00};
+    for(i=0; i<width; i++) {
+        image[i] = 0xff;
+    }
+
+	// 设置快刷模式的温度补偿
+	EPD_4in26_SendCommand(0x1A);
+	EPD_4in26_SendData(0x5A);
+
+	EPD_4in26_SendCommand(0x24);   //write RAM for black(0)/white (1)
+	for(i=0; i<height; i++)
+	{
+	    EPD_4in26_SendData2(image, width);
+	}
+	EPD_4in26_TurnOnDisplay_Fast();
 }
 
 /******************************************************************************
@@ -466,13 +492,17 @@ void EPD_4in26_Display_Fast(UBYTE *Image)
 	UWORD i;
 	UWORD height = EPD_4in26_HEIGHT;
 	UWORD width = EPD_4in26_WIDTH/8;
-	
+
+	// 设置快刷模式的温度补偿（不进行复位，避免清屏）
+	EPD_4in26_SendCommand(0x1A);
+	EPD_4in26_SendData(0x5A);
+
 	EPD_4in26_SendCommand(0x24);   //write RAM for black(0)/white (1)
 	for(i=0; i<height; i++)
 	{
 		EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
 	}
-	EPD_4in26_TurnOnDisplay_Fast();	
+	EPD_4in26_TurnOnDisplay_Fast();
 }
 
 // 局部刷新显示（非流式版本，使用独立的数据缓冲区）

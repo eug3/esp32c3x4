@@ -1069,9 +1069,9 @@ void app_main(void)
     // 初始化 SPI 和 e-Paper (在 BLE/WiFi 之前初始化以避免电源问题)
     DEV_Module_Init();
 
-    // 初始化 EPD 硬件
-    EPD_4in26_Init();
-    EPD_4in26_Clear();
+    // 初始化 EPD 硬件（使用快刷模式以避免后续刷新时变黑）
+    EPD_4in26_Init_Fast();
+    EPD_4in26_Clear_Fast();
 
     // Add delay before initializing high-power components to prevent brownout
     ESP_LOGI("MAIN", "Waiting 1 second before initializing BLE/WiFi to prevent brownout...");
