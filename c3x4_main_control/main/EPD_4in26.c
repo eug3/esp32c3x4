@@ -69,6 +69,28 @@ static void EPD_4in26_Reset(void)
     DEV_Delay_ms(100);
 }
 
+/* Forward declarations for functions used before their definition */
+static void EPD_4in26_SendCommand(UBYTE Reg);
+static void EPD_4in26_SendData(UBYTE Data);
+void EPD_4in26_ReadBusy(void);
+
+/******************************************************************************
+function :	Clear RAM using command 0x46 and 0x47 (as per initialization flowchart)
+parameter:
+******************************************************************************/
+static void EPD_4in26_ClearRAM(void)
+{
+	// Step 3 in flowchart: Clear and fill two RAM by Command 0x46, Data 0xF7
+	EPD_4in26_SendCommand(0x46);
+	EPD_4in26_SendData(0xF7);
+	EPD_4in26_ReadBusy();
+	
+	// Fill RAM 0x26 by Command 0x47, Data 0xF7
+	EPD_4in26_SendCommand(0x47);
+	EPD_4in26_SendData(0xF7);
+	EPD_4in26_ReadBusy();
+}
+
 /******************************************************************************
 function :	send command
 parameter:
@@ -109,11 +131,27 @@ parameter:
 ******************************************************************************/
 void EPD_4in26_ReadBusy(void)
 {
+	int timeout_ms = 5000;  // 5秒超时
+	int elapsed = 0;
+
 	while(1)
 	{	 //=1 BUSY
-		if(DEV_Digital_Read(EPD_BUSY_PIN)==0)
+		if(DEV_Digital_Read(EPD_BUSY_PIN)==0) {
+			// BUSY 变低，刷新完成
 			break;
+		}
 		DEV_Delay_ms(20);
+		elapsed += 20;
+
+		if (elapsed >= timeout_ms) {
+			ESP_LOGW("EPD", "BUSY timeout after %d ms, BUSY pin still high!", timeout_ms);
+			break;
+		}
+
+		// 每 500ms 输出一次日志（避免刷屏）
+		if (elapsed % 500 == 0 && elapsed < timeout_ms) {
+			ESP_LOGW("EPD", "Waiting for BUSY... elapsed=%d ms", elapsed);
+		}
 	}
 	DEV_Delay_ms(20);
 }
@@ -259,44 +297,61 @@ static void EPD_4in26_SetCursor(UWORD Xstart, UWORD Ystart)
 }
 
 /******************************************************************************
-function :	Initialize the e-Paper register
+function :	Initialize the e-Paper register (follows flowchart strictly)
 parameter:
 ******************************************************************************/
 void EPD_4in26_Init(void)
 {
-	EPD_4in26_Reset();
-	DEV_Delay_ms(100);
+	// Step 1: Power On (handled by hardware/VCI supply)
+	// Step 2: Set Initial Configuration
+	EPD_4in26_Reset();  // HW Reset
+	DEV_Delay_ms(10);   // Wait 10ms as per flowchart
 
 	EPD_4in26_ReadBusy();   
-	EPD_4in26_SendCommand(0x12);  //SWRESET
+	EPD_4in26_SendCommand(0x12);  // SW Reset by Command 0x12
 	EPD_4in26_ReadBusy();   
+	DEV_Delay_ms(10);   // Wait 10ms as per flowchart
 	
-	EPD_4in26_SendCommand(0x18); // use the internal temperature sensor
-	EPD_4in26_SendData(0x80);
+	// Step 3: Send Initialization Code
+	// Clear and fill RAM using 0x46/0x47
+	EPD_4in26_ClearRAM();
+	
+	// Set gate driver output by Command 0x01
+	EPD_4in26_SendCommand(0x01);   // Drive output control    
+	EPD_4in26_SendData((EPD_4in26_HEIGHT-1)%256); //  Y  
+	EPD_4in26_SendData((EPD_4in26_HEIGHT-1)/256); //  Y 
+	EPD_4in26_SendData(0x02);
 
-	EPD_4in26_SendCommand(0x0C); //set soft start     
+	// Set display RAM size by Command 0x11, 0x44, 0x45
+	EPD_4in26_SendCommand(0x11);        // Data entry mode
+	EPD_4in26_SendData(0x01);           // X-mode x+ y-
+
+	EPD_4in26_SetWindows(0, EPD_4in26_HEIGHT-1, EPD_4in26_WIDTH-1, 0);
+
+	// Set panel border by Command 0x3C
+	EPD_4in26_SendCommand(0x3C);        // Border setting 
+	EPD_4in26_SendData(0x01);
+
+	// Soft start setting
+	EPD_4in26_SendCommand(0x0C);        // Soft start     
 	EPD_4in26_SendData(0xAE);
 	EPD_4in26_SendData(0xC7);
 	EPD_4in26_SendData(0xC3);
 	EPD_4in26_SendData(0xC0);
 	EPD_4in26_SendData(0x80);
 
-	EPD_4in26_SendCommand(0x01);   //      drive output control    
-	EPD_4in26_SendData((EPD_4in26_HEIGHT-1)%256); //  Y  
-	EPD_4in26_SendData((EPD_4in26_HEIGHT-1)/256); //  Y 
-	EPD_4in26_SendData(0x02);
+	// Step 4: Load Waveform LUT
+	// Sense temperature by mVext TS by Command 0x18
+	EPD_4in26_SendCommand(0x18); // Use internal temperature sensor
+	EPD_4in26_SendData(0x80);
 
-	EPD_4in26_SendCommand(0x3C);        // Border       Border setting 
-	EPD_4in26_SendData(0x01);
-
-	EPD_4in26_SendCommand(0x11);        //    data  entry  mode
-	EPD_4in26_SendData(0x01);           //       X-mode  x+ y- (original)
-
-	EPD_4in26_SetWindows(0, EPD_4in26_HEIGHT-1, EPD_4in26_WIDTH-1, 0);
+	// Load waveform LUT from OTP by Command 0x22, 0x20 to MCU
+	EPD_4in26_SendCommand(0x22);  // Display Update Control
+	EPD_4in26_SendData(0xB1);     // Load LUT from OTP
+	EPD_4in26_SendCommand(0x20);  // Activate Display Update Sequence
+	EPD_4in26_ReadBusy();
 
 	EPD_4in26_SetCursor(0, 0);
-
-	EPD_4in26_ReadBusy();
 }
 
 void EPD_4in26_Init_Fast(void)
@@ -333,16 +388,14 @@ void EPD_4in26_Init_Fast(void)
 
 	EPD_4in26_SetCursor(0, 0);
 
-	EPD_4in26_ReadBusy();
+	// 设置快刷模式的温度补偿（只需设置一次，后续刷新保持）
+	EPD_4in26_SendCommand(0x1A);
+	EPD_4in26_SendData(0x5A);
 
-	//TEMP (1.5s)
-	EPD_4in26_SendCommand(0x1A);  
-    EPD_4in26_SendData(0x5A); 
-
-    EPD_4in26_SendCommand(0x22);  
-    EPD_4in26_SendData(0x91); 
-    EPD_4in26_SendCommand(0x20); 
-	
+	// 加载波形 LUT（从 OTP）
+	EPD_4in26_SendCommand(0x22);  // Display Update Control
+	EPD_4in26_SendData(0xB1);     // Load LUT from OTP
+	EPD_4in26_SendCommand(0x20);  // Activate Display Update Sequence
 	EPD_4in26_ReadBusy();
 }
 
@@ -489,20 +542,104 @@ void EPD_4in26_Display_Base(UBYTE *Image)
 
 void EPD_4in26_Display_Fast(UBYTE *Image)
 {
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: starting...");
 	UWORD i;
 	UWORD height = EPD_4in26_HEIGHT;
 	UWORD width = EPD_4in26_WIDTH/8;
 
-	// 设置快刷模式的温度补偿（不进行复位，避免清屏）
-	EPD_4in26_SendCommand(0x1A);
-	EPD_4in26_SendData(0x5A);
+	// 根据 GxEPD2：每次刷新前设置温度补偿
+	EPD_4in26_SendCommand(0x1A); // Write to temperature register
+	EPD_4in26_SendData(0x5A);    // 25°C 补偿值
 
+	// 写入当前图像缓冲区 (0x24)
 	EPD_4in26_SendCommand(0x24);   //write RAM for black(0)/white (1)
 	for(i=0; i<height; i++)
 	{
 		EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
 	}
-	EPD_4in26_TurnOnDisplay_Fast();
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: data written, triggering refresh...");
+
+	// 根据 GxEPD2：使用 0xD7 进行快刷（full update with mode change）
+	// 0x21: Display Update Control
+	EPD_4in26_SendCommand(0x21);
+	EPD_4in26_SendData(0x40);    // bypass RED as 0
+	EPD_4in26_SendData(0x00);    // single chip application
+
+	// 0x22+0xD7: 快刷模式
+	EPD_4in26_SendCommand(0x22);
+	EPD_4in26_SendData(0xD7);    // fast full update mode
+
+	EPD_4in26_SendCommand(0x20); // Activate Display Update Sequence
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: waiting for BUSY...");
+	EPD_4in26_ReadBusy();
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: complete!");
+}
+
+/******************************************************************************
+function :	Partial refresh - fast partial update mode
+parameter:
+******************************************************************************/
+void EPD_4in26_Display_Partial(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h)
+{
+	ESP_LOGI("EPD", "EPD_4in26_Display_Partial: x=%u, y=%u, w=%u, h=%u", x, y, w, h);
+	UWORD i;
+	UWORD width = EPD_4in26_WIDTH/8;
+
+	// 根据 GxEPD2：Y 坐标需要反转
+	// y = HEIGHT - y - h (reversed partial window)
+	UWORD y_reversed = EPD_4in26_HEIGHT - y - h;
+
+	// 设置 RAM 区域（部分刷新窗口）
+	EPD_4in26_SendCommand(0x11); // set ram entry mode
+	EPD_4in26_SendData(0x01);    // x increase, y decrease : y reversed
+
+	EPD_4in26_SendCommand(0x44);
+	EPD_4in26_SendData(x % 256);
+	EPD_4in26_SendData(x / 256);
+	EPD_4in26_SendData((x + w - 1) % 256);
+	EPD_4in26_SendData((x + w - 1) / 256);
+
+	EPD_4in26_SendCommand(0x45);
+	EPD_4in26_SendData((y_reversed + h - 1) % 256);
+	EPD_4in26_SendData((y_reversed + h - 1) / 256);
+	EPD_4in26_SendData(y_reversed % 256);
+	EPD_4in26_SendData(y_reversed / 256);
+
+	EPD_4in26_SendCommand(0x4e);
+	EPD_4in26_SendData(x % 256);
+	EPD_4in26_SendData(x / 256);
+
+	EPD_4in26_SendCommand(0x4f);
+	EPD_4in26_SendData((y_reversed + h - 1) % 256);
+	EPD_4in26_SendData((y_reversed + h - 1) / 256);
+
+	// 温度补偿
+	EPD_4in26_SendCommand(0x1A);
+	EPD_4in26_SendData(0x5A);
+
+	// 写入数据到 0x24
+	// 由于使用 Y- 模式（Y 递减），需要按反向顺序写入
+	// 帧缓冲行 y 对应 RAM 行 y_reversed + h - 1（窗口顶部）
+	// 帧缓冲行 y + h - 1 对应 RAM 行 y_reversed（窗口底部）
+	EPD_4in26_SendCommand(0x24);
+	for(i = 0; i < h; i++)
+	{
+		// 帧缓冲从 y 递增到 y + h - 1
+		// RAM Y 从 y_reversed + h - 1 递减到 y_reversed
+		EPD_4in26_SendData2((UBYTE *)(Image + (y + i) * width), width);
+	}
+
+	// 根据 GxEPD2：局部刷新使用 0xFC
+	EPD_4in26_SendCommand(0x21); // Display Update Control
+	EPD_4in26_SendData(0x00);    // RED normal
+	EPD_4in26_SendData(0x00);    // single chip application
+
+	EPD_4in26_SendCommand(0x22);
+	EPD_4in26_SendData(0xFC);    // partial update mode
+
+	EPD_4in26_SendCommand(0x20);
+	EPD_4in26_ReadBusy();
+	ESP_LOGI("EPD", "EPD_4in26_Display_Partial: complete!");
 }
 
 // 局部刷新显示（非流式版本，使用独立的数据缓冲区）
@@ -864,12 +1001,31 @@ void EPD_4in26_4GrayDisplay_Part(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD 
 }
 
 /******************************************************************************
-function :	Enter sleep mode
+function :	Enter deep sleep mode (Step 6 in flowchart)
 parameter:
 ******************************************************************************/
 void EPD_4in26_Sleep(void)
 {
-	EPD_4in26_SendCommand(0x10); //enter deep sleep
-	EPD_4in26_SendData(0x03); 
+	// Step 6: Power Off
+	// Deep sleep by Command 0x10
+	EPD_4in26_SendCommand(0x10); // Enter deep sleep
+	EPD_4in26_SendData(0x03);    // Deep sleep mode
 	DEV_Delay_ms(100);
+	// Note: Power OFF handled by hardware if needed
+}
+
+/******************************************************************************
+function :	Wake up from deep sleep mode
+parameter:
+******************************************************************************/
+void EPD_4in26_Wakeup(void)
+{
+	// Exit deep sleep by hardware reset
+	EPD_4in26_Reset();
+	DEV_Delay_ms(10);
+	
+	// Send software reset to ensure clean state
+	EPD_4in26_SendCommand(0x12);  // SWRESET
+	EPD_4in26_ReadBusy();
+	DEV_Delay_ms(10);
 }

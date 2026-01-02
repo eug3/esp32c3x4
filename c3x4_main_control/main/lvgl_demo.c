@@ -6,6 +6,8 @@
 #include "lvgl_demo.h"
 #include "lvgl_driver.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <stdio.h>
 #include <string.h>
 #include <dirent.h>
@@ -97,26 +99,39 @@ static int16_t key_queue_get_net_direction(void)
     return net_direction;
 }
 
+/* Forward declarations for functions used before their definition */
+static void welcome_schedule_epd_refresh(uint32_t delay_ms);
+static void welcome_refresh_timer_cb(lv_timer_t *t);
+
 static void welcome_refresh_timer_cb(lv_timer_t *t)
 {
     (void)t;
+
+    // 如果 EPD 正在刷新，跳过这次处理，等待下一轮
+    if (lvgl_is_refreshing()) {
+        ESP_LOGI(TAG, "EPD still refreshing, reschedule...");
+        welcome_schedule_epd_refresh(100);  // 100ms 后重试
+        return;
+    }
 
     // 处理队列中的按键
     int16_t net_direction = key_queue_get_net_direction();
 
     if (net_direction != 0 && welcome_menu_btnm != NULL) {
-        // 根据净方向计算新的选中项
-        int16_t new_index = ((int16_t)welcome_menu_selected + net_direction) % 3;
+        // 根据净方向计算新的选中项（循环模式）
+        int16_t new_index = welcome_menu_selected + net_direction;
 
-        // 处理负数的情况
+        // 循环：0↔1↔2↔0
         if (new_index < 0) {
-            new_index += 3;
+            new_index = 2;  // 向上从 0 回到 2
+        } else if (new_index > 2) {
+            new_index = 0;  // 向下从 2 回到 0
         }
 
-        ESP_LOGI(TAG, "Timer callback: processing queued keys net_direction=%d, %d -> %d",
+        ESP_LOGI(TAG, "Timer callback: queued keys net_direction=%d, %d -> %d",
                  net_direction, welcome_menu_selected, new_index);
 
-        // 应用新的选中项
+        // 应用新的选中项（函数内部会更新 welcome_menu_selected）
         welcome_btnm_set_selected(welcome_menu_btnm, (uint16_t)new_index);
 
         // 关键：强制 LVGL 立即处理所有待渲染的内容
@@ -124,16 +139,20 @@ static void welcome_refresh_timer_cb(lv_timer_t *t)
             lv_timer_handler();
         }
 
-        // 立即开始下一轮刷新
-        welcome_last_epd_refresh_ms = lv_tick_get();
+        // 触发快刷
         lvgl_set_refresh_mode(EPD_REFRESH_FAST);
         lvgl_display_refresh();
+
+        // 更新时间戳
+        welcome_last_epd_refresh_ms = lv_tick_get();
+
+        // 调度下一轮（刷新完成后检查队列）
+        welcome_schedule_epd_refresh(300);  // 300ms 后检查
     } else {
         ESP_LOGI(TAG, "Timer callback: no queued keys to process");
+        // 队列空了，暂停定时器
+        lv_timer_pause(welcome_refresh_timer);
     }
-
-    // one-shot behavior
-    lv_timer_pause(welcome_refresh_timer);
 }
 
 static void welcome_schedule_epd_refresh(uint32_t delay_ms)
@@ -152,63 +171,14 @@ static void welcome_schedule_epd_refresh(uint32_t delay_ms)
 // 处理按键事件的核心逻辑
 static void welcome_process_key(key_event_type_t key_type)
 {
-    const uint32_t now = lv_tick_get();
-    const uint32_t min_interval_ms = 800;
+    // 将按键加入队列
+    key_queue_push(key_type);
+    ESP_LOGI(TAG, "Key queued: %d, queue count: %u",
+             key_type == KEY_UP ? -1 : (key_type == KEY_DOWN ? 1 : 0),
+             key_queue.count);
 
-    // 检查距离上次刷新时间是否太短
-    if (welcome_last_epd_refresh_ms != 0 && (now - welcome_last_epd_refresh_ms) < min_interval_ms) {
-        // 距离上次刷新太近，将按键加入队列
-        ESP_LOGI(TAG, "Too soon after last refresh, queuing key (queue count: %u)", key_queue.count);
-        key_queue_push(key_type);
-
-        // 等待刷新完成后再处理
-        const uint32_t remain = min_interval_ms - (now - welcome_last_epd_refresh_ms);
-        welcome_schedule_epd_refresh(remain + 50);
-        return;
-    }
-
-    // 可以立即处理
-    ESP_LOGI(TAG, "Processing key immediately");
-
-    // 先处理队列中的所有按键
-    int16_t net_direction = key_queue_get_net_direction();
-
-    // 加上当前按键
-    if (key_type == KEY_UP) {
-        net_direction--;
-    } else if (key_type == KEY_DOWN) {
-        net_direction++;
-    }
-
-    // 计算新位置
-    if (net_direction != 0 && welcome_menu_btnm != NULL) {
-        int16_t new_index = ((int16_t)welcome_menu_selected + net_direction) % 3;
-        if (new_index < 0) {
-            new_index += 3;
-        }
-
-        ESP_LOGI(TAG, "Processing key: net_direction=%d, %d -> %d",
-                 net_direction, welcome_menu_selected, new_index);
-
-        // 应用新的选中项
-        welcome_btnm_set_selected(welcome_menu_btnm, (uint16_t)new_index);
-
-        // 关键：强制 LVGL 立即处理所有待渲染的内容
-        // 通过多次调用 lv_timer_handler() 来确保所有 invalidate 都被处理
-        for (int i = 0; i < 5; i++) {
-            lv_timer_handler();
-        }
-
-        // 更新时间戳
-        welcome_last_epd_refresh_ms = lv_tick_get();
-
-        // 设置刷新模式并触发刷新
-        lvgl_set_refresh_mode(EPD_REFRESH_FAST);
-        lvgl_display_refresh();
-
-        // 调度回调来处理后续可能入队的按键
-        welcome_schedule_epd_refresh(min_interval_ms);
-    }
+    // 立即启动/重启定时器处理队列
+    welcome_schedule_epd_refresh(50);  // 50ms 后开始处理
 }
 
 static void welcome_activate_menu(uint16_t menu_index)
@@ -219,6 +189,18 @@ static void welcome_activate_menu(uint16_t menu_index)
     switch (menu_index) {
         case 0:  // SDCard File Browser
             ESP_LOGI(TAG, "Launching SD Card File Browser...");
+
+            // 删除刷新定时器（必须在创建新屏幕之前）
+            if (welcome_refresh_timer != NULL) {
+                lv_timer_pause(welcome_refresh_timer);  // 先暂停
+                lv_timer_delete(welcome_refresh_timer);
+                welcome_refresh_timer = NULL;
+                ESP_LOGI(TAG, "Welcome refresh timer deleted");
+            }
+
+            // 重置刷新状态，清除脏区域和计数器
+            lvgl_reset_refresh_state();
+
             lvgl_demo_create_file_browser_screen(welcome_indev);
             break;
 
@@ -264,8 +246,7 @@ static void welcome_btnm_set_selected(lv_obj_t *btnm, uint16_t new_index)
     // 更新全局状态
     welcome_menu_selected = new_index;
 
-    // 在 LVGL 按钮矩阵中，换行符 "\n" 不占用按钮索引
-    // 按钮索引是按照实际按钮连续编号的：0, 1, 2
+     
 
     // 方法：先清除旧的 CHECKED，再设置新的
     if (old_index != new_index) {
@@ -361,22 +342,8 @@ static void welcome_menu_btnm_event_cb(lv_event_t *e)
         return;
     }
 
-    // 处理点击事件
-    if (code == LV_EVENT_VALUE_CHANGED || code == LV_EVENT_CLICKED) {
-        const uint16_t sel = lv_btnmatrix_get_selected_btn(btnm);
-        
-        // 添加范围检查
-        if (sel > 2) {
-            ESP_LOGW(TAG, "Invalid button selection: %u (expected 0-2)", sel);
-            return;
-        }
-        
-        ESP_LOGD(TAG, "Button selection event: sel=%u", sel);
-        welcome_btnm_set_selected(btnm, sel);
-        welcome_activate_menu(welcome_menu_selected);
-        welcome_schedule_epd_refresh(250);
-        return;
-    }
+    // 注意：不处理 LV_EVENT_CLICKED（触摸屏点击），因为本设备没有触摸屏
+    // 按键导航通过 LV_EVENT_KEY 处理
 }
 
 // 屏幕销毁回调 - 清理资源和状态
@@ -678,7 +645,6 @@ static file_browser_state_t fb_state = {0};
 // 前置声明
 static bool read_directory(const char *path);
 static void update_file_list_display(void);
-static void file_browser_event_cb(lv_event_t *e);
 static void file_browser_key_event_cb(lv_event_t *e);
 
 // 读取目录内容
@@ -788,8 +754,7 @@ static void update_file_list_display(void)
     lv_obj_set_style_border_width(fb_state.file_list, 1, 0);
     lv_obj_set_style_border_color(fb_state.file_list, lv_color_black(), 0);
 
-    // 重新添加事件回调
-    lv_obj_add_event_cb(fb_state.file_list, file_browser_event_cb, LV_EVENT_CLICKED, NULL);
+    // 只添加键盘事件回调（无触摸屏）
     lv_obj_add_event_cb(fb_state.file_list, file_browser_key_event_cb, LV_EVENT_KEY, NULL);
 
     // 添加 ".." 返回上一项（如果不是根目录）
@@ -832,59 +797,6 @@ static void update_file_list_display(void)
             path_text[sizeof(path_text) - 1] = '\0';
         }
         lv_label_set_text(fb_state.path_label, path_text);
-    }
-}
-
-// 文件浏览器事件回调
-static void file_browser_event_cb(lv_event_t *e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t *target = lv_event_get_target(e);
-
-    if (code == LV_EVENT_CLICKED) {
-        // 获取点击的按钮文本
-        const char *btn_text = lv_list_get_button_text(fb_state.file_list, target);
-        if (btn_text == NULL) {
-            return;
-        }
-
-        ESP_LOGI(TAG, "File browser clicked: %s", btn_text);
-
-        // 处理 ".." 返回上一级
-        if (strcmp(btn_text, "..") == 0) {
-            // 找到最后一个 '/'
-            char *last_slash = strrchr(fb_state.current_path, '/');
-            if (last_slash != NULL && last_slash != fb_state.current_path) {
-                *last_slash = '\0';
-                if (strlen(fb_state.current_path) == 0) {
-                    strcpy(fb_state.current_path, SDCARD_MOUNT_POINT);
-                }
-                read_directory(fb_state.current_path);
-                update_file_list_display();
-            }
-            return;
-        }
-
-        // 查找点击的文件索引
-        for (int i = 0; i < fb_state.file_count; i++) {
-            if (strcmp(btn_text, fb_state.file_names[i]) == 0) {
-                if (fb_state.is_directory[i]) {
-                    // 进入目录
-                    char new_path[MAX_PATH_LEN];
-                    int new_path_len = snprintf(new_path, MAX_PATH_LEN - 1, "%s/%s",
-                                               fb_state.current_path, fb_state.file_names[i]);
-                    if (new_path_len >= MAX_PATH_LEN - 1) {
-                        new_path[MAX_PATH_LEN - 1] = '\0';
-                    }
-                    read_directory(new_path);
-                    update_file_list_display();
-                } else {
-                    // 选中文件
-                    ESP_LOGI(TAG, "Selected file: %s/%s", fb_state.current_path, fb_state.file_names[i]);
-                }
-                break;
-            }
-        }
     }
 }
 
@@ -1020,8 +932,7 @@ void lvgl_demo_create_file_browser_screen(lv_indev_t *indev)
     lv_obj_set_style_border_width(fb_state.file_list, 1, 0);
     lv_obj_set_style_border_color(fb_state.file_list, lv_color_black(), 0);
 
-    // 添加事件回调
-    lv_obj_add_event_cb(fb_state.file_list, file_browser_event_cb, LV_EVENT_CLICKED, NULL);
+    // 只添加键盘事件回调（无触摸屏）
     lv_obj_add_event_cb(fb_state.file_list, file_browser_key_event_cb, LV_EVENT_KEY, NULL);
 
     // ========================================
@@ -1071,6 +982,36 @@ void lvgl_demo_create_file_browser_screen(lv_indev_t *indev)
         lv_obj_set_style_text_font(error_label, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(error_label, lv_color_black(), 0);
         lv_obj_align(error_label, LV_ALIGN_CENTER, 0, 0);
+    }
+
+    // 强制 LVGL 处理渲染
+    for (int i = 0; i < 10; i++) {
+        lv_timer_handler();
+        vTaskDelay(pdMS_TO_TICKS(10));  // 等待渲染完成
+    }
+
+    // 等待渲染完全完成
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // 重置刷新状态（清除旧脏区域和计数器）
+    lvgl_reset_refresh_state();
+
+    // 触发 EPD 刷新
+    lvgl_set_refresh_mode(EPD_REFRESH_FAST);
+    lvgl_display_refresh();
+
+    // 等待刷新完成（最多 2 秒）
+    ESP_LOGI(TAG, "Waiting for EPD refresh to complete...");
+    int wait_count = 0;
+    while (lvgl_is_refreshing() && wait_count < 200) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        wait_count++;
+    }
+
+    if (wait_count >= 200) {
+        ESP_LOGW(TAG, "EPD refresh timeout after %d attempts", wait_count);
+    } else {
+        ESP_LOGI(TAG, "EPD refresh completed in %d ms", wait_count * 10);
     }
 
     ESP_LOGI(TAG, "SD card file browser screen created successfully");

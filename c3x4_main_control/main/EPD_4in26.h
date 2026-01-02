@@ -47,17 +47,16 @@ void EPD_4in26_Display_Base(UBYTE *Image);
 void EPD_4in26_Display_Fast(UBYTE *Image);
 void EPD_4in26_4GrayDisplay(UBYTE *Image);
 void EPD_4in26_Sleep(void);
+void EPD_4in26_Wakeup(void);
+
+// GxEPD2 风格的局部刷新（根据 GxEPD2_426_GDEQ0426T82）
+// 使用 0x22+0xFC 进行快刷局部更新
+void EPD_4in26_Display_Partial(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h);
 
 // 局部刷新（非流式版本，重构版）
 // 使用独立的数据缓冲区（仅包含要刷新的区域数据）
 // 坐标对齐和参数验证已移入函数内部，简化调用
 void EPD_4in26_Display_Part(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h);
-
-// 局部刷新（流式版本，重构版）
-// 坐标对齐和参数验证已移入函数内部，简化调用
-// 直接从完整的 framebuffer 按行发送数据到 EPD
-void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, uint32_t fb_stride,
-                                    UWORD x, UWORD y, UWORD w, UWORD h);
 
 
 #endif

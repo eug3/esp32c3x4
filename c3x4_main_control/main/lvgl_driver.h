@@ -69,6 +69,18 @@ void lvgl_set_refresh_mode(epd_refresh_mode_t mode);
 epd_refresh_mode_t lvgl_get_refresh_mode(void);
 
 /**
+ * @brief 检查 EPD 是否正在刷新
+ * @return true 表示正在刷新，false 表示空闲
+ */
+bool lvgl_is_refreshing(void);
+
+/**
+ * @brief 重置刷新状态（清除脏区域标记和局部刷新计数器）
+ * 在切换屏幕时调用，确保新的刷新请求不会受到旧状态影响
+ */
+void lvgl_reset_refresh_state(void);
+
+/**
  * @brief 初始化LVGL输入设备驱动
  * @return 输入设备指针
  */
