@@ -288,8 +288,11 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
         ESP_LOGI(TAG, "disp_flush_cb #%u: black=%u, white=%u", flush_count, black_count, white_count);
     }
 
-    // Record dirty area for partial EPD refresh later.
-    dirty_area_add(area);
+    // 只在 PARTIAL 模式下记录脏区域
+    // FULL 和 FAST 模式都会发送完整 framebuffer，不需要脏区域跟踪
+    if (s_refresh_mode == EPD_REFRESH_PARTIAL) {
+        dirty_area_add(area);
+    }
 
     // 通知LVGL刷新完成
     lv_display_flush_ready(disp);
@@ -413,9 +416,19 @@ static void epd_refresh_task(void *arg)
                 // 1. FULL: 总是执行全刷，重置局刷计数器
                 // 2. FAST: 总是执行快刷，重置局刷计数器
                 // 3. PARTIAL:
+                //    - 提前检查：如果即将强制全刷，立即切换模式并通知
+                //      这样 disp_flush_cb 会跳过脏区域计算，提升性能
                 //    - 如果局刷计数 < 10：执行局刷，计数器+1
                 //    - 如果局刷计数 >= 10：强制执行全刷，重置计数器（消除鬼影）
                 // ============================================================
+
+                // 提前检查：如果 PARTIAL 即将触发强制全刷，立即切换模式
+                if (mode == EPD_REFRESH_PARTIAL &&
+                    s_partial_refresh_count >= FORCE_FULL_REFRESH_AFTER_N_PARTIAL - 1) {
+                    ESP_LOGI(TAG, "EPD refresh task: Upcoming forced FULL, switching mode early");
+                    mode = EPD_REFRESH_FULL;
+                    s_refresh_mode = EPD_REFRESH_FULL;  // 立即切换，让 disp_flush_cb 跳过脏区计算
+                }
 
                 if (mode == EPD_REFRESH_FULL) {
                     ESP_LOGI(TAG, "EPD refresh task: FULL refresh (requested)");

@@ -484,11 +484,20 @@ void EPD_4in26_Clear_Fast(void)
 	EPD_4in26_SendCommand(0x1A);
 	EPD_4in26_SendData(0x5A);
 
+	// 写入当前图像缓冲区 (0x24)
 	EPD_4in26_SendCommand(0x24);   //write RAM for black(0)/white (1)
 	for(i=0; i<height; i++)
 	{
 	    EPD_4in26_SendData2(image, width);
 	}
+
+	// 同时写入上一帧缓冲区 (0x26)，确保局部刷新时对比基准正确
+	EPD_4in26_SendCommand(0x26);   //write RAM for previous frame
+	for(i=0; i<height; i++)
+	{
+	    EPD_4in26_SendData2(image, width);
+	}
+
 	EPD_4in26_TurnOnDisplay_Fast();
 }
 
@@ -557,7 +566,15 @@ void EPD_4in26_Display_Fast(UBYTE *Image)
 	{
 		EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
 	}
-	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: data written, triggering refresh...");
+
+	// 同时写入上一帧缓冲区 (0x26)，确保局部刷新时对比基准正确
+	// 快刷虽然速度快，但仍需同步 0x26，避免后续局部刷新出错
+	EPD_4in26_SendCommand(0x26);   //write RAM for previous frame
+	for(i=0; i<height; i++)
+	{
+		EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
+	}
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: data written to both 0x24 and 0x26, triggering refresh...");
 
 	// 根据 GxEPD2：使用 0xD7 进行快刷（full update with mode change）
 	// 0x21: Display Update Control

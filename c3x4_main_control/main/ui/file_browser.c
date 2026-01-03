@@ -583,25 +583,12 @@ void file_browser_screen_create(lv_indev_t *indev)
     // 等待渲染完全完成
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    // 重置刷新状态（清除旧脏区域和计数器）
-    lvgl_reset_refresh_state();
+    // 注意：不要在这里调用 lvgl_reset_refresh_state()
+    // screen_manager 已经在切换屏幕时调用过了
+    // 这里的脏区域记录是正确的，反映了 file_browser 的内容
 
     // 触发 EPD 刷新 - 由 screen_manager 设置刷新模式（组件间切换用 FULL）
     lvgl_display_refresh();
-
-    // 等待刷新完成（最多 2 秒）
-    ESP_LOGI(TAG, "Waiting for EPD refresh to complete...");
-    int wait_count = 0;
-    while (lvgl_is_refreshing() && wait_count < 200) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        wait_count++;
-    }
-
-    if (wait_count >= 200) {
-        ESP_LOGW(TAG, "EPD refresh timeout after %d attempts", wait_count);
-    } else {
-        ESP_LOGI(TAG, "EPD refresh completed in %d ms", wait_count * 10);
-    }
 
     ESP_LOGI(TAG, "SD card file browser screen created successfully");
 }
