@@ -47,7 +47,9 @@ static uint32_t s_partial_refresh_count = 0;
 
 // EPD refresh state tracking (异步刷新)
 static bool s_epd_refreshing = false;
+static bool s_render_done = false;           // disp_flush_cb 已完成写入
 static SemaphoreHandle_t s_epd_mutex = NULL;
+static SemaphoreHandle_t s_render_done_sem = NULL;  // 渲染完成信号
 static TaskHandle_t s_epd_refresh_task_handle = NULL;
 static QueueHandle_t s_refresh_queue = NULL;
 
@@ -186,6 +188,17 @@ static void queue_refresh_request(epd_refresh_mode_t mode)
 // LVGL 9.x 显示flush回调
 static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
+    // 获取互斥锁，保护 framebuffer 访问
+    // 如果获取失败，可能是刷新任务正在读取，跳过这次写入
+    if (xSemaphoreTake(s_epd_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        ESP_LOGW(TAG, "disp_flush_cb: failed to acquire mutex, skipping write");
+        lv_display_flush_ready(disp);
+        return;
+    }
+
+    // 标记渲染已开始（用于刷新任务判断）
+    s_render_done = false;
+
     // 记录每次 flush 调用
     static uint32_t flush_count = 0;
     flush_count++;
@@ -317,27 +330,14 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
         dirty_area_add(area);
     }
 
+    // 标记渲染完成（用于调试）
+    s_render_done = true;
+
+    // 释放互斥锁
+    xSemaphoreGive(s_epd_mutex);
+
     // 通知LVGL刷新完成
     lv_display_flush_ready(disp);
-
-    // ============================================================
-    // 自动刷新机制：
-    // 在 flush 完成后自动触发 EPD 刷新请求。
-    //
-    // 这样可以避免时序问题：
-    // - UI 代码只需调用 lvgl_trigger_render() 触发 LVGL 渲染
-    // - LVGL 渲染完成后，flush_cb 会自动请求 EPD 刷新
-    // - 不需要 UI 代码手动调用 lvgl_display_refresh()
-    //
-    // 注意：只在非全刷模式下自动刷新，全刷由 UI 代码显式控制
-    //
-    // 判断是否是最后一次 flush：
-    // LVGL 按从上到下的顺序 flush，当 area.y2 到达屏幕底部时表示是最后一次
-    // ============================================================
-    bool is_last_flush = (area->y2 == DISP_VER_RES - 1);
-    if (is_last_flush && s_refresh_mode != EPD_REFRESH_FULL) {
-        queue_refresh_request(s_refresh_mode);
-    }
 }
 
 // 异步 EPD 刷新任务（前置声明）
@@ -353,6 +353,15 @@ lv_display_t* lvgl_display_init(void)
         s_epd_mutex = xSemaphoreCreateMutex();
         if (s_epd_mutex == NULL) {
             ESP_LOGE(TAG, "Failed to create EPD mutex!");
+            return NULL;
+        }
+    }
+
+    // 创建信号量（用于 disp_flush_cb 通知渲染完成）
+    if (s_render_done_sem == NULL) {
+        s_render_done_sem = xSemaphoreCreateBinary();
+        if (s_render_done_sem == NULL) {
+            ESP_LOGE(TAG, "Failed to create render done semaphore!");
             return NULL;
         }
     }
@@ -404,6 +413,7 @@ lv_display_t* lvgl_display_init(void)
     s_dirty_valid = false;
     s_partial_refresh_count = 0;
     s_epd_refreshing = false;
+    s_render_done = false;
 
     // 初始化LVGL
     lv_init();
@@ -443,11 +453,28 @@ static void epd_refresh_task(void *arg)
         if (xQueueReceive(s_refresh_queue, &req, portMAX_DELAY) == pdTRUE) {
             ESP_LOGI(TAG, "EPD refresh task: received request, mode=%d", req.mode);
 
-            // Mark refreshing early to prevent concurrent LVGL rendering touching framebuffer.
+            // Mark refreshing to indicate EPD is busy
             s_epd_refreshing = true;
             __sync_synchronize();
 
-            // 执行实际的 EPD 刷新
+            // 等待 disp_flush_cb 完成（不持有锁）
+            // 如果超时或 s_render_done 已经为 true，直接继续
+            const TickType_t wait_start = xTaskGetTickCount();
+            bool waited_for_render = false;
+            while (!s_render_done) {
+                if ((xTaskGetTickCount() - wait_start) > pdMS_TO_TICKS(200)) {
+                    // 等待超过 200ms，不再等待，直接发送当前数据
+                    ESP_LOGW(TAG, "EPD refresh task: render not ready, sending current data");
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(1));
+                waited_for_render = true;
+            }
+            if (waited_for_render) {
+                ESP_LOGI(TAG, "EPD refresh task: render completed, sending updated data");
+            }
+
+            // 再获取锁执行刷新
             if (xSemaphoreTake(s_epd_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 ESP_LOGI(TAG, "EPD refresh task: refreshing, s_epd_refreshing=%d", s_epd_refreshing);
 
@@ -455,30 +482,13 @@ static void epd_refresh_task(void *arg)
 
                 // ============================================================
                 // 刷新模式选择逻辑：
-                // 1. FULL: 总是执行全刷，重置局刷计数器
-                // 2. FAST: 总是执行快刷，重置局刷计数器
+                // 1. FULL: 执行全刷（用于屏幕切换，确保显示清晰）
+                // 2. FAST: 执行快刷（全屏数据，速度快）
                 // 3. PARTIAL:
-                //    - 提前检查：如果即将强制全刷，立即切换模式并通知
-                //      这样 disp_flush_cb 会跳过脏区域计算，提升性能
-                //    - 如果局刷计数 < 10：执行局刷，计数器+1
-                //    - 如果局刷计数 >= 10：强制执行全刷，重置计数器（消除鬼影）
+                //    - 如果局刷计数 = 0：执行快刷（第一次或重置后）
+                //    - 否则：执行局刷，计数器+1
+                //    - 如果计数器 >= 10：重置计数器，下次将执行快刷
                 // ============================================================
-
-                // 检查是否需要强制全刷（消除鬼影）
-                // 在第 10 次局部刷新后，下一次会自动切换到 FULL 模式
-                if (s_partial_refresh_count >= FORCE_FULL_REFRESH_AFTER_N_PARTIAL) {
-                    ESP_LOGI(TAG, "EPD refresh task: Force FULL refresh after %u PARTIALs",
-                             s_partial_refresh_count);
-                    EPD_4in26_Display(s_epd_framebuffer);
-                    s_partial_refresh_count = 0;
-                    portENTER_CRITICAL(&s_dirty_mux);
-                    s_dirty_valid = false;
-                    portEXIT_CRITICAL(&s_dirty_mux);
-
-                    // 全刷后切换到 FAST 模式
-                    s_refresh_mode = EPD_REFRESH_FAST;
-                    ESP_LOGI(TAG, "Force FULL refresh completed, switched to FAST mode");
-                }
 
                 if (mode == EPD_REFRESH_FULL) {
                     ESP_LOGI(TAG, "EPD refresh task: FULL refresh (requested)");
@@ -488,15 +498,26 @@ static void epd_refresh_task(void *arg)
                     s_dirty_valid = false;
                     portEXIT_CRITICAL(&s_dirty_mux);
 
-                    // 首次全刷后自动切换到FAST模式
-                    static bool first_full_refresh = true;
-                    if (first_full_refresh) {
-                        first_full_refresh = false;
-                        s_refresh_mode = EPD_REFRESH_FAST;
-                        ESP_LOGI(TAG, "First FULL refresh completed, auto-switching to FAST mode");
-                    }
+                } else if (mode == EPD_REFRESH_FAST) {
+                    ESP_LOGI(TAG, "EPD refresh task: FAST refresh");
+                    EPD_4in26_Display_Fast(s_epd_framebuffer);
+                    s_partial_refresh_count = 0;
+                    portENTER_CRITICAL(&s_dirty_mux);
+                    s_dirty_valid = false;
+                    portEXIT_CRITICAL(&s_dirty_mux);
 
                 } else if (mode == EPD_REFRESH_PARTIAL) {
+                    // 局刷次数为 0 时，直接执行快刷
+                    if (s_partial_refresh_count == 0) {
+                        ESP_LOGI(TAG, "EPD refresh task: PARTIAL count=0, using FAST refresh");
+                        EPD_4in26_Display_Fast(s_epd_framebuffer);
+                        portENTER_CRITICAL(&s_dirty_mux);
+                        s_dirty_valid = false;
+                        portEXIT_CRITICAL(&s_dirty_mux);
+                        s_partial_refresh_count++;  // 从 1 开始计数
+                        goto refresh_done;
+                    }
+
                     // Snapshot dirty area atomically to avoid concurrent modification by flush_cb.
                     bool dirty_valid;
                     lv_area_t dirty_area;
@@ -507,15 +528,12 @@ static void epd_refresh_task(void *arg)
 
                     if (!dirty_valid) {
                         ESP_LOGW(TAG, "EPD refresh task: PARTIAL requested but no dirty area, skipping");
-                        // Nothing to do.
                         goto partial_done;
                     }
 
                     // ============================================================
                     // 局部刷新优化方案：
                     // 直接使用完整的 s_epd_framebuffer，只裁剪脏区发送给硬件
-                    // - s_epd_framebuffer 已经是 EPD 格式 (800x480, ROTATE_270)
-                    // - 只需计算要裁剪的区域，无需额外坐标转换
                     // ============================================================
 
                     // 获取脏区尺寸
@@ -546,15 +564,12 @@ static void epd_refresh_task(void *arg)
                     if (epd_y + epd_h > EPD_HEIGHT) epd_h = EPD_HEIGHT - epd_y;
 
                     ESP_LOGI(TAG, "EPD refresh task: PARTIAL #%u/%u LVGL(%d,%d,%dx%d) -> EPD(x=%d,y=%d,%dx%d)",
-                             s_partial_refresh_count + 1, FORCE_FULL_REFRESH_AFTER_N_PARTIAL,
+                             s_partial_refresh_count, FORCE_FULL_REFRESH_AFTER_N_PARTIAL,
                              (int)dirty_area.x1, (int)dirty_area.y1, (int)dirty_w, (int)dirty_h,
                              (int)epd_x, (int)epd_y, (int)epd_w, (int)epd_h);
 
                     // 从完整 framebuffer 裁剪脏区数据发送给硬件
-                    // 关键修复：传递完整 framebuffer 和坐标，让 EPD 函数自己裁剪
                     if (epd_w > 0 && epd_h > 0) {
-                        // 使用完整 framebuffer，传递 EPD 物理坐标
-                        // EPD_4in26_Display_Partial 会从 framebuffer 中裁剪正确的区域
                         EPD_4in26_Display_Partial(s_epd_framebuffer,
                                                  (UWORD)epd_x, (UWORD)epd_y,
                                                  (UWORD)epd_w, (UWORD)epd_h);
@@ -562,7 +577,14 @@ static void epd_refresh_task(void *arg)
                         ESP_LOGW(TAG, "EPD refresh task: invalid area, fallback FAST");
                         EPD_4in26_Display_Fast(s_epd_framebuffer);
                     }
+
+                    // 计数器递增，达到阈值后重置
                     s_partial_refresh_count++;
+                    if (s_partial_refresh_count >= FORCE_FULL_REFRESH_AFTER_N_PARTIAL) {
+                        ESP_LOGI(TAG, "EPD refresh task: Reached %u PARTIALs, resetting count", s_partial_refresh_count);
+                        s_partial_refresh_count = 0;
+                    }
+
 partial_done:
                     portENTER_CRITICAL(&s_dirty_mux);
                     s_dirty_valid = false;
@@ -574,7 +596,9 @@ partial_done:
                     s_dirty_valid = false;
                 }
 
+refresh_done:
                 s_epd_refreshing = false;
+                s_render_done = false;  // 重置，为下一次渲染做准备
                 ESP_LOGI(TAG, "EPD refresh task: complete, s_epd_refreshing=%d", s_epd_refreshing);
                 xSemaphoreGive(s_epd_mutex);
 
@@ -585,6 +609,7 @@ partial_done:
             } else {
                 ESP_LOGW(TAG, "Failed to acquire mutex for refresh");
                 s_epd_refreshing = false;
+                s_render_done = false;
             }
         }
     }
@@ -618,6 +643,7 @@ void lvgl_display_refresh_full(void)
 void lvgl_set_refresh_mode(epd_refresh_mode_t mode)
 {
     s_refresh_mode = mode;
+
     switch (mode) {
         case EPD_REFRESH_PARTIAL:
             ESP_LOGI(TAG, "Refresh mode set to PARTIAL (fastest, may have ghosting)");
