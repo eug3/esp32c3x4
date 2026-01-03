@@ -7,6 +7,7 @@
 #include "EPD_4in26.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/portmacro.h"
 #include "esp_log.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -50,6 +51,9 @@ static SemaphoreHandle_t s_epd_mutex = NULL;
 static TaskHandle_t s_epd_refresh_task_handle = NULL;
 static QueueHandle_t s_refresh_queue = NULL;
 
+// Protect dirty area state against concurrent access (flush_cb vs refresh task).
+static portMUX_TYPE s_dirty_mux = portMUX_INITIALIZER_UNLOCKED;
+
 // 全局显示设备指针（用于手动刷新模式）
 static lv_display_t *g_lv_display = NULL;
 
@@ -77,6 +81,18 @@ void lvgl_trigger_render(lv_display_t *disp)
     }
 
     if (disp != NULL) {
+        // Avoid rendering while EPD refresh task is reading/sending framebuffer.
+        // This prevents mixed old/new bytes being sent to the panel.
+        const TickType_t start = xTaskGetTickCount();
+        const TickType_t timeout = pdMS_TO_TICKS(8000);
+        while (s_epd_refreshing) {
+            if ((xTaskGetTickCount() - start) > timeout) {
+                ESP_LOGW(TAG, "lvgl_trigger_render: timed out waiting for EPD refresh");
+                return;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+
         // 调用一次 lv_timer_handler 处理动画和定时器
         lv_timer_handler();
         // 立即触发渲染
@@ -92,25 +108,79 @@ void lvgl_trigger_render(lv_display_t *disp)
 
 static void dirty_area_add(const lv_area_t *area)
 {
+    // NOTE: Never call ESP_LOG inside a critical section; logging may acquire locks.
+    bool do_expand_log = false;
+    int32_t y_gap = 0;
+    lv_area_t init_area = {0};
+    lv_area_t old_area = {0};
+    lv_area_t new_area = {0};
+
+    portENTER_CRITICAL(&s_dirty_mux);
+
     if (!s_dirty_valid) {
         s_dirty_area = *area;
         s_dirty_valid = true;
+        init_area = *area;
+        portEXIT_CRITICAL(&s_dirty_mux);
+
+        ESP_LOGI(TAG, "[DIRTY] init: (%d,%d)-(%d,%d)",
+                 (int)init_area.x1, (int)init_area.y1, (int)init_area.x2, (int)init_area.y2);
         return;
     }
 
-    // 脱离检查并合并
-    const int32_t y_gap = (area->y1 > s_dirty_area.y2) ? (area->y1 - s_dirty_area.y2 - 1)
-                          : ((s_dirty_area.y1 > area->y2) ? (s_dirty_area.y1 - area->y2 - 1)
-                          : 0);
+    old_area = s_dirty_area;
 
-    if (y_gap <= 10) {  // Y方向上相邻或距离小于10像素才合并
-        if (area->x1 < s_dirty_area.x1) s_dirty_area.x1 = area->x1;
-        if (area->y1 < s_dirty_area.y1) s_dirty_area.y1 = area->y1;
-        if (area->x2 > s_dirty_area.x2) s_dirty_area.x2 = area->x2;
-        if (area->y2 > s_dirty_area.y2) s_dirty_area.y2 = area->y2;
+    // 计算新旧区域之间的距离（基于 old_area）
+    y_gap = (area->y1 > old_area.y2) ? (area->y1 - old_area.y2 - 1)
+            : ((old_area.y1 > area->y2) ? (old_area.y1 - area->y2 - 1)
+            : 0);
 
-        // 区域已合并
+    // 总是扩展脏区到包含所有已刷新区域的包围盒
+    if (area->x1 < s_dirty_area.x1) s_dirty_area.x1 = area->x1;
+    if (area->y1 < s_dirty_area.y1) s_dirty_area.y1 = area->y1;
+    if (area->x2 > s_dirty_area.x2) s_dirty_area.x2 = area->x2;
+    if (area->y2 > s_dirty_area.y2) s_dirty_area.y2 = area->y2;
+
+    new_area = s_dirty_area;
+    if (old_area.x1 != new_area.x1 || old_area.y1 != new_area.y1 ||
+        old_area.x2 != new_area.x2 || old_area.y2 != new_area.y2) {
+        do_expand_log = true;
     }
+
+    portEXIT_CRITICAL(&s_dirty_mux);
+
+    if (do_expand_log) {
+        ESP_LOGI(TAG, "[DIRTY] expanded: (%d,%d)-(%d,%d) -> (%d,%d)-(%d,%d), y_gap=%d",
+                 (int)area->x1, (int)area->y1, (int)area->x2, (int)area->y2,
+                 (int)new_area.x1, (int)new_area.y1,
+                 (int)new_area.x2, (int)new_area.y2, (int)y_gap);
+    }
+}
+
+static void queue_refresh_request(epd_refresh_mode_t mode)
+{
+    if (s_refresh_queue == NULL) {
+        ESP_LOGW(TAG, "Refresh queue not initialized");
+        return;
+    }
+
+    refresh_request_t req = {
+        .mode = mode,
+        .on_complete = NULL,
+    };
+
+    // Keep only the latest request to avoid missing updates when UI triggers refresh rapidly.
+    // Special-case: once a FULL refresh is queued (e.g. screen switch), do not let
+    // subsequent PARTIAL/FAST requests overwrite it.
+    // Note: xQueueOverwrite requires queue length == 1.
+    refresh_request_t queued;
+    if (xQueuePeek(s_refresh_queue, &queued, 0) == pdTRUE) {
+        if (queued.mode == EPD_REFRESH_FULL && mode != EPD_REFRESH_FULL) {
+            return;
+        }
+    }
+
+    (void)xQueueOverwrite(s_refresh_queue, &req);
 }
 
 // LVGL 9.x 显示flush回调
@@ -244,7 +314,8 @@ lv_display_t* lvgl_display_init(void)
 
     // 创建刷新请求队列（异步刷新）
     if (s_refresh_queue == NULL) {
-        s_refresh_queue = xQueueCreate(2, sizeof(refresh_request_t));
+        // Single-slot queue + overwrite ensures the latest refresh request is not dropped.
+        s_refresh_queue = xQueueCreate(1, sizeof(refresh_request_t));
         if (s_refresh_queue == NULL) {
             ESP_LOGE(TAG, "Failed to create refresh queue!");
             return NULL;
@@ -327,46 +398,137 @@ static void epd_refresh_task(void *arg)
         if (xQueueReceive(s_refresh_queue, &req, portMAX_DELAY) == pdTRUE) {
             ESP_LOGI(TAG, "EPD refresh task: received request, mode=%d", req.mode);
 
+            // Mark refreshing early to prevent concurrent LVGL rendering touching framebuffer.
+            s_epd_refreshing = true;
+            __sync_synchronize();
+
             // 执行实际的 EPD 刷新
             if (xSemaphoreTake(s_epd_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                s_epd_refreshing = true;
-                __sync_synchronize();
                 ESP_LOGI(TAG, "EPD refresh task: refreshing, s_epd_refreshing=%d", s_epd_refreshing);
 
                 epd_refresh_mode_t mode = req.mode;
 
-                // 根据模式和脏区域判断最终执行的刷新方式
-                if (s_dirty_valid && mode == EPD_REFRESH_PARTIAL &&
-                    s_partial_refresh_count < FORCE_FULL_REFRESH_AFTER_N_PARTIAL) {
-                    
-                    // PARTIAL局刷对GDEY0426T82不稳定,容易出现条纹
-                    // 改用FAST刷新替代(1.5秒,质量稳定)
-                    ESP_LOGI(TAG, "EPD refresh task: PARTIAL->FAST (avoiding stripes)");
-                    EPD_4in26_Display_Fast(s_epd_framebuffer);
-                    s_partial_refresh_count++;
-                    s_dirty_valid = false;
-                } else if (mode == EPD_REFRESH_FAST ||
-                           (s_partial_refresh_count >= FORCE_FULL_REFRESH_AFTER_N_PARTIAL)) {
-                    ESP_LOGI(TAG, "EPD refresh task: FAST refresh");
-                    // 执行快速刷新（达到局部刷新次数限制时也改用快速刷新）
-                    EPD_4in26_Display_Fast(s_epd_framebuffer);
-                    s_partial_refresh_count = 0;
-                    s_dirty_valid = false;
-                } else {
-                    ESP_LOGI(TAG, "EPD refresh task: FULL refresh");
-                    // 执行全刷(最清晰,速度最慢)
+                // ============================================================
+                // 刷新模式选择逻辑：
+                // 1. FULL: 总是执行全刷，重置局刷计数器
+                // 2. FAST: 总是执行快刷，重置局刷计数器
+                // 3. PARTIAL:
+                //    - 如果局刷计数 < 10：执行局刷，计数器+1
+                //    - 如果局刷计数 >= 10：强制执行全刷，重置计数器（消除鬼影）
+                // ============================================================
+
+                if (mode == EPD_REFRESH_FULL) {
+                    ESP_LOGI(TAG, "EPD refresh task: FULL refresh (requested)");
                     EPD_4in26_Display(s_epd_framebuffer);
                     s_partial_refresh_count = 0;
+                    portENTER_CRITICAL(&s_dirty_mux);
                     s_dirty_valid = false;
-                    
-                    // 首次全刷后自动切换到FAST模式,提升后续刷新速度
-                    // 用户仍可通过API手动切换模式
+                    portEXIT_CRITICAL(&s_dirty_mux);
+
+                    // 首次全刷后自动切换到FAST模式
                     static bool first_full_refresh = true;
                     if (first_full_refresh) {
                         first_full_refresh = false;
                         s_refresh_mode = EPD_REFRESH_FAST;
-                        ESP_LOGI(TAG, "First FULL refresh completed, auto-switching to FAST mode for better performance");
+                        ESP_LOGI(TAG, "First FULL refresh completed, auto-switching to FAST mode");
                     }
+
+                } else if (mode == EPD_REFRESH_FAST) {
+                    ESP_LOGI(TAG, "EPD refresh task: FAST refresh (requested)");
+                    EPD_4in26_Display_Fast(s_epd_framebuffer);
+                    s_partial_refresh_count = 0;
+                    portENTER_CRITICAL(&s_dirty_mux);
+                    s_dirty_valid = false;
+                    portEXIT_CRITICAL(&s_dirty_mux);
+
+                } else if (mode == EPD_REFRESH_PARTIAL) {
+                    // 检查是否需要强制全刷（消除鬼影）
+                    if (s_partial_refresh_count >= FORCE_FULL_REFRESH_AFTER_N_PARTIAL) {
+                        ESP_LOGI(TAG, "EPD refresh task: Force FULL refresh after %u PARTIALs",
+                                 s_partial_refresh_count);
+                        EPD_4in26_Display(s_epd_framebuffer);
+                        s_partial_refresh_count = 0;
+                        portENTER_CRITICAL(&s_dirty_mux);
+                        s_dirty_valid = false;
+                        portEXIT_CRITICAL(&s_dirty_mux);
+                    } else {
+                        // Snapshot dirty area atomically to avoid concurrent modification by flush_cb.
+                        bool dirty_valid;
+                        lv_area_t dirty_area;
+                        portENTER_CRITICAL(&s_dirty_mux);
+                        dirty_valid = s_dirty_valid;
+                        dirty_area = s_dirty_area;
+                        portEXIT_CRITICAL(&s_dirty_mux);
+
+                        if (!dirty_valid) {
+                            ESP_LOGW(TAG, "EPD refresh task: PARTIAL requested but no dirty area, skipping");
+                            // Nothing to do.
+                            goto partial_done;
+                        }
+
+                        // ============================================================
+                        // 局部刷新优化方案：
+                        // 直接使用完整的 s_epd_framebuffer，只裁剪脏区发送给硬件
+                        // - s_epd_framebuffer 已经是 EPD 格式 (800x480, ROTATE_270)
+                        // - 只需计算要裁剪的区域，无需额外坐标转换
+                        // ============================================================
+
+                        // 获取脏区尺寸
+                        const int32_t dirty_w = dirty_area.x2 - dirty_area.x1 + 1;
+                        const int32_t dirty_h = dirty_area.y2 - dirty_area.y1 + 1;
+
+                        // LVGL 坐标系 (480x800) 到 EPD 物理坐标系 (800x480) 的映射
+                        // ROTATE_270: LVGL(x,y) -> EPD(memX=y, memY=EPD_HEIGHT-1-x)
+                        int32_t epd_x = dirty_area.y1;
+                        int32_t epd_y = (int32_t)EPD_HEIGHT - 1 - dirty_area.x2;
+                        int32_t epd_w = dirty_h;  // 注意：宽高互换
+                        int32_t epd_h = dirty_w;
+
+                        // EPD 硬件要求：X 坐标必须是 8 的倍数（字节对齐）
+                        if (epd_x % 8 != 0) {
+                            const int32_t orig_x = epd_x;
+                            epd_x = (epd_x / 8) * 8;  // 向下对齐
+                            epd_w += (orig_x - epd_x);  // 补偿宽度
+                        }
+                        if (epd_w % 8 != 0) {
+                            epd_w = ((epd_w + 7) / 8) * 8;  // 向上对齐
+                        }
+
+                        // 边界检查
+                        if (epd_x < 0) epd_x = 0;
+                        if (epd_y < 0) epd_y = 0;
+                        if (epd_x + epd_w > EPD_WIDTH) epd_w = EPD_WIDTH - epd_x;
+                        if (epd_y + epd_h > EPD_HEIGHT) epd_h = EPD_HEIGHT - epd_y;
+
+                        ESP_LOGI(TAG, "EPD refresh task: PARTIAL #%u/%u LVGL(%d,%d,%dx%d) -> EPD(x=%d,y=%d,%dx%d)",
+                                 s_partial_refresh_count + 1, FORCE_FULL_REFRESH_AFTER_N_PARTIAL,
+                                 (int)dirty_area.x1, (int)dirty_area.y1, (int)dirty_w, (int)dirty_h,
+                                 (int)epd_x, (int)epd_y, (int)epd_w, (int)epd_h);
+
+                        // 从完整 framebuffer 裁剪脏区数据发送给硬件
+                        // 关键修复：传递完整 framebuffer 和坐标，让 EPD 函数自己裁剪
+                        if (epd_w > 0 && epd_h > 0) {
+                            // 使用完整 framebuffer，传递 EPD 物理坐标
+                            // EPD_4in26_Display_Partial 会从 framebuffer 中裁剪正确的区域
+                            EPD_4in26_Display_Partial(s_epd_framebuffer,
+                                                     (UWORD)epd_x, (UWORD)epd_y,
+                                                     (UWORD)epd_w, (UWORD)epd_h);
+                        } else {
+                            ESP_LOGW(TAG, "EPD refresh task: invalid area, fallback FAST");
+                            EPD_4in26_Display_Fast(s_epd_framebuffer);
+                        }
+                        s_partial_refresh_count++;
+partial_done:
+                        portENTER_CRITICAL(&s_dirty_mux);
+                        s_dirty_valid = false;
+                        portEXIT_CRITICAL(&s_dirty_mux);
+                    }
+
+                } else {
+                    ESP_LOGE(TAG, "EPD refresh task: Unknown mode %d, fallback to FAST", mode);
+                    EPD_4in26_Display_Fast(s_epd_framebuffer);
+                    s_partial_refresh_count = 0;
+                    s_dirty_valid = false;
                 }
 
                 s_epd_refreshing = false;
@@ -379,6 +541,7 @@ static void epd_refresh_task(void *arg)
                 }
             } else {
                 ESP_LOGW(TAG, "Failed to acquire mutex for refresh");
+                s_epd_refreshing = false;
             }
         }
     }
@@ -387,37 +550,25 @@ static void epd_refresh_task(void *arg)
 // 刷新 EPD - 使用当前配置的模式
 void lvgl_display_refresh(void)
 {
-    refresh_request_t req = {
-        .mode = s_refresh_mode
-    };
-    xQueueSend(s_refresh_queue, &req, 0);
+    queue_refresh_request(s_refresh_mode);
 }
 
 // 局部刷新 EPD
 void lvgl_display_refresh_partial(void)
 {
-    refresh_request_t req = {
-        .mode = EPD_REFRESH_PARTIAL
-    };
-    xQueueSend(s_refresh_queue, &req, 0);
+    queue_refresh_request(EPD_REFRESH_PARTIAL);
 }
 
 // 快速刷新 EPD
 void lvgl_display_refresh_fast(void)
 {
-    refresh_request_t req = {
-        .mode = EPD_REFRESH_FAST
-    };
-    xQueueSend(s_refresh_queue, &req, 0);
+    queue_refresh_request(EPD_REFRESH_FAST);
 }
 
 // 全刷 EPD
 void lvgl_display_refresh_full(void)
 {
-    refresh_request_t req = {
-        .mode = EPD_REFRESH_FULL
-    };
-    xQueueSend(s_refresh_queue, &req, 0);
+    queue_refresh_request(EPD_REFRESH_FULL);
 }
 
 // 设置刷新模式
@@ -452,7 +603,9 @@ bool lvgl_is_refreshing(void)
 // 重置刷新状态
 void lvgl_reset_refresh_state(void)
 {
+    portENTER_CRITICAL(&s_dirty_mux);
     s_dirty_valid = false;
+    portEXIT_CRITICAL(&s_dirty_mux);
     s_partial_refresh_count = 0;
     ESP_LOGI(TAG, "Refresh state reset (dirty_valid=%d, partial_count=%u)",
              s_dirty_valid, s_partial_refresh_count);

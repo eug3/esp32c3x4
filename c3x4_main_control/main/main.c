@@ -41,6 +41,7 @@
 #include "esp_adc/adc_cali.h"
 #include "lvgl_driver.h"  // LVGL驱动适配层
 #include "ui/screen_manager.h"  // 屏幕管理器
+#include "ui/font_manager.h"  // 字体管理器
 #include "version.h"       // 自动生成的版本信息
 
 // ============================================================================
@@ -1106,6 +1107,15 @@ void app_main(void)
     if (sd_ret != ESP_OK) {
         ESP_LOGW("MAIN", "SD card initialization failed, but system will continue");
         ESP_LOGW("MAIN", "File browser and SD-related features will be unavailable");
+    }
+
+    // Initialize font manager (after SD card is ready)
+    ESP_LOGI("MAIN", "Initializing font manager...");
+    if (font_manager_init()) {
+        font_manager_load_selection();
+        ESP_LOGI("MAIN", "Font manager initialized, loaded %d font(s)", font_manager_get_font_count());
+    } else {
+        ESP_LOGW("MAIN", "Font manager initialization failed, using default font");
     }
 
     // ============================================================================

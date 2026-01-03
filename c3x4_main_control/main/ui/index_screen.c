@@ -43,7 +43,9 @@ static void index_activate_menu(uint16_t menu_index)
             ESP_LOGI(TAG, "BLE Reader selected (not implemented yet)");
             break;
         case 2:  // Settings
-            ESP_LOGI(TAG, "Settings selected (not implemented yet)");
+            ESP_LOGI(TAG, "Launching Settings...");
+            lvgl_reset_refresh_state();
+            screen_manager_show_settings();
             break;
         default:
             ESP_LOGW(TAG, "Unknown menu index: %u", menu_index);
@@ -78,12 +80,12 @@ static void index_button_focus_event_cb(lv_event_t *e)
         // 记录当前焦点按钮
         s_last_focused_button = btn;
 
-        // 使用FAST刷新模式(1.5秒,质量好)
-        // PARTIAL模式(0.42秒)在GDEY0426T82上可能有条纹问题
-        lvgl_set_refresh_mode(EPD_REFRESH_FAST);
-        
-        // 触发EPD快速刷新
-        lvgl_display_refresh_fast();
+        // 组件内操作：使用局刷模式（PARTIAL）提升响应速度
+        // 焦点切换是小范围更新，局刷足够且更快
+        lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
+
+        // 触发EPD刷新
+        lvgl_display_refresh();
     }
     else if (code == LV_EVENT_DEFOCUSED) {
         ESP_LOGI(TAG, "Button defocused: %p", btn);
@@ -377,8 +379,7 @@ void index_screen_create(uint32_t battery_mv, uint8_t battery_pct, bool charging
         lvgl_trigger_render(NULL);  // 触发 LVGL 渲染
     }
 
-    // 初始刷新 EPD
-    lvgl_set_refresh_mode(EPD_REFRESH_FAST);
+    // 初始刷新 EPD - 由 screen_manager 设置刷新模式（组件间切换用 FULL）
     lvgl_display_refresh();
 
     ESP_LOGI(TAG, "Monster For Pan menu screen created successfully");

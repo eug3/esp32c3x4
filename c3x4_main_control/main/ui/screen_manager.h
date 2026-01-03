@@ -42,6 +42,11 @@ void screen_manager_show_index(void);
 void screen_manager_show_file_browser(void);
 
 /**
+ * @brief 显示设置页面
+ */
+void screen_manager_show_settings(void);
+
+/**
  * @brief 获取屏幕管理器上下文
  * @return 屏幕上下文指针
  */

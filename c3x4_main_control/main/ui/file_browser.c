@@ -6,6 +6,7 @@
 #include "file_browser.h"
 #include "../lvgl_driver.h"
 #include "screen_manager.h"
+#include "font_manager.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -117,7 +118,8 @@ static void file_browser_process_pending_action_cb(void *user_data)
                 if (read_directory(fb_state.current_path)) {
                     update_file_list_display();
                     lvgl_trigger_render(NULL);
-                    lvgl_set_refresh_mode(EPD_REFRESH_FAST);
+                    // 组件内操作：目录导航使用局刷
+                    lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
                     lvgl_display_refresh();
                 }
             }
@@ -146,7 +148,8 @@ static void file_browser_process_pending_action_cb(void *user_data)
         if (read_directory(new_path)) {
             update_file_list_display();
             lvgl_trigger_render(NULL);
-            lvgl_set_refresh_mode(EPD_REFRESH_FAST);
+            // 组件内操作：目录导航使用局刷
+            lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
             lvgl_display_refresh();
         }
         return;
@@ -276,7 +279,7 @@ static void update_file_list_display(void)
             lv_obj_set_style_text_color(icon, lv_color_black(), 0);
         }
         if (txt) {
-            lv_obj_set_style_text_font(txt, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_font(txt, font_manager_get_font(), 0);
             lv_obj_set_style_text_color(txt, lv_color_black(), 0);
         }
 
@@ -305,7 +308,7 @@ static void update_file_list_display(void)
             lv_obj_set_style_text_color(icon_lbl, lv_color_black(), 0);
         }
         if (text_lbl) {
-            lv_obj_set_style_text_font(text_lbl, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_font(text_lbl, font_manager_get_font(), 0);
             lv_obj_set_style_text_color(text_lbl, lv_color_black(), 0);
         }
 
@@ -583,8 +586,7 @@ void file_browser_screen_create(lv_indev_t *indev)
     // 重置刷新状态（清除旧脏区域和计数器）
     lvgl_reset_refresh_state();
 
-    // 触发 EPD 刷新
-    lvgl_set_refresh_mode(EPD_REFRESH_FAST);
+    // 触发 EPD 刷新 - 由 screen_manager 设置刷新模式（组件间切换用 FULL）
     lvgl_display_refresh();
 
     // 等待刷新完成（最多 2 秒）

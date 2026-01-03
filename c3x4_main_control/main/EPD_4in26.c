@@ -583,7 +583,7 @@ void EPD_4in26_Display_Partial(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h)
 {
 	ESP_LOGI("EPD", "EPD_4in26_Display_Partial: x=%u, y=%u, w=%u, h=%u", x, y, w, h);
 	UWORD i;
-	UWORD width = EPD_4in26_WIDTH/8;
+	const UWORD full_width_bytes = EPD_4in26_WIDTH / 8;
 
 	// 参数验证：确保坐标和尺寸在有效范围内
 	if (x >= EPD_4in26_WIDTH || y >= EPD_4in26_HEIGHT) {
@@ -615,6 +615,10 @@ void EPD_4in26_Display_Partial(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h)
 	}
 
 	ESP_LOGI("EPD", "Adjusted partial refresh area: x=%u, y=%u, w=%u, h=%u", x, y, w, h);
+
+	// 计算局刷窗口每行字节数与起始偏移
+	const UWORD x_byte = x / 8;
+	const UWORD window_width_bytes = w / 8;
 
 	// 根据 GxEPD2：Y 坐标需要反转
 	// y = HEIGHT - y - h (reversed partial window)
@@ -657,7 +661,22 @@ void EPD_4in26_Display_Partial(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h)
 	{
 		// 帧缓冲从 y 递增到 y + h - 1
 		// RAM Y 从 y_reversed + h - 1 递减到 y_reversed
-		EPD_4in26_SendData2((UBYTE *)(Image + (y + i) * width), width);
+		EPD_4in26_SendData2((UBYTE *)(Image + (y + i) * full_width_bytes + x_byte), window_width_bytes);
+	}
+
+	// 同步更新上一帧缓冲区(0x26)，否则下一次局刷对比基准会错
+	EPD_4in26_SendCommand(0x4e);
+	EPD_4in26_SendData(x % 256);
+	EPD_4in26_SendData(x / 256);
+
+	EPD_4in26_SendCommand(0x4f);
+	EPD_4in26_SendData((y_reversed + h - 1) % 256);
+	EPD_4in26_SendData((y_reversed + h - 1) / 256);
+
+	EPD_4in26_SendCommand(0x26);
+	for(i = 0; i < h; i++)
+	{
+		EPD_4in26_SendData2((UBYTE *)(Image + (y + i) * full_width_bytes + x_byte), window_width_bytes);
 	}
 
 	// 根据 GxEPD2：局部刷新使用 0xFC
