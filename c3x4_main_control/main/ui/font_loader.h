@@ -13,7 +13,7 @@
  *      DEFINES
  *********************/
 #define MAX_FONT_NAME_LEN 64
-#define MAX_FONTS 20
+#define MAX_FONTS 30
 
 /**********************
  *      TYPEDEFS

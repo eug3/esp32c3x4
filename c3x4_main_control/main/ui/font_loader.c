@@ -339,7 +339,9 @@ int font_loader_rescan_fonts(void)
         g_font_loader.font_count++;
         scan_count++;
 
-        ESP_LOGI(TAG, "Found font: %s -> %s", name, full_path);
+        // 记录找到的字体
+        ESP_LOGI(TAG, "Found font [%d]: name='%s' (len=%zu), path='%s'",
+                 g_font_loader.font_count - 1, info->name, strlen(info->name), info->file_path);
     }
 
     closedir(dir);

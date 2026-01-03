@@ -370,8 +370,18 @@ static void update_file_list_display(void) {
       lv_obj_set_style_text_color(icon_lbl, lv_color_black(), 0);
     }
     if (text_lbl) {
-      lv_obj_set_style_text_font(text_lbl, font_manager_get_font(), 0);
+      // 临时使用内置中文字体来测试中文显示
+      // 注意：这个字体不支持日文字符
+      extern const lv_font_t lv_font_builtin_chinese_16;
+      const lv_font_t *current_font = &lv_font_builtin_chinese_16;
+
+      lv_obj_set_style_text_font(text_lbl, current_font, 0);
       lv_obj_set_style_text_color(text_lbl, lv_color_black(), 0);
+
+      // 调试：打印文件名和字体信息
+      if (i < 3) {  // 只打印前3个文件
+        ESP_LOGI(TAG, "File [%d]: '%s', font=%p (builtin chinese)", i, fb_state.file_names[i], current_font);
+      }
     }
 
     lv_obj_add_event_cb(btn, file_browser_row_key_event_cb, LV_EVENT_KEY,

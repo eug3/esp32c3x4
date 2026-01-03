@@ -1176,7 +1176,8 @@ void app_main(void)
     // - 文件浏览器等界面会触发 LVGL 的 image/alpha 混合绘制路径，栈占用明显增大
     // - JPEG 解码器 (TJPGD) 需要额外的栈空间进行解码
     // - ESP32-C3 上 8192 已经不够，需要增加到 16KB
-    xTaskCreate(lvgl_timer_task, "lvgl_timer", 16384, NULL, 2, NULL);
+    // - 优先级设为 1 (仅高于 idle=0)，避免饿死 idle 任务导致看门狗超时
+    xTaskCreate(lvgl_timer_task, "lvgl_timer", 16384, NULL, 1, NULL);
 
     ESP_LOGI("MAIN", "LVGL GUI initialized successfully! (Manual refresh mode for EPD)");
     ESP_LOGI("MAIN", "Use UP/DOWN buttons to navigate, CONFIRM to select");

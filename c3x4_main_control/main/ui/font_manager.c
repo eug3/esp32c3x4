@@ -65,6 +65,11 @@ void font_manager_load_selection(void)
     int font_count = font_loader_get_font_count();
     ESP_LOGI(TAG, "Available fonts: %d", font_count);
 
+    // 调试：打印当前字体
+    lv_font_t *current = font_loader_get_current_font();
+    ESP_LOGI(TAG, "Current font before loading: %p", current);
+    ESP_LOGI(TAG, "Montserrat font address: %p", &lv_font_montserrat_14);
+
     // 如果没有 SD 卡字体，尝试使用内置中文字体
     if (font_count == 0) {
         ESP_LOGW(TAG, "No SD card fonts, trying built-in Chinese font...");
@@ -86,10 +91,26 @@ void font_manager_load_selection(void)
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
 
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "No saved font selection found (NVS open failed: 0x%x)", err);
-        // 使用默认字体
-        font_loader_set_current_font(NULL);
-        s_current_font_index = -1;
+        ESP_LOGW(TAG, "No saved font selection found (NVS open failed: 0x%x), using first available font", err);
+        // 尝试使用第一个SD卡字体，而不是默认的montserrat
+        if (font_count > 0) {
+            font_manager_set_font_by_index(0);
+            ESP_LOGI(TAG, "Using first SD card font: %s",
+                     ((const font_info_t*)font_loader_get_font_list())[0].name);
+        } else {
+            // 没有SD卡字体，尝试内置中文字体
+            const lv_font_t *chinese = font_loader_get_builtin_chinese_font();
+            if (chinese != NULL) {
+                font_loader_set_current_font((lv_font_t *)chinese);
+                s_current_font_index = -2;
+                ESP_LOGI(TAG, "Using built-in Chinese font");
+            } else {
+                // 最后才使用默认字体（不支持中文）
+                font_loader_set_current_font(NULL);
+                s_current_font_index = -1;
+                ESP_LOGW(TAG, "Using default font (montserrat - Chinese not supported)");
+            }
+        }
         return;
     }
 
@@ -200,10 +221,19 @@ void font_manager_save_selection(void)
 lv_font_t* font_manager_get_font(void)
 {
     if (!s_manager_initialized) {
+        ESP_LOGW(TAG, "Font manager not initialized, returning montserrat");
         return (lv_font_t *)&lv_font_montserrat_14;
     }
 
-    return font_loader_get_current_font();
+    lv_font_t *font = font_loader_get_current_font();
+    // 只在第一次调用时打印日志（使用静态变量）
+    static bool logged = false;
+    if (!logged) {
+        ESP_LOGI(TAG, "font_manager_get_font: returning %p (montserrat=%p)",
+                 font, &lv_font_montserrat_14);
+        logged = true;
+    }
+    return font;
 }
 
 bool font_manager_set_font_by_index(int index)

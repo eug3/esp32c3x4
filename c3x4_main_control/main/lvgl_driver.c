@@ -234,9 +234,11 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area,
 
   // 首次 flush 时打印信息
   if (flush_count <= 20) {
-    ESP_LOGI(TAG, "disp_flush_cb #%u: area(%d,%d)-(%d,%d), cf=%d", flush_count,
-             (int)area->x1, (int)area->y1, (int)area->x2, (int)area->y2,
-             (int)cf);
+    int32_t w = area->x2 - area->x1 + 1;
+    int32_t h = area->y2 - area->y1 + 1;
+    ESP_LOGI(TAG, "disp_flush_cb #%u: area(%d,%d)-(%d,%d) size=%dx%d, cf=%d",
+             flush_count, (int)area->x1, (int)area->y1, (int)area->x2, (int)area->y2,
+             (int)w, (int)h, (int)cf);
   }
 
   // PARTIAL 模式 + 1bpp：LVGL 使用 I1 格式渲染到小缓冲区
@@ -870,13 +872,22 @@ void lvgl_timer_task(void *arg) {
   ESP_LOGI(TAG, "LVGL timer task started (manual refresh mode for EPD)");
 
   while (1) {
-    // 定期调用 lv_timer_handler() 处理：
+    // 使用 lv_timer_handler_run_in_period() 替代直接调用 lv_timer_handler()
+    // 这个函数会确保在指定时间内完成处理，避免长时间阻塞导致看门狗超时
+    //
+    // 参数 2 表示最多运行 2ms，然后返回，让其他任务有机会运行
+    // 这对于 EPD 这种慢速显示设备尤其重要，因为渲染操作可能耗时较长
+    //
+    // 该函数处理：
     // 1. 输入设备读取和事件分发
     // 2. 动画和定时器
     // 3. 焦点管理
     // 但不会自动触发渲染（需要调用 lv_refr_now()）
-    lv_timer_handler();
-    vTaskDelay(pdMS_TO_TICKS(10)); // 10ms 周期，足够响应按键
+    lv_timer_handler_run_in_period(2);
+
+    // 关键：必须调用 vTaskDelay 让出 CPU，确保 idle 任务能运行并喂狗
+    // 这个延迟不能省略，否则 idle 任务会饥饿导致看门狗超时
+    vTaskDelay(1);
   }
 }
 

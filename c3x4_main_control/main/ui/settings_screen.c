@@ -112,17 +112,26 @@ static void update_font_list_display(void)
         char btn_text[128];
         snprintf(btn_text, sizeof(btn_text), "%s", font_list[i].name);
 
+        // 记录原始文件名和显示文本
+        ESP_LOGI(TAG, "Font [%d]: name='%s' (len=%zu), file_path='%s'",
+                 i, font_list[i].name, strlen(font_list[i].name), font_list[i].file_path);
+
         btn = lv_list_add_button(g_settings.font_list, LV_SYMBOL_FILE, btn_text);
         lv_obj_set_style_bg_color(btn, lv_color_white(), 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
         lv_obj_set_user_data(btn, (void *)(uintptr_t)i);  // 存储字体索引
 
-        // 使用当前选择的字体显示按钮文本
+        // 重要：使用默认字体 (montserrat) 显示字体文件名
+        // 因为文件名可能包含非ASCII字符（如日文），而用户选择的字体可能不支持
+        // montserrat 支持基本的拉丁字符，对于不支持的字符会显示为方块或替换字符
         label = lv_obj_get_child(btn, 0);
         icon = lv_obj_get_child(btn, 1);
         if (label) {
-            lv_obj_set_style_text_font(label, font_manager_get_font(), 0);
+            const lv_font_t *old_font = lv_obj_get_style_text_font(label, 0);
+            lv_obj_set_style_text_font(label, (lv_font_t *)&lv_font_montserrat_14, 0);
             lv_obj_set_style_text_color(label, lv_color_black(), 0);
+            ESP_LOGI(TAG, "  Button label: old_font=%p, new_font=%p (montserrat), btn_text='%s'",
+                     old_font, &lv_font_montserrat_14, btn_text);
         }
         if (icon) {
             lv_obj_set_style_text_color(icon, lv_color_black(), 0);
