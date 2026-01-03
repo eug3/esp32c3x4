@@ -682,6 +682,9 @@ void lvgl_clear_framebuffer(void) {
 #define KEY_REPEAT_DELAY_MS 300  // 按住后首次重复的延迟
 #define KEY_REPEAT_PERIOD_MS 150 // 之后每次重复的周期
 
+// 双击检测配置
+#define DOUBLE_CLICK_TIMEOUT_MS 400  // 双击时间窗口（毫秒）
+
 // 按键状态
 typedef struct {
   button_t last_key;
@@ -689,18 +692,34 @@ typedef struct {
   lv_point_t point;             // 用于模拟触摸位置（可选）
   uint32_t press_time_ms;       // 按键首次按下的时间
   uint32_t last_repeat_time_ms; // 上次重复事件的时间
+  // 双击检测状态
+  button_t last_back_key;       // 上次返回键
+  uint32_t last_back_release_ms;// 上次返回键释放时间
+  bool back_key_double_clicked; // 是否检测到双击
 } button_state_t;
 
 static button_state_t btn_state = {.last_key = BTN_NONE,
                                    .pressed = false,
                                    .point = {0, 0},
                                    .press_time_ms = 0,
-                                   .last_repeat_time_ms = 0};
+                                   .last_repeat_time_ms = 0,
+                                   .last_back_key = BTN_NONE,
+                                   .last_back_release_ms = 0,
+                                   .back_key_double_clicked = false};
 
 // LVGL keypad expects the last key to be reported even on RELEASED.
 // If key is cleared to 0 too early, some widgets/group navigation may not
 // receive KEY events reliably.
 static uint32_t s_last_lvgl_key = 0;
+
+// 导出双击状态供外部查询
+bool lvgl_is_back_key_double_clicked(void) {
+  return btn_state.back_key_double_clicked;
+}
+
+void lvgl_clear_back_key_double_click(void) {
+  btn_state.back_key_double_clicked = false;
+}
 
 // 按键映射辅助函数：将物理按键映射为LVGL按键
 static uint32_t map_button_to_lvgl_key(button_t btn) {
@@ -744,6 +763,23 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
   } else if (btn == BTN_NONE && btn_state.pressed) {
     // 按键释放
     btn_state.pressed = false;
+
+    // 检测返回键的双击
+    if (btn_state.last_key == BTN_BACK) {
+      uint32_t now = lv_tick_get();
+      if (btn_state.last_back_key == BTN_BACK &&
+          (now - btn_state.last_back_release_ms) < DOUBLE_CLICK_TIMEOUT_MS) {
+        // 双击检测成功
+        btn_state.back_key_double_clicked = true;
+        ESP_LOGI(TAG, "Back key double-clicked detected!");
+      } else {
+        // 单击或超时，重置双击标志
+        btn_state.back_key_double_clicked = false;
+      }
+      btn_state.last_back_key = BTN_BACK;
+      btn_state.last_back_release_ms = now;
+    }
+
     btn_state.last_key = BTN_NONE;
     btn_state.press_time_ms = 0;
     btn_state.last_repeat_time_ms = 0;

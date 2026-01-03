@@ -12,6 +12,7 @@
 #include "../lvgl_driver.h"
 #include "esp_log.h"
 #include "font_manager.h"
+#include "screen_manager.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
 #include <dirent.h>
@@ -367,6 +368,27 @@ void image_browser_cleanup(void) {
     ESP_LOGI(TAG, "Image browser cleaned up");
 }
 
+// 按键事件处理
+static void image_browser_key_event_cb(lv_event_t *e) {
+    if (lv_event_get_code(e) != LV_EVENT_KEY) {
+        return;
+    }
+
+    const uint32_t key = lv_event_get_key(e);
+
+    if (key == LV_KEY_ESC) {
+        // 检查是否双击返回键
+        if (lvgl_is_back_key_double_clicked()) {
+            ESP_LOGI(TAG, "Back key double-clicked, returning to index screen");
+            lvgl_clear_back_key_double_click();
+            screen_manager_show_index();
+        } else {
+            ESP_LOGI(TAG, "Back key single-clicked, returning to file browser");
+            screen_manager_go_back();
+        }
+    }
+}
+
 /**
  * @brief 创建图片查看器屏幕
  * @param directory 要浏览的目录
@@ -400,6 +422,9 @@ void image_browser_screen_create(const char *directory, int start_index, lv_inde
     // 创建屏幕
     lv_obj_t *screen = lv_obj_create(NULL);
     lv_scr_load(screen);
+
+    // 注册按键事件处理
+    lv_obj_add_event_cb(screen, image_browser_key_event_cb, LV_EVENT_KEY, NULL);
 
     // 设置背景为白色
     lv_obj_set_style_bg_color(screen, lv_color_white(), 0);

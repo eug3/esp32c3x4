@@ -69,6 +69,7 @@ struct reader_state_t {
         READER_ACTION_SHOW_MENU,
         READER_ACTION_HIDE_MENU,
         READER_ACTION_EXIT,
+        READER_ACTION_EXIT_TO_INDEX,  // 双击返回键直接返回主页
     } pending_action;
 };
 
@@ -113,6 +114,13 @@ static book_type_t get_book_type(const char *file_path) {
 
 // 根据字体大小获取字体指针
 static const lv_font_t* get_lvgl_font(int font_size) {
+    // 优先使用 font_manager 的中文字体
+    const lv_font_t *chinese_font = font_manager_get_font();
+    if (chinese_font != NULL) {
+        return chinese_font;
+    }
+
+    // 如果没有中文字体，使用内置英文字体
     switch (font_size) {
         case 14: return &lv_font_montserrat_14;
         case 16: return &lv_font_montserrat_16;
@@ -222,8 +230,16 @@ static void reader_key_event_cb(lv_event_t *e) {
             break;
 
         case LV_KEY_ESC:
-            // 退出阅读器
-            g_reader_state.pending_action = READER_ACTION_EXIT;
+            // 检查是否双击返回键
+            if (lvgl_is_back_key_double_clicked()) {
+                ESP_LOGI(TAG, "Back key double-clicked, returning to index screen");
+                lvgl_clear_back_key_double_click();
+                // 双击直接返回主页
+                g_reader_state.pending_action = READER_ACTION_EXIT_TO_INDEX;
+            } else {
+                // 单击退出阅读器返回文件浏览器
+                g_reader_state.pending_action = READER_ACTION_EXIT;
+            }
             lv_async_call(reader_process_pending_action_cb, NULL);
             break;
 
@@ -275,6 +291,11 @@ static void reader_process_pending_action_cb(void *user_data) {
         case READER_ACTION_EXIT:
             // 返回文件浏览器
             screen_manager_go_back();
+            break;
+
+        case READER_ACTION_EXIT_TO_INDEX:
+            // 双击返回键直接返回主页
+            screen_manager_show_index();
             break;
 
         default:

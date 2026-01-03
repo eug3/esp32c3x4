@@ -10,6 +10,7 @@
  */
 
 #include "font_loader.h"
+#include "builtin_chinese_font.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
@@ -274,6 +275,17 @@ int font_loader_scan_fonts(void)
         return g_font_loader.font_count;
     }
 
+    return font_loader_rescan_fonts();
+}
+
+int font_loader_rescan_fonts(void)
+{
+    ESP_LOGI(TAG, "Rescanning fonts in: %s", g_font_loader.font_dir);
+
+    // 清除之前的扫描结果
+    g_font_loader.font_count = 0;
+    memset(g_font_loader.fonts, 0, sizeof(g_font_loader.fonts));
+
     DIR *dir = opendir(g_font_loader.font_dir);
     if (dir == NULL) {
         ESP_LOGE(TAG, "Failed to open font directory: %s", g_font_loader.font_dir);
@@ -467,4 +479,14 @@ void font_loader_cleanup(void)
 font_loader_state_t* font_loader_get_state(void)
 {
     return &g_font_loader;
+}
+
+const lv_font_t* font_loader_get_builtin_chinese_font(void)
+{
+    return get_builtin_chinese_font();
+}
+
+bool font_loader_has_builtin_chinese_font(void)
+{
+    return builtin_font_is_available();
 }

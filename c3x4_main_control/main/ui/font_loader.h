@@ -13,7 +13,7 @@
  *      DEFINES
  *********************/
 #define MAX_FONT_NAME_LEN 64
-#define MAX_FONTS 10
+#define MAX_FONTS 20
 
 /**********************
  *      TYPEDEFS
@@ -57,6 +57,12 @@ bool font_loader_init(const char *font_dir);
  * @return 找到的字体文件数量
  */
 int font_loader_scan_fonts(void);
+
+/**
+ * @brief 强制重新扫描字体目录（清除之前的扫描结果）
+ * @return 找到的字体文件数量
+ */
+int font_loader_rescan_fonts(void);
 
 /**
  * @brief 从 SD 卡加载字体文件
@@ -127,5 +133,17 @@ void font_loader_cleanup(void);
  * @return 字体加载器状态指针
  */
 font_loader_state_t* font_loader_get_state(void);
+
+/**
+ * @brief 获取内置中文字体
+ * @return 内置中文字体指针，如果不可用返回 NULL
+ */
+const lv_font_t* font_loader_get_builtin_chinese_font(void);
+
+/**
+ * @brief 检查内置中文字体是否可用
+ * @return true 可用，false 不可用
+ */
+bool font_loader_has_builtin_chinese_font(void);
 
 #endif // FONT_LOADER_H

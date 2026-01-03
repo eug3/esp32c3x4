@@ -122,4 +122,16 @@ void lvgl_timer_task(void *arg);
  */
 void lvgl_fs_init(void);
 
+/**
+ * @brief 检查返回键是否被双击
+ * @return true 表示检测到双击，false 表示未检测到
+ */
+bool lvgl_is_back_key_double_clicked(void);
+
+/**
+ * @brief 清除返回键双击状态
+ * 在处理完双击事件后调用此函数重置状态
+ */
+void lvgl_clear_back_key_double_click(void);
+
 #endif // LVGL_DRIVER_H

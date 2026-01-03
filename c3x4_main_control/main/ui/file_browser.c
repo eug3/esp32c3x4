@@ -108,6 +108,8 @@ static void file_browser_process_pending_action_cb(void *user_data) {
 
   if (action == FB_ACTION_EXIT) {
     ESP_LOGI(TAG, "Exiting file browser, returning to previous screen");
+    // 退出使用快速刷新
+    lvgl_set_refresh_mode(EPD_REFRESH_FAST);
     // 使用导航历史栈返回上一页
     screen_manager_go_back();
     return;
@@ -153,6 +155,8 @@ static void file_browser_process_pending_action_cb(void *user_data) {
             full_path[MAX_PATH_LEN - 1] = '\0';
           }
           ESP_LOGI(TAG, "Opening book: %s", full_path);
+          // 进入新页面使用快速刷新
+          lvgl_set_refresh_mode(EPD_REFRESH_FAST);
           screen_manager_show_reader(full_path);
           return;
         }
@@ -168,6 +172,9 @@ static void file_browser_process_pending_action_cb(void *user_data) {
             full_path[MAX_PATH_LEN - 1] = '\0';
           }
           ESP_LOGI(TAG, "Opening image: %s", full_path);
+
+          // 进入新页面使用快速刷新
+          lvgl_set_refresh_mode(EPD_REFRESH_FAST);
 
           // 获取目录路径（去掉文件名）
           char dir_path[MAX_PATH_LEN];
@@ -490,10 +497,19 @@ static void file_browser_row_key_event_cb(lv_event_t *e) {
       file_browser_schedule_action(FB_ACTION_OPEN_DIR, idx);
     }
   } else if (key == LV_KEY_ESC) {
-    if (strcmp(fb_state.current_path, SDCARD_MOUNT_POINT) != 0) {
-      file_browser_schedule_action(FB_ACTION_GO_UP, 0);
+    // 检查是否双击返回键
+    if (lvgl_is_back_key_double_clicked()) {
+      ESP_LOGI(TAG, "Back key double-clicked, returning to index screen");
+      lvgl_clear_back_key_double_click();
+      // 双击直接返回主页
+      screen_manager_show_index();
     } else {
-      file_browser_schedule_action(FB_ACTION_EXIT, 0);
+      // 单击：在子目录返回上级，在根目录返回上一页
+      if (strcmp(fb_state.current_path, SDCARD_MOUNT_POINT) != 0) {
+        file_browser_schedule_action(FB_ACTION_GO_UP, 0);
+      } else {
+        file_browser_schedule_action(FB_ACTION_EXIT, 0);
+      }
     }
   }
 }

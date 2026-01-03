@@ -6,7 +6,7 @@
 #include "font_manager.h"
 #include "font_loader.h"
 #include "font_stream.h"
-#include "chinese_font.h"
+#include "builtin_chinese_font.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "nvs_flash.h"
@@ -68,9 +68,9 @@ void font_manager_load_selection(void)
     // 如果没有 SD 卡字体，尝试使用内置中文字体
     if (font_count == 0) {
         ESP_LOGW(TAG, "No SD card fonts, trying built-in Chinese font...");
-        lv_font_t *chinese = chinese_font_get();
+        const lv_font_t *chinese = font_loader_get_builtin_chinese_font();
         if (chinese != NULL) {
-            font_loader_set_current_font(chinese);
+            font_loader_set_current_font((lv_font_t *)chinese);
             s_current_font_index = -2;  // -2 表示内置中文字体
             ESP_LOGI(TAG, "Using built-in Chinese font");
             return;

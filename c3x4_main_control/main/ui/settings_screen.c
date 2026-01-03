@@ -17,7 +17,7 @@ static const char *TAG = "SETTINGS_SCR";
 // 设置页面状态
 typedef struct {
     lv_obj_t *font_list;              // 字体列表
-    lv_obj_t *font_buttons[10];       // 字体选择按钮
+    lv_obj_t *font_buttons[21];       // 字体选择按钮（1个默认 + 20个SD卡字体）
     int font_button_count;            // 字体按钮数量
     int selected_font_index;          // 当前选中的字体索引
 
@@ -107,8 +107,8 @@ static void update_font_list_display(void)
         lv_group_add_obj(g_settings.group, btn);
     }
 
-    // 添加所有字体选项
-    for (int i = 0; i < font_count && g_settings.font_button_count < 10; i++) {
+    // 添加所有字体选项（最多 MAX_FONTS 个）
+    for (int i = 0; i < font_count && g_settings.font_button_count < 20; i++) {
         char btn_text[128];
         snprintf(btn_text, sizeof(btn_text), "%s", font_list[i].name);
 
@@ -222,9 +222,17 @@ static void settings_key_event_cb(lv_event_t *e)
     const uint32_t key = lv_event_get_key(e);
 
     if (key == LV_KEY_ESC) {
-        ESP_LOGI(TAG, "Exiting settings screen");
-        // 使用导航历史栈返回上一页
-        screen_manager_go_back();
+        // 检查是否双击返回键
+        if (lvgl_is_back_key_double_clicked()) {
+            ESP_LOGI(TAG, "Back key double-clicked, returning to index screen");
+            lvgl_clear_back_key_double_click();
+            // 双击直接返回主页
+            screen_manager_show_index();
+        } else {
+            ESP_LOGI(TAG, "Exiting settings screen");
+            // 单击使用导航历史栈返回上一页
+            screen_manager_go_back();
+        }
     }
 }
 
