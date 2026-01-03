@@ -212,34 +212,17 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     }
 
     // ============================================================
-    // 优化方案：计算实际需要绘制的区域（脏区裁剪）
-    // 如果是 PARTIAL 模式，只绘制与脏区相交的像素
+    // LVGL 渲染说明：
+    // LVGL 会全屏渲染所有需要更新的区域，不管我们使用何种刷新模式。
+    // - PARTIAL 模式：LVGL 全屏渲染 -> EPD 只刷新脏区（减少硬件通信）
+    // - FAST 模式：LVGL 全屏渲染 -> EPD 全屏快刷
+    // - FULL 模式：LVGL 全屏渲染 -> EPD 全屏全刷
+    //
+    // 关键点：我们不需要在 flush_cb 中裁剪渲染区域，因为：
+    // 1. LVGL 已经计算并渲染了整个 area 中的所有像素
+    // 2. 裁剪只会跳过 framebuffer 的写入，但 LVGL 已经做了渲染工作
+    // 3. 真正的优化在于 EPD 刷新时只发送脏区数据给硬件（在 epd_refresh_task 中实现）
     // ============================================================
-    lv_area_t clip_area;
-    bool use_clip = false;
-
-    if (s_refresh_mode == EPD_REFRESH_PARTIAL && s_dirty_valid) {
-        // 获取脏区副本
-        portENTER_CRITICAL(&s_dirty_mux);
-        lv_area_t dirty = s_dirty_area;
-        portEXIT_CRITICAL(&s_dirty_mux);
-
-        // 计算当前 flush 区域与脏区的交集
-        clip_area.x1 = (area->x1 > dirty.x1) ? area->x1 : dirty.x1;
-        clip_area.y1 = (area->y1 > dirty.y1) ? area->y1 : dirty.y1;
-        clip_area.x2 = (area->x2 < dirty.x2) ? area->x2 : dirty.x2;
-        clip_area.y2 = (area->y2 < dirty.y2) ? area->y2 : dirty.y2;
-
-        // 检查是否有效相交
-        if (clip_area.x1 <= clip_area.x2 && clip_area.y1 <= clip_area.y2) {
-            use_clip = true;
-            if (flush_count <= 20) {
-                ESP_LOGI(TAG, "disp_flush_cb: clip enabled, original(%d,%d)-(%d,%d) -> clipped(%d,%d)-(%d,%d)",
-                         (int)area->x1, (int)area->y1, (int)area->x2, (int)area->y2,
-                         (int)clip_area.x1, (int)clip_area.y1, (int)clip_area.x2, (int)clip_area.y2);
-            }
-        }
-    }
 
     // 开始处理flush
     uint32_t black_count = 0;
@@ -249,13 +232,6 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
 
     for (y = area->y1; y <= area->y2; y++) {
         for (x = area->x1; x <= area->x2; x++) {
-            // 应用裁剪：如果当前像素不在裁剪区域内，跳过
-            if (use_clip) {
-                if (x < clip_area.x1 || x > clip_area.x2 ||
-                    y < clip_area.y1 || y > clip_area.y2) {
-                    continue;
-                }
-            }
             // 计算在缓冲区中的位置
             int32_t buf_x = x - area->x1;
             int32_t buf_y = y - area->y1;
@@ -327,14 +303,41 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
                  black_count, white_count, black_count + white_count);
     }
 
-    // 只在 PARTIAL 模式下记录脏区域
-    // FULL 和 FAST 模式都会发送完整 framebuffer，不需要脏区域跟踪
+    // ============================================================
+    // 脏区跟踪说明：
+    // 只在 PARTIAL 模式下记录脏区域，用于后续 EPD 刷新时裁剪发送的数据。
+    //
+    // 注意：这里的脏区跟踪只是记录 LVGL 渲染过的区域，
+    //     用于告知 EPD 硬件哪些区域的数据发生了变化。
+    // LVGL 本身仍然会渲染所有需要更新的控件（全屏渲染）。
+    //
+    // FULL 和 FAST 模式会发送完整 framebuffer 给 EPD，不需要脏区域跟踪。
+    // ============================================================
     if (s_refresh_mode == EPD_REFRESH_PARTIAL) {
         dirty_area_add(area);
     }
 
     // 通知LVGL刷新完成
     lv_display_flush_ready(disp);
+
+    // ============================================================
+    // 自动刷新机制：
+    // 在 flush 完成后自动触发 EPD 刷新请求。
+    //
+    // 这样可以避免时序问题：
+    // - UI 代码只需调用 lvgl_trigger_render() 触发 LVGL 渲染
+    // - LVGL 渲染完成后，flush_cb 会自动请求 EPD 刷新
+    // - 不需要 UI 代码手动调用 lvgl_display_refresh()
+    //
+    // 注意：只在非全刷模式下自动刷新，全刷由 UI 代码显式控制
+    //
+    // 判断是否是最后一次 flush：
+    // LVGL 按从上到下的顺序 flush，当 area.y2 到达屏幕底部时表示是最后一次
+    // ============================================================
+    bool is_last_flush = (area->y2 == DISP_VER_RES - 1);
+    if (is_last_flush && s_refresh_mode != EPD_REFRESH_FULL) {
+        queue_refresh_request(s_refresh_mode);
+    }
 }
 
 // 异步 EPD 刷新任务（前置声明）
