@@ -81,12 +81,6 @@ bool lvgl_is_refreshing(void);
 void lvgl_reset_refresh_state(void);
 
 /**
- * @brief 注册刷新完成回调
- * @param callback 回调函数（可选，传NULL清除）
- */
-void lvgl_register_refresh_complete_callback(void (*callback)(void));
-
-/**
  * @brief 清空 framebuffer 为白色
  * 在切换到新屏幕前调用，确保旧数据被完全覆盖
  */

@@ -1,0 +1,176 @@
+/**
+ * @file lvgl_driver_optimized.c
+ * @brief 内存优化版本 - 使用 1bpp 作为 LVGL 颜色格式
+ * 
+ * 此版本专为 ESP32-C3 设计，内存占用更小：
+ * - 使用 LV_COLOR_FORMAT_I1 (1bpp)
+ * - s_lvgl_draw_buffer: 480×800÷8 = 48 KB
+ * - s_epd_framebuffer: 800×480÷8 = 48 KB
+ * - 总计: ~96 KB (相比 DIRECT 模式的 750 KB)
+ */
+
+#include "lvgl_driver.h"
+#include "EPD_4in26.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
+#include "freertos/task.h"
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+
+static const char *TAG = "LVGL_DRV_OPT";
+
+// EPD显示尺寸
+#define EPD_WIDTH 800
+#define EPD_HEIGHT 480
+#define DISP_HOR_RES 480
+#define DISP_VER_RES 800
+
+// 1bpp framebuffers
+static uint8_t s_lvgl_draw_buffer[(DISP_HOR_RES * DISP_VER_RES) / 8];
+static uint8_t s_epd_framebuffer[(EPD_WIDTH * EPD_HEIGHT) / 8];
+
+// 其他状态变量（与主版本相同）
+static lv_area_t s_dirty_area;
+static bool s_dirty_valid = false;
+static epd_refresh_mode_t s_refresh_mode = EPD_REFRESH_FULL;
+static uint32_t s_partial_refresh_count = 0;
+static bool s_epd_refreshing = false;
+static bool s_render_done = false;
+static SemaphoreHandle_t s_epd_mutex = NULL;
+static SemaphoreHandle_t s_render_done_sem = NULL;
+static TaskHandle_t s_epd_refresh_task_handle = NULL;
+static QueueHandle_t s_refresh_queue = NULL;
+static portMUX_TYPE s_dirty_mux = portMUX_INITIALIZER_UNLOCKED;
+static lv_display_t *g_lv_display = NULL;
+
+// 快速位映射转换（1bpp LVGL -> 1bpp EPD with ROTATE_270）
+static inline void copy_1bpp_with_rotation(const lv_area_t *area, const uint8_t *src) {
+    // LVGL 1bpp 格式: 8个像素/字节, MSB = 最左像素
+    // EPD 1bpp 格式: 8个像素/字节, MSB = 最左像素
+    // ROTATE_270: LVGL(x,y) -> EPD(memX=y, memY=EPD_HEIGHT-1-x)
+    
+    for (int32_t y = area->y1; y <= area->y2; y++) {
+        for (int32_t x = area->x1; x <= area->x2; x++) {
+            // 从 LVGL buffer 读取像素
+            const int32_t src_byte = (y * DISP_HOR_RES + x) / 8;
+            const uint8_t src_bit = 7 - (x % 8);
+            const bool pixel = (src[src_byte] >> src_bit) & 1;
+            
+            // 写入 EPD buffer（旋转后的坐标）
+            const int32_t memX = y;
+            const int32_t memY = EPD_HEIGHT - 1 - x;
+            const uint32_t dst_byte = memY * (EPD_WIDTH / 8) + (memX / 8);
+            const uint8_t dst_bit = 7 - (memX % 8);
+            
+            if (dst_byte < sizeof(s_epd_framebuffer)) {
+                if (pixel == 0) {  // LVGL: 0=黑色
+                    s_epd_framebuffer[dst_byte] &= ~(1 << dst_bit);  // EPD: 0=黑色
+                } else {  // LVGL: 1=白色
+                    s_epd_framebuffer[dst_byte] |= (1 << dst_bit);   // EPD: 1=白色
+                }
+            }
+        }
+    }
+}
+
+// Flush callback - 简化版本，只做格式转换
+static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
+    if (xSemaphoreTake(s_epd_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        ESP_LOGW(TAG, "flush_cb: mutex timeout");
+        lv_display_flush_ready(disp);
+        return;
+    }
+    
+    s_render_done = false;
+    
+    static uint32_t flush_count = 0;
+    if (++flush_count <= 5) {
+        ESP_LOGI(TAG, "flush_cb #%u: area(%d,%d)-(%d,%d)", flush_count,
+                 (int)area->x1, (int)area->y1, (int)area->x2, (int)area->y2);
+    }
+    
+    // 快速转换（1bpp -> 1bpp with rotation）
+    copy_1bpp_with_rotation(area, px_map);
+    
+    // 跟踪脏区（局刷模式）
+    if (s_refresh_mode == EPD_REFRESH_PARTIAL) {
+        portENTER_CRITICAL(&s_dirty_mux);
+        if (!s_dirty_valid) {
+            s_dirty_area = *area;
+            s_dirty_valid = true;
+        } else {
+            if (area->x1 < s_dirty_area.x1) s_dirty_area.x1 = area->x1;
+            if (area->y1 < s_dirty_area.y1) s_dirty_area.y1 = area->y1;
+            if (area->x2 > s_dirty_area.x2) s_dirty_area.x2 = area->x2;
+            if (area->y2 > s_dirty_area.y2) s_dirty_area.y2 = area->y2;
+        }
+        portEXIT_CRITICAL(&s_dirty_mux);
+    }
+    
+    s_render_done = true;
+    xSemaphoreGive(s_render_done_sem);
+    xSemaphoreGive(s_epd_mutex);
+    
+    lv_display_flush_ready(disp);
+}
+
+// EPD 刷新任务（与主版本相同的逻辑）
+static void epd_refresh_task(void *arg) {
+    // ... (复用主版本的刷新逻辑) ...
+}
+
+// 初始化函数 - 使用 1bpp 颜色格式
+lv_display_t *lvgl_display_init_optimized(void) {
+    ESP_LOGI(TAG, "Initializing LVGL (optimized 1bpp mode)");
+    
+    // 创建同步对象
+    s_epd_mutex = xSemaphoreCreateMutex();
+    s_render_done_sem = xSemaphoreCreateBinary();
+    s_refresh_queue = xQueueCreate(1, sizeof(refresh_request_t));
+    
+    // 创建刷新任务
+    xTaskCreate(epd_refresh_task, "epd_refresh", 4096, NULL, 3,
+                &s_epd_refresh_task_handle);
+    
+    // 清空缓冲区
+    memset(s_lvgl_draw_buffer, 0xFF, sizeof(s_lvgl_draw_buffer));
+    memset(s_epd_framebuffer, 0xFF, sizeof(s_epd_framebuffer));
+    ESP_LOGI(TAG, "Buffers cleared: LVGL=%u bytes, EPD=%u bytes",
+             (unsigned)sizeof(s_lvgl_draw_buffer),
+             (unsigned)sizeof(s_epd_framebuffer));
+    
+    // 初始化 LVGL
+    lv_init();
+    
+    // 创建显示设备 - 使用 1bpp 格式
+    lv_display_t *disp = lv_display_create(DISP_HOR_RES, DISP_VER_RES);
+    lv_display_set_flush_cb(disp, disp_flush_cb);
+    
+    // 设置为 1bpp 颜色格式
+    lv_display_set_color_format(disp, LV_COLOR_FORMAT_I1);
+    
+    // 使用 DIRECT 模式 + 全屏 1bpp 缓冲区
+    lv_display_set_render_mode(disp, LV_DISPLAY_RENDER_MODE_DIRECT);
+    lv_display_set_buffers(disp, s_lvgl_draw_buffer, NULL,
+                          sizeof(s_lvgl_draw_buffer),
+                          LV_DISPLAY_RENDER_MODE_DIRECT);
+    
+    g_lv_display = disp;
+    
+    ESP_LOGI(TAG, "Display initialized: %dx%d, 1bpp, DIRECT mode, ~%u KB RAM",
+             DISP_HOR_RES, DISP_VER_RES,
+             (unsigned)((sizeof(s_lvgl_draw_buffer) + sizeof(s_epd_framebuffer)) / 1024));
+    
+    return disp;
+}
+
+// 其他公共函数（与主版本相同）
+// - lvgl_trigger_render()
+// - lvgl_display_refresh()
+// - lvgl_display_refresh_partial()
+// - lvgl_display_refresh_fast()
+// - lvgl_display_refresh_full()
+// - lvgl_set_refresh_mode()
+// - lvgl_register_refresh_complete_callback()

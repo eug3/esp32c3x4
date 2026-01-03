@@ -452,6 +452,10 @@ void EPD_4in26_Clear(void)
         image[i] = 0xff;
     }
 
+	// 重新设置全屏窗口
+	EPD_4in26_SetWindows(0, EPD_4in26_HEIGHT-1, EPD_4in26_WIDTH-1, 0);
+	EPD_4in26_SetCursor(0, 0);
+
 	EPD_4in26_SendCommand(0x24);   //write RAM for black(0)/white (1)
 	for(i=0; i<height; i++)
 	{
@@ -479,6 +483,10 @@ void EPD_4in26_Clear_Fast(void)
     for(i=0; i<width; i++) {
         image[i] = 0xff;
     }
+
+	// 重新设置全屏窗口
+	EPD_4in26_SetWindows(0, EPD_4in26_HEIGHT-1, EPD_4in26_WIDTH-1, 0);
+	EPD_4in26_SetCursor(0, 0);
 
 	// 设置快刷模式的温度补偿
 	EPD_4in26_SendCommand(0x1A);
@@ -513,6 +521,10 @@ void EPD_4in26_Display(UBYTE *Image)
 
 	ESP_LOGI("EPD", "EPD_4in26_Display: starting, height=%u, width=%u bytes", height, width);
 
+	// 重新设置全屏窗口（防止之前的局部刷新改变了窗口范围）
+	EPD_4in26_SetWindows(0, EPD_4in26_HEIGHT-1, EPD_4in26_WIDTH-1, 0);
+	EPD_4in26_SetCursor(0, 0);
+
 	// 打印前几行数据用于调试
 	ESP_LOGI("EPD", "EPD_4in26_Display: first 4 bytes of image: 0x%02X 0x%02X 0x%02X 0x%02X",
 	         Image[0], Image[1], Image[2], Image[3]);
@@ -544,7 +556,11 @@ void EPD_4in26_Display_Base(UBYTE *Image)
 	UWORD i;
 	UWORD height = EPD_4in26_HEIGHT;
 	UWORD width = EPD_4in26_WIDTH/8;
-	
+
+	// 重新设置全屏窗口
+	EPD_4in26_SetWindows(0, EPD_4in26_HEIGHT-1, EPD_4in26_WIDTH-1, 0);
+	EPD_4in26_SetCursor(0, 0);
+
 	EPD_4in26_SendCommand(0x24);   //write RAM for black(0)/white (1)
 	for(i=0; i<height; i++)
 	{
@@ -575,6 +591,10 @@ void EPD_4in26_Display_Fast(UBYTE *Image)
 	UWORD width = EPD_4in26_WIDTH/8;
 
 	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: height=%u, width=%u bytes", height, width);
+
+	// 重新设置全屏窗口（防止之前的局部刷新改变了窗口范围）
+	EPD_4in26_SetWindows(0, EPD_4in26_HEIGHT-1, EPD_4in26_WIDTH-1, 0);
+	EPD_4in26_SetCursor(0, 0);
 
 	// 打印前4字节用于调试验证数据格式
 	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: first 4 bytes of image: 0x%02X 0x%02X 0x%02X 0x%02X",
