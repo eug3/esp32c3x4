@@ -114,4 +114,12 @@ void lvgl_tick_task(void *arg);
  */
 void lvgl_timer_task(void *arg);
 
+/**
+ * @brief 初始化 LVGL 文件系统驱动
+ *
+ * 注册 SD 卡文件系统到 LVGL，使图片和字体可以通过文件路径加载
+ * 使用盘符 "S:/" 访问 /sdcard 目录
+ */
+void lvgl_fs_init(void);
+
 #endif // LVGL_DRIVER_H

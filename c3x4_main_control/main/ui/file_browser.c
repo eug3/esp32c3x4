@@ -122,9 +122,8 @@ static void file_browser_process_pending_action_cb(void *user_data) {
           strcpy(fb_state.current_path, SDCARD_MOUNT_POINT);
         }
         if (read_directory(fb_state.current_path)) {
-          // 组件内操作：目录导航使用局刷
-          // 重要：必须先设置刷新模式，再触发渲染，否则脏区不会被记录
-          lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
+          // 组件内操作：目录导航使用快速刷新
+          lvgl_set_refresh_mode(EPD_REFRESH_FAST);
           update_file_list_display();
           lvgl_trigger_render(NULL);
           lvgl_display_refresh();
@@ -198,9 +197,8 @@ static void file_browser_process_pending_action_cb(void *user_data) {
     }
 
     if (read_directory(new_path)) {
-      // 组件内操作：目录导航使用局刷
-      // 重要：必须先设置刷新模式，再触发渲染，否则脏区不会被记录
-      lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
+      // 组件内操作：目录导航使用快速刷新
+      lvgl_set_refresh_mode(EPD_REFRESH_FAST);
       update_file_list_display();
       lvgl_trigger_render(NULL);
       lvgl_display_refresh();
@@ -560,7 +558,7 @@ void file_browser_screen_create(lv_indev_t *indev) {
   // 当前路径显示
   // ========================================
   fb_state.path_label = lv_label_create(screen);
-  lv_obj_set_style_text_font(fb_state.path_label, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_font(fb_state.path_label, font_manager_get_font(), 0);
   lv_obj_set_style_text_color(fb_state.path_label, lv_color_black(), 0);
   lv_obj_align(fb_state.path_label, LV_ALIGN_TOP_LEFT, 20, 50);
 

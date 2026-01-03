@@ -77,4 +77,17 @@ void font_manager_refresh_ui(void);
  */
 void font_manager_cleanup(void);
 
+/**
+ * @brief 通过文件路径加载字体（自动选择普通或流式加载）
+ * @param file_path 字体文件完整路径
+ * @return true 成功，false 失败
+ */
+bool font_manager_load_font_by_path(const char *file_path);
+
+/**
+ * @brief 获取当前流式字体的文件路径
+ * @return 路径字符串，如果是普通加载则返回空字符串
+ */
+const char *font_manager_get_stream_font_path(void);
+
 #endif // FONT_MANAGER_H

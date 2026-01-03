@@ -5,7 +5,9 @@
 
 #include "font_manager.h"
 #include "font_loader.h"
+#include "font_stream.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include <string.h>
@@ -18,6 +20,12 @@ static const char *NVS_NAMESPACE = "font_cfg";
 // 当前选中的字体索引
 static int s_current_font_index = -1;
 static bool s_manager_initialized = false;
+
+// 流式字体指针（用于大字体文件）
+static lv_font_t *s_stream_font = NULL;
+
+// 流式字体文件路径（用于判断是否需要重新加载）
+static char s_stream_font_path[256] = {0};
 
 bool font_manager_init(void)
 {
@@ -81,9 +89,16 @@ void font_manager_load_selection(void)
     nvs_close(nvs_handle);
 
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "No saved font index found (0x%x)", err);
-        font_loader_set_current_font(NULL);
-        s_current_font_index = -1;
+        ESP_LOGW(TAG, "No saved font index found (0x%x), using default Chinese font", err);
+        // 默认使用第一个字体（方正屏显雅宋简体）
+        if (font_count > 0) {
+            font_manager_set_font_by_index(0);
+            ESP_LOGI(TAG, "Using default font: %s",
+                     ((const font_info_t*)font_loader_get_font_list())[0].name);
+        } else {
+            font_loader_set_current_font(NULL);
+            s_current_font_index = -1;
+        }
         return;
     }
 
@@ -91,10 +106,15 @@ void font_manager_load_selection(void)
 
     // 验证索引是否有效（使用前面获取的 font_count）
     if (saved_index < 0 || saved_index >= font_count) {
-        ESP_LOGW(TAG, "Invalid saved font index %d (count=%d), using default",
+        ESP_LOGW(TAG, "Invalid saved font index %d (count=%d), using default Chinese font",
                  (int)saved_index, font_count);
-        font_loader_set_current_font(NULL);
-        s_current_font_index = -1;
+        // 使用第一个字体（方正屏显雅宋简体）
+        if (font_count > 0) {
+            font_manager_set_font_by_index(0);
+        } else {
+            font_loader_set_current_font(NULL);
+            s_current_font_index = -1;
+        }
         return;
     }
 
@@ -104,9 +124,33 @@ void font_manager_load_selection(void)
         ESP_LOGI(TAG, "Loaded saved font: %s",
                  ((const font_info_t*)font_loader_get_font_list())[saved_index].name);
     } else {
-        ESP_LOGE(TAG, "Failed to load saved font at index %d", (int)saved_index);
-        font_loader_set_current_font(NULL);
-        s_current_font_index = -1;
+        ESP_LOGW(TAG, "Failed to load saved font at index %d, trying other fonts...", (int)saved_index);
+
+        // 尝试其他字体（跳过保存的索引）
+        bool found = false;
+        for (int i = 0; i < font_count; i++) {
+            if (i == saved_index) continue;  // 跳过已失败的
+            if (font_manager_set_font_by_index(i)) {
+                s_current_font_index = i;
+                found = true;
+                break;
+            }
+        }
+
+        // 如果所有字体都失败，使用第一个字体（即使它很大）
+        if (!found && font_count > 0) {
+            ESP_LOGW(TAG, "All fonts failed, using first available font (stream loading)");
+            if (font_manager_set_font_by_index(0)) {
+                s_current_font_index = 0;
+                found = true;
+            }
+        }
+
+        if (!found) {
+            ESP_LOGE(TAG, "No usable font found!");
+            font_loader_set_current_font(NULL);
+            s_current_font_index = -1;
+        }
     }
 }
 
@@ -165,20 +209,54 @@ bool font_manager_set_font_by_index(int index)
         return false;
     }
 
-    // 加载字体
+    const font_info_t *font_list = font_loader_get_font_list();
+    const char *font_path = font_list[index].file_path;
+    const char *font_name = font_list[index].name;
+
+    // 1. 首先尝试普通加载（小字体）
+    ESP_LOGI(TAG, "Attempting to load font: %s", font_name);
     lv_font_t *font = font_load_by_index(index);
-    if (font == NULL) {
-        ESP_LOGE(TAG, "Failed to load font at index %d", index);
+    if (font != NULL) {
+        // 成功普通加载
+        font_loader_set_current_font(font);
+        s_current_font_index = index;
+        s_stream_font_path[0] = '\0';
+        ESP_LOGI(TAG, "Font loaded (memory): %s", font_name);
+        return true;
+    }
+
+    // 2. 普通加载失败，尝试流式加载（大字体）
+    ESP_LOGW(TAG, "Memory load failed for %s, trying stream loading...", font_name);
+
+    // 检查是否已经是同一个流式字体
+    if (s_stream_font != NULL && strcmp(s_stream_font_path, font_path) == 0) {
+        ESP_LOGI(TAG, "Using cached stream font: %s", font_name);
+        font_loader_set_current_font(s_stream_font);
+        s_current_font_index = index;
+        return true;
+    }
+
+    // 销毁旧的流式字体
+    if (s_stream_font != NULL) {
+        font_stream_destroy(s_stream_font);
+        s_stream_font = NULL;
+    }
+
+    // 创建新的流式字体
+    s_stream_font = font_stream_create(font_path);
+    if (s_stream_font == NULL) {
+        ESP_LOGE(TAG, "Failed to load font at index %d: %s", index, font_name);
         return false;
     }
 
+    // 保存路径
+    strncpy(s_stream_font_path, font_path, sizeof(s_stream_font_path) - 1);
+
     // 设置为当前字体
-    font_loader_set_current_font(font);
+    font_loader_set_current_font(s_stream_font);
     s_current_font_index = index;
 
-    const font_info_t *font_list = font_loader_get_font_list();
-    ESP_LOGI(TAG, "Font set to: %s (index=%d)", font_list[index].name, index);
-
+    ESP_LOGI(TAG, "Font loaded (stream): %s", font_name);
     return true;
 }
 
@@ -239,6 +317,13 @@ void font_manager_cleanup(void)
     // 保存当前选择
     font_manager_save_selection();
 
+    // 清理流式字体
+    if (s_stream_font != NULL) {
+        font_stream_destroy(s_stream_font);
+        s_stream_font = NULL;
+        s_stream_font_path[0] = '\0';
+    }
+
     // 清理字体加载器
     font_loader_cleanup();
 
@@ -246,4 +331,30 @@ void font_manager_cleanup(void)
     s_current_font_index = -1;
 
     ESP_LOGI(TAG, "Font manager cleanup complete");
+}
+
+bool font_manager_load_font_by_path(const char *file_path)
+{
+    if (!s_manager_initialized) {
+        ESP_LOGE(TAG, "Font manager not initialized");
+        return false;
+    }
+
+    const font_info_t *font_list = font_loader_get_font_list();
+    int font_count = font_loader_get_font_count();
+
+    // 查找字体
+    for (int i = 0; i < font_count; i++) {
+        if (strcmp(font_list[i].file_path, file_path) == 0) {
+            return font_manager_set_font_by_index(i);
+        }
+    }
+
+    ESP_LOGE(TAG, "Font not found: %s", file_path);
+    return false;
+}
+
+const char *font_manager_get_stream_font_path(void)
+{
+    return s_stream_font_path;
 }

@@ -60,3 +60,9 @@ CONFIG_LV_USE_GRID=y
 # Enable logging
 CONFIG_LV_USE_LOG=y
 CONFIG_LV_LOG_LEVEL_INFO=y
+
+# Image decoder settings (important for image browser)
+CONFIG_LV_USE_PNG=y
+CONFIG_LV_USE_BMP=y
+CONFIG_LV_USE_GIF=y
+CONFIG_LV_USE_SJPG=y

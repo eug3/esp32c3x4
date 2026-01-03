@@ -12,6 +12,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <dirent.h>
 
 static const char *TAG = "LVGL_DRV";
 
@@ -839,4 +842,171 @@ void lvgl_timer_task(void *arg) {
     lv_timer_handler();
     vTaskDelay(pdMS_TO_TICKS(10)); // 10ms 周期，足够响应按键
   }
+}
+
+/* ========================================================================
+ * 文件系统驱动 - SD 卡支持
+ * 用于通过文件路径加载图片和字体
+ * ========================================================================*/
+
+// 文件系统驱动：打开文件
+static void *fs_open_cb(lv_fs_drv_t *drv, const char *path, lv_fs_mode_t mode) {
+  (void)drv;
+  const char *real_path = path;
+
+  // 跳过盘符（如 "S:/"）
+  if (path[0] == 'S' && path[1] == ':' && path[2] == '/') {
+    real_path = path + 3;
+  }
+
+  const char *fmode = (mode == LV_FS_MODE_WR) ? "wb" : "rb";
+  FILE *f = fopen(real_path, fmode);
+
+  if (f == NULL) {
+    ESP_LOGE(TAG, "Failed to open file: %s (mode=%s)", real_path, fmode);
+  } else {
+    ESP_LOGD(TAG, "Opened file: %s", real_path);
+  }
+
+  return f;
+}
+
+// 文件系统驱动：关闭文件
+static lv_fs_res_t fs_close_cb(lv_fs_drv_t *drv, void *file) {
+  (void)drv;
+  if (file == NULL) {
+    return LV_FS_RES_INV_PARAM;
+  }
+  fclose((FILE *)file);
+  return LV_FS_RES_OK;
+}
+
+// 文件系统驱动：读取文件
+static lv_fs_res_t fs_read_cb(lv_fs_drv_t *drv, void *file, void *buf,
+                              uint32_t bytes_to_read, uint32_t *bytes_read) {
+  (void)drv;
+  if (file == NULL) {
+    return LV_FS_RES_INV_PARAM;
+  }
+
+  size_t read = fread(buf, 1, bytes_to_read, (FILE *)file);
+  *bytes_read = read;
+
+  return (read == bytes_to_read) ? LV_FS_RES_OK : LV_FS_RES_HW_ERR;
+}
+
+// 文件系统驱动：写入文件
+static lv_fs_res_t fs_write_cb(lv_fs_drv_t *drv, void *file, const void *buf,
+                               uint32_t bytes_to_write, uint32_t *bytes_written) {
+  (void)drv;
+  if (file == NULL) {
+    return LV_FS_RES_INV_PARAM;
+  }
+
+  size_t written = fwrite(buf, 1, bytes_to_write, (FILE *)file);
+  *bytes_written = written;
+
+  return (written == bytes_to_write) ? LV_FS_RES_OK : LV_FS_RES_HW_ERR;
+}
+
+// 文件系统驱动：定位文件指针
+static lv_fs_res_t fs_seek_cb(lv_fs_drv_t *drv, void *file, uint32_t pos,
+                              lv_fs_whence_t whence) {
+  (void)drv;
+  if (file == NULL) {
+    return LV_FS_RES_INV_PARAM;
+  }
+
+  int w = SEEK_SET;
+  if (whence == LV_FS_SEEK_CUR) {
+    w = SEEK_CUR;
+  } else if (whence == LV_FS_SEEK_END) {
+    w = SEEK_END;
+  }
+
+  int ret = fseek((FILE *)file, pos, w);
+  return (ret == 0) ? LV_FS_RES_OK : LV_FS_RES_HW_ERR;
+}
+
+// 文件系统驱动：获取文件大小
+static lv_fs_res_t fs_tell_cb(lv_fs_drv_t *drv, void *file, uint32_t *pos) {
+  (void)drv;
+  if (file == NULL) {
+    return LV_FS_RES_INV_PARAM;
+  }
+
+  long tell = ftell((FILE *)file);
+  if (tell >= 0) {
+    *pos = (uint32_t)tell;
+    return LV_FS_RES_OK;
+  }
+  return LV_FS_RES_HW_ERR;
+}
+
+// 文件系统驱动：目录读取（LVGL 9.x 需要返回文件名）
+static lv_fs_res_t fs_dir_read_cb(lv_fs_drv_t *drv, void *dir, char *fn,
+                                  uint32_t fn_len) {
+  (void)drv;
+  (void)dir;
+  (void)fn;
+  (void)fn_len;
+  return LV_FS_RES_NOT_IMP;
+}
+
+// 文件系统驱动：目录打开
+static void *fs_dir_open_cb(lv_fs_drv_t *drv, const char *path) {
+  (void)drv;
+  const char *real_path = path;
+
+  // 跳过盘符（如 "S:/"）
+  if (path[0] == 'S' && path[1] == ':' && path[2] == '/') {
+    real_path = path + 3;
+  }
+
+  DIR *d = opendir(real_path);
+  return d;
+}
+
+// 文件系统驱动：目录关闭
+static lv_fs_res_t fs_dir_close_cb(lv_fs_drv_t *drv, void *dir) {
+  (void)drv;
+  if (dir == NULL) {
+    return LV_FS_RES_INV_PARAM;
+  }
+  closedir((DIR *)dir);
+  return LV_FS_RES_OK;
+}
+
+// 初始化 LVGL 文件系统驱动
+void lvgl_fs_init(void) {
+  ESP_LOGI(TAG, "Initializing LVGL file system driver for SD card...");
+
+  // 分配驱动结构
+  lv_fs_drv_t *fsdrv = malloc(sizeof(lv_fs_drv_t));
+  if (fsdrv == NULL) {
+    ESP_LOGE(TAG, "Failed to allocate file system driver");
+    return;
+  }
+
+  // 初始化驱动
+  memset(fsdrv, 0, sizeof(lv_fs_drv_t));
+
+  // 设置回调函数
+  fsdrv->letter = 'S';                    // 盘符 S:
+  fsdrv->cache_size = 0;                  // 不使用缓存
+  fsdrv->open_cb = fs_open_cb;
+  fsdrv->close_cb = fs_close_cb;
+  fsdrv->read_cb = fs_read_cb;
+  fsdrv->write_cb = fs_write_cb;
+  fsdrv->seek_cb = fs_seek_cb;
+  fsdrv->tell_cb = fs_tell_cb;
+  fsdrv->dir_read_cb = fs_dir_read_cb;
+  fsdrv->dir_open_cb = fs_dir_open_cb;
+  fsdrv->dir_close_cb = fs_dir_close_cb;
+  fsdrv->user_data = NULL;
+
+  // 注册驱动
+  lv_fs_drv_register(fsdrv);
+
+  ESP_LOGI(TAG, "LVGL file system driver registered (S:/ -> /sdcard)");
 }

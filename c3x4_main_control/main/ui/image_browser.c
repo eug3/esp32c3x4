@@ -1,6 +1,11 @@
 /**
  * @file image_browser.c
  * @brief 图片浏览器实现
+ *
+ * 内存优化说明：
+ * - 对于 ESP32-C3 有限内存，使用 LVGL 内置解码器直接加载图片
+ * - 图片按屏幕尺寸显示，不需要额外缩放
+ * - 使用 1-bit 灰度格式以减少内存占用
  */
 
 #include "image_browser.h"
@@ -20,6 +25,9 @@ static const char *TAG = "IMAGE_BROWSER";
 
 #define MAX_IMAGES 100
 #define MAX_PATH_LEN 256
+
+// 图片解码缓冲区大小（分块解码以减少内存占用）
+#define DECODE_BUFFER_SIZE 8192
 
 static image_browser_state_t g_browser = {0};
 static TimerHandle_t s_slideshow_timer = NULL;
@@ -57,86 +65,42 @@ image_format_t image_browser_get_image_format(const char *filename) {
 }
 
 /**
- * @brief 从文件创建 LVGL 图片描述符
+ * @brief 加载图片到 LVGL（使用内置解码器，内存优化版本）
+ *
+ * 此函数使用 LVGL 内置的图片解码器直接从文件加载图片，
+ * 避免将整个图片读入内存。
  */
-static lv_image_dsc_t *create_lv_image_from_file(const char *file_path, image_format_t format) {
-    FILE *fp = fopen(file_path, "rb");
-    if (fp == NULL) {
-        ESP_LOGE(TAG, "Failed to open image file: %s", file_path);
-        return NULL;
+static bool load_image_to_lvgl(lv_obj_t *image_obj, const char *file_path) {
+    if (image_obj == NULL || file_path == NULL) {
+        return false;
     }
 
-    // 获取文件大小
-    fseek(fp, 0, SEEK_END);
-    long file_size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
+    // 将 /sdcard/xxx 转换为 S:/xxx (LVGL 文件系统路径)
+    const char *lvgl_path = file_path;
+    char lvgl_path_buf[256];
 
-    if (file_size <= 0) {
-        ESP_LOGE(TAG, "Invalid file size: %ld", file_size);
-        fclose(fp);
-        return NULL;
+    if (strncmp(file_path, "/sdcard/", 8) == 0) {
+        snprintf(lvgl_path_buf, sizeof(lvgl_path_buf), "S:/%s", file_path + 8);
+        lvgl_path = lvgl_path_buf;
     }
 
-    // 分配缓冲区
-    uint8_t *buffer = malloc(file_size);
-    if (buffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate %ld bytes for image", file_size);
-        fclose(fp);
-        return NULL;
-    }
+    ESP_LOGI(TAG, "Loading image via LVGL FS: %s -> %s", file_path, lvgl_path);
 
-    // 读取文件
-    size_t read_size = fread(buffer, 1, file_size, fp);
-    fclose(fp);
+    // 使用 LVGL 内置解码器直接加载文件
+    // LVGL 9.x 会自动处理解码和格式转换
+    lv_image_set_src(image_obj, lvgl_path);
 
-    if (read_size != (size_t)file_size) {
-        ESP_LOGE(TAG, "Failed to read complete file");
-        free(buffer);
-        return NULL;
-    }
-
-    // 创建 LVGL 图片描述符
-    lv_image_dsc_t *img_dsc = malloc(sizeof(lv_image_dsc_t));
+    // 检查图片是否加载成功
+    lv_image_dsc_t *img_dsc = (lv_image_dsc_t *)lv_image_get_src(image_obj);
     if (img_dsc == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate image descriptor");
-        free(buffer);
-        return NULL;
+        ESP_LOGE(TAG, "Failed to load image: %s (tried: %s)", file_path, lvgl_path);
+        return false;
     }
 
-    memset(img_dsc, 0, sizeof(lv_image_dsc_t));
-    img_dsc->data = buffer;
-    img_dsc->data_size = file_size;
+    ESP_LOGI(TAG, "Image loaded: %s, size: %dx%d, cf:%d",
+             lvgl_path, img_dsc->header.w, img_dsc->header.h, img_dsc->header.cf);
 
-    // LVGL 9.x 使用新的 header 结构
-    // 只设置 magic 和标志位，其他由解码器自动处理
-    img_dsc->header.magic = LV_IMAGE_HEADER_MAGIC;
-    img_dsc->header.flags = 0;
-
-    // 设置颜色格式
-    switch (format) {
-        case IMAGE_FORMAT_PNG:
-            img_dsc->header.cf = LV_COLOR_FORMAT_RAW_ALPHA;
-            break;
-        case IMAGE_FORMAT_JPEG:
-            img_dsc->header.cf = LV_COLOR_FORMAT_RAW;
-            break;
-        case IMAGE_FORMAT_BMP:
-            img_dsc->header.cf = LV_COLOR_FORMAT_RAW;
-            break;
-        case IMAGE_FORMAT_GIF:
-            img_dsc->header.cf = LV_COLOR_FORMAT_RAW_ALPHA;
-            break;
-        default:
-            img_dsc->header.cf = LV_COLOR_FORMAT_RAW;
-            break;
-    }
-
-    img_dsc->header.w = 0;  // 稍后由 LVGL 解码器设置
-    img_dsc->header.h = 0;
-
-    ESP_LOGI(TAG, "Created image descriptor for: %s (%ld bytes)", file_path, file_size);
-
-    return img_dsc;
+    return true;
 }
 
 /**
@@ -281,15 +245,11 @@ bool image_browser_show_image(int index) {
         img->decoded_data = NULL;
     }
 
-    // 加载图片
-    lv_image_dsc_t *img_dsc = create_lv_image_from_file(img->file_path, img->format);
-    if (img_dsc == NULL) {
+    // 使用 LVGL 内置解码器加载图片（内存优化）
+    if (!load_image_to_lvgl(g_browser.image_obj, img->file_path)) {
         ESP_LOGE(TAG, "Failed to load image: %s", img->file_path);
         return false;
     }
-
-    // 设置图片到 LVGL 对象
-    lv_image_set_src(g_browser.image_obj, img_dsc);
 
     // 更新信息标签
     if (g_browser.info_label != NULL) {

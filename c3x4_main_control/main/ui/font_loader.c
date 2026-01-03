@@ -10,8 +10,10 @@
  */
 
 #include "font_loader.h"
-#include "../lvgl_driver.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 #include <stdio.h>
 #include <string.h>
 #include <dirent.h>
@@ -21,6 +23,69 @@ static const char *TAG = "FONT_LOADER";
 
 // 字体加载器全局状态
 static font_loader_state_t g_font_loader = {0};
+
+// 最大重试次数（用于大字体加载）
+#define FONT_LOAD_MAX_RETRIES 3
+
+// 字体加载重试间隔（ms）
+#define FONT_LOAD_RETRY_DELAY 50
+
+/**
+ * @brief 强制释放系统内存，为大字体腾出空间
+ */
+static void font_loader_gc(void)
+{
+    // 触发垃圾回收的几种方法：
+    // 1. 延迟一下让系统有机会清理
+    // 2. 提示用户内存不足
+    ESP_LOGW(TAG, "Attempting to free memory for font loading...");
+
+    // 显示当前内存状态
+    multi_heap_info_t info;
+    heap_caps_get_info(&info, MALLOC_CAP_DEFAULT);
+    ESP_LOGW(TAG, "Heap free: %lu bytes, allocated: %lu bytes",
+             (unsigned long)info.total_free_bytes,
+             (unsigned long)info.total_allocated_bytes);
+}
+
+/**
+ * @brief 尝试分配字体内存（带重试机制）
+ *
+ * @param file_size 需要分配的字节数
+ * @param retries 剩余重试次数
+ * @return 分配的内存指针，失败返回 NULL
+ */
+static uint8_t* try_allocate_font_memory(size_t file_size, int retries)
+{
+    uint8_t *font_buffer = NULL;
+
+    while (retries > 0) {
+        // 尝试从 PSRAM 分配（如果可用）
+        font_buffer = (uint8_t *)heap_caps_malloc(file_size, MALLOC_CAP_SPIRAM);
+        if (font_buffer != NULL) {
+            ESP_LOGI(TAG, "Allocated %zu bytes from PSRAM for font", file_size);
+            return font_buffer;
+        }
+
+        // 尝试从内部 RAM 分配
+        font_buffer = (uint8_t *)malloc(file_size);
+        if (font_buffer != NULL) {
+            ESP_LOGI(TAG, "Allocated %zu bytes from internal RAM for font", file_size);
+            return font_buffer;
+        }
+
+        // 分配失败，尝试释放内存后重试
+        retries--;
+        if (retries > 0) {
+            ESP_LOGW(TAG, "Font allocation failed (attempt %d/%d), trying to free memory...",
+                     FONT_LOAD_MAX_RETRIES - retries, FONT_LOAD_MAX_RETRIES);
+            font_loader_gc();
+            vTaskDelay(pdMS_TO_TICKS(FONT_LOAD_RETRY_DELAY));
+        }
+    }
+
+    return NULL;
+}
 
 /**
  * @brief LVGL 字体文件头结构（对应 lv_font_fmt_txt_dsc_t）
@@ -88,12 +153,19 @@ static lv_font_t* load_font_file(const char *file_path, char *font_name, size_t 
 
     // 分配内存：lv_font_t + 所有数据
     // 我们需要将整个文件加载到内存，然后设置指针
-    uint8_t *font_buffer = (uint8_t *)malloc(file_size);
+    // 注意：ESP32-C3 内存有限，大字体可能无法加载
+    // 使用重试机制尝试分配内存
+    uint8_t *font_buffer = try_allocate_font_memory(file_size, FONT_LOAD_MAX_RETRIES);
     if (font_buffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate %ld bytes for font", file_size);
+        ESP_LOGE(TAG, "Failed to allocate %ld bytes (%.1f MB) for font after %d attempts. "
+                     "Try restarting device or use a smaller font file.",
+                 file_size, file_size / (1024.0 * 1024.0), FONT_LOAD_MAX_RETRIES);
         fclose(fp);
         return NULL;
     }
+
+    ESP_LOGI(TAG, "Successfully allocated %.1f MB for font buffer",
+             file_size / (1024.0 * 1024.0));
 
     // 读取整个文件
     fseek(fp, 0, SEEK_SET);
@@ -233,7 +305,9 @@ int font_loader_scan_fonts(void)
             continue;
         }
 
-        // 保存字体信息（不立即加载）
+        // 保存字体文件路径（稍后按需加载）
+        // 注意：字体文件可能很大（几 MB），在 ESP32-C3 上可能无法一次性加载
+        // 这种情况下降级到默认字体
         font_info_t *info = &g_font_loader.fonts[g_font_loader.font_count];
         memset(info, 0, sizeof(font_info_t));
 

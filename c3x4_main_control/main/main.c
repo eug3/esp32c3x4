@@ -1130,11 +1130,14 @@ void app_main(void)
     lv_indev_t *indev = lvgl_input_init();
     (void)indev;
 
-    // 3. 创建 LVGL tick 任务（10ms tick）
+    // 3. 初始化 LVGL 文件系统驱动（支持通过 S:/ 盘符访问 SD 卡）
+    lvgl_fs_init();
+
+    // 4. 创建 LVGL tick 任务（10ms tick）
     // 降低优先级到 3，避免阻塞 IDLE 任务
     xTaskCreate(lvgl_tick_task, "lvgl_tick", 2048, NULL, 3, NULL);
 
-    // 4. 初始化屏幕管理器
+    // 5. 初始化屏幕管理器
     ESP_LOGI("LVGL", "Initializing screen manager...");
     static screen_context_t screen_ctx;
     screen_ctx.battery_mv = read_battery_voltage_mv();
