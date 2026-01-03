@@ -87,6 +87,12 @@ void lvgl_reset_refresh_state(void);
 void lvgl_register_refresh_complete_callback(void (*callback)(void));
 
 /**
+ * @brief 清空 framebuffer 为白色
+ * 在切换到新屏幕前调用，确保旧数据被完全覆盖
+ */
+void lvgl_clear_framebuffer(void);
+
+/**
  * @brief 手动触发 LVGL 渲染刷新（用于 EPD 手动刷新模式）
  *
  * 在手动刷新模式下，LVGL 不会自动调用 lv_timer_handler()

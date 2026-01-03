@@ -372,6 +372,9 @@ void index_screen_create(uint32_t battery_mv, uint8_t battery_pct, bool charging
     }
 
     // 强制 LVGL 完成初始渲染（手动刷新模式）
+    // 先清空 framebuffer 为白色，确保旧数据被覆盖
+    lvgl_clear_framebuffer();
+
     // 先使屏幕无效，确保 LVGL 重新渲染所有内容
     lv_obj_invalidate(screen);
 

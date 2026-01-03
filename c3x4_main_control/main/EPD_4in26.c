@@ -559,6 +559,14 @@ void EPD_4in26_Display_Base(UBYTE *Image)
 	EPD_4in26_TurnOnDisplay();	
 }
 
+/******************************************************************************
+function :	Full refresh - fast update mode
+parameter:	Image - Image data buffer (monochrome, 1 bit per pixel)
+description:
+	使用快刷模式对4.26英寸墨水屏进行全屏刷新。
+	该模式通过0xC7刷新序列实现快速更新，适用于需要快速响应的场景。
+	刷新过程中会自动写入两个RAM缓冲区(0x24和0x26)以确保显示正确。
+******************************************************************************/
 void EPD_4in26_Display_Fast(UBYTE *Image)
 {
 	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: starting...");
@@ -568,16 +576,19 @@ void EPD_4in26_Display_Fast(UBYTE *Image)
 
 	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: height=%u, width=%u bytes", height, width);
 
-	// 打印前几行数据用于调试
+	// 打印前4字节用于调试验证数据格式
 	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: first 4 bytes of image: 0x%02X 0x%02X 0x%02X 0x%02X",
 	         Image[0], Image[1], Image[2], Image[3]);
 
-	// 根据 GxEPD2：每次刷新前设置温度补偿
+	// 步骤1：温度补偿
+	// 墨水屏刷新效果受温度影响，设置合适的温度补偿值可优化显示质量
+	// 0x5A 对应 25°C 标准温度
 	EPD_4in26_SendCommand(0x1A); // Write to temperature register
 	EPD_4in26_SendData(0x5A);    // 25°C 补偿值
 
 	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: writing to 0x24...");
-	// 写入当前图像缓冲区 (0x24)
+	// 步骤2：写入当前帧图像数据到 RAM 0x24
+	// 0x24 是墨水屏的主图像RAM地址，存储当前要显示的图像
 	EPD_4in26_SendCommand(0x24);   //write RAM for black(0)/white (1)
 	for(i=0; i<height; i++)
 	{
@@ -585,8 +596,9 @@ void EPD_4in26_Display_Fast(UBYTE *Image)
 	}
 
 	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: 0x24 written, writing to 0x26...");
-	// 同时写入上一帧缓冲区 (0x26)，确保局部刷新时对比基准正确
-	// 快刷虽然速度快，但仍需同步 0x26，避免后续局部刷新出错
+	// 步骤3：同步写入上一帧 RAM 0x26
+	// 0x26 存储的是上一帧图像数据，局部刷新时需要与 0x24 对比来确定像素变化
+	// 即使使用快刷，也需要同步 0x26 以确保后续局部刷新操作正确
 	EPD_4in26_SendCommand(0x26);   //write RAM for previous frame
 	for(i=0; i<height; i++)
 	{

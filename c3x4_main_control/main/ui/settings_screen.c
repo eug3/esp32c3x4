@@ -334,7 +334,9 @@ void settings_screen_create(lv_indev_t *indev)
     // 填充字体列表
     update_font_list_display();
 
-    // 刷新显示
+    // 刷新显示：先清空 framebuffer 为白色，确保旧数据被覆盖
+    lvgl_clear_framebuffer();
+
     lv_obj_invalidate(screen);
     for (int i = 0; i < 5; i++) {
         lvgl_trigger_render(NULL);
