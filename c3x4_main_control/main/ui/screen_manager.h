@@ -11,6 +11,16 @@
 // 前置声明
 struct screen_context;
 
+// 屏幕类型枚举
+typedef enum {
+    SCREEN_TYPE_INDEX = 0,      // 首页
+    SCREEN_TYPE_FILE_BROWSER,   // 文件浏览器
+    SCREEN_TYPE_READER,         // 阅读器
+    SCREEN_TYPE_SETTINGS,       // 设置页面
+    SCREEN_TYPE_IMAGE_BROWSER,  // 图片浏览器
+    SCREEN_TYPE_COUNT
+} screen_type_t;
+
 // 屏幕上下文 - 包含系统状态信息
 typedef struct screen_context {
     uint32_t battery_mv;
@@ -45,6 +55,30 @@ void screen_manager_show_file_browser(void);
  * @brief 显示设置页面
  */
 void screen_manager_show_settings(void);
+
+/**
+ * @brief 显示阅读器屏幕
+ * @param file_path 要打开的书籍文件路径
+ */
+void screen_manager_show_reader(const char *file_path);
+
+/**
+ * @brief 显示图片浏览器屏幕
+ * @param directory 要浏览的图片目录
+ */
+void screen_manager_show_image_browser(const char *directory);
+
+/**
+ * @brief 返回上一页
+ * @return true 如果成功返回，false 如果已经在首页无法返回
+ */
+bool screen_manager_go_back(void);
+
+/**
+ * @brief 获取当前屏幕类型
+ * @return 当前屏幕类型
+ */
+screen_type_t screen_manager_get_current_screen(void);
 
 /**
  * @brief 获取屏幕管理器上下文

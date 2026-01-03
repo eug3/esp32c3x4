@@ -10,9 +10,12 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "screen_manager.h"
+#include "reader_screen.h"
+#include "image_browser.h"
 #include <dirent.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 
 static const char *TAG = "FILE_BROWSER";
@@ -44,6 +47,7 @@ typedef struct {
     FB_ACTION_OPEN_DIR,
     FB_ACTION_GO_UP,
     FB_ACTION_EXIT,
+    FB_ACTION_OPEN_BOOK,  // 打开电子书
   } pending_action;
   int pending_index;
 } file_browser_state_t;
@@ -103,9 +107,9 @@ static void file_browser_process_pending_action_cb(void *user_data) {
   }
 
   if (action == FB_ACTION_EXIT) {
-    ESP_LOGI(TAG, "Exiting file browser, returning to welcome screen");
-    lvgl_reset_refresh_state();
-    screen_manager_show_index();
+    ESP_LOGI(TAG, "Exiting file browser, returning to previous screen");
+    // 使用导航历史栈返回上一页
+    screen_manager_go_back();
     return;
   }
 
@@ -135,9 +139,53 @@ static void file_browser_process_pending_action_cb(void *user_data) {
       return;
     }
 
+    // 如果是文件，检查是否是电子书或图片格式
     if (!fb_state.is_directory[idx]) {
-      ESP_LOGI(TAG, "Selected file: %s/%s", fb_state.current_path,
-               fb_state.file_names[idx]);
+      const char *filename = fb_state.file_names[idx];
+      const char *ext = strrchr(filename, '.');
+
+      if (ext != NULL) {
+        // 电子书格式
+        if (strcasecmp(ext, ".txt") == 0 || strcasecmp(ext, ".epub") == 0) {
+          char full_path[MAX_PATH_LEN];
+          int full_path_len =
+              snprintf(full_path, MAX_PATH_LEN - 1, "%s/%s", fb_state.current_path, filename);
+          if (full_path_len >= MAX_PATH_LEN - 1) {
+            full_path[MAX_PATH_LEN - 1] = '\0';
+          }
+          ESP_LOGI(TAG, "Opening book: %s", full_path);
+          screen_manager_show_reader(full_path);
+          return;
+        }
+
+        // 图片格式
+        if (strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".jpg") == 0 ||
+            strcasecmp(ext, ".jpeg") == 0 || strcasecmp(ext, ".bmp") == 0 ||
+            strcasecmp(ext, ".gif") == 0) {
+          char full_path[MAX_PATH_LEN];
+          int full_path_len =
+              snprintf(full_path, MAX_PATH_LEN - 1, "%s/%s", fb_state.current_path, filename);
+          if (full_path_len >= MAX_PATH_LEN - 1) {
+            full_path[MAX_PATH_LEN - 1] = '\0';
+          }
+          ESP_LOGI(TAG, "Opening image: %s", full_path);
+
+          // 获取目录路径（去掉文件名）
+          char dir_path[MAX_PATH_LEN];
+          strncpy(dir_path, full_path, sizeof(dir_path) - 1);
+          dir_path[sizeof(dir_path) - 1] = '\0';
+          char *last_slash = strrchr(dir_path, '/');
+          if (last_slash != NULL) {
+            *last_slash = '\0';
+          }
+
+          // 调用 screen_manager 显示图片浏览器
+          screen_manager_show_image_browser(dir_path);
+          return;
+        }
+      }
+
+      ESP_LOGI(TAG, "Selected file (not supported): %s/%s", fb_state.current_path, filename);
       return;
     }
 

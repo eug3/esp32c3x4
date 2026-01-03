@@ -51,6 +51,19 @@ void font_manager_load_selection(void)
 
     ESP_LOGI(TAG, "Loading font selection from NVS...");
 
+    // 重要：不要重新扫描字体！直接使用已扫描的字体列表
+    // font_loader_scan_fonts() 会重置已扫描的结果，导致字体丢失
+    int font_count = font_loader_get_font_count();
+    ESP_LOGI(TAG, "Available fonts: %d", font_count);
+
+    // 如果没有字体，直接使用默认字体
+    if (font_count == 0) {
+        ESP_LOGW(TAG, "No fonts available, using default");
+        font_loader_set_current_font(NULL);
+        s_current_font_index = -1;
+        return;
+    }
+
     nvs_handle_t nvs_handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
 
@@ -76,8 +89,7 @@ void font_manager_load_selection(void)
 
     ESP_LOGI(TAG, "Saved font index: %ld", saved_index);
 
-    // 验证索引是否有效
-    int font_count = font_loader_get_font_count();
+    // 验证索引是否有效（使用前面获取的 font_count）
     if (saved_index < 0 || saved_index >= font_count) {
         ESP_LOGW(TAG, "Invalid saved font index %d (count=%d), using default",
                  (int)saved_index, font_count);

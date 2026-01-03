@@ -195,6 +195,13 @@ int font_loader_scan_fonts(void)
 {
     ESP_LOGI(TAG, "Scanning for fonts in: %s", g_font_loader.font_dir);
 
+    // 如果已经有扫描结果，不要重新扫描（防止覆盖已有的字体列表）
+    // 除非字体目录为空或之前扫描失败，才允许重新扫描
+    if (g_font_loader.font_count > 0) {
+        ESP_LOGW(TAG, "Fonts already scanned (%d), skipping rescan", g_font_loader.font_count);
+        return g_font_loader.font_count;
+    }
+
     DIR *dir = opendir(g_font_loader.font_dir);
     if (dir == NULL) {
         ESP_LOGE(TAG, "Failed to open font directory: %s", g_font_loader.font_dir);

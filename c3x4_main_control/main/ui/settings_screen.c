@@ -223,8 +223,8 @@ static void settings_key_event_cb(lv_event_t *e)
 
     if (key == LV_KEY_ESC) {
         ESP_LOGI(TAG, "Exiting settings screen");
-        lvgl_reset_refresh_state();
-        screen_manager_show_index();
+        // 使用导航历史栈返回上一页
+        screen_manager_go_back();
     }
 }
 
