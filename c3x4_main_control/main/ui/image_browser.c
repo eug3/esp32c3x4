@@ -90,15 +90,17 @@ static bool load_image_to_lvgl(lv_obj_t *image_obj, const char *file_path) {
     // LVGL 9.x 会自动处理解码和格式转换
     lv_image_set_src(image_obj, lvgl_path);
 
-    // 检查图片是否加载成功
-    lv_image_dsc_t *img_dsc = (lv_image_dsc_t *)lv_image_get_src(image_obj);
-    if (img_dsc == NULL) {
+    // 检查图片是否加载成功 - lv_image_get_src 返回源指针
+    const void *src = lv_image_get_src(image_obj);
+    if (src == NULL) {
         ESP_LOGE(TAG, "Failed to load image: %s (tried: %s)", file_path, lvgl_path);
         return false;
     }
 
-    ESP_LOGI(TAG, "Image loaded: %s, size: %dx%d, cf:%d",
-             lvgl_path, img_dsc->header.w, img_dsc->header.h, img_dsc->header.cf);
+    // 获取图片尺寸
+    int32_t w = lv_image_get_src_width(image_obj);
+    int32_t h = lv_image_get_src_height(image_obj);
+    ESP_LOGI(TAG, "Image loaded: %s, size: %dx%d", lvgl_path, (int)w, (int)h);
 
     return true;
 }

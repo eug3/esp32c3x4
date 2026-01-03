@@ -852,12 +852,11 @@ void lvgl_timer_task(void *arg) {
 // 文件系统驱动：打开文件
 static void *fs_open_cb(lv_fs_drv_t *drv, const char *path, lv_fs_mode_t mode) {
   (void)drv;
-  const char *real_path = path;
+  char real_path[256];
 
-  // 跳过盘符（如 "S:/"）
-  if (path[0] == 'S' && path[1] == ':' && path[2] == '/') {
-    real_path = path + 3;
-  }
+  // LVGL 9.x: path 参数已经不包含盘符,直接映射到 /sdcard/
+  // 例如: "S:/壁纸/锤子灯.jpg" -> path="/壁纸/锤子灯.jpg"
+  snprintf(real_path, sizeof(real_path), "/sdcard%s", path);
 
   const char *fmode = (mode == LV_FS_MODE_WR) ? "wb" : "rb";
   FILE *f = fopen(real_path, fmode);
@@ -956,12 +955,10 @@ static lv_fs_res_t fs_dir_read_cb(lv_fs_drv_t *drv, void *dir, char *fn,
 // 文件系统驱动：目录打开
 static void *fs_dir_open_cb(lv_fs_drv_t *drv, const char *path) {
   (void)drv;
-  const char *real_path = path;
+  char real_path[256];
 
-  // 跳过盘符（如 "S:/"）
-  if (path[0] == 'S' && path[1] == ':' && path[2] == '/') {
-    real_path = path + 3;
-  }
+  // LVGL 9.x: path 参数已经不包含盘符,直接映射到 /sdcard/
+  snprintf(real_path, sizeof(real_path), "/sdcard%s", path);
 
   DIR *d = opendir(real_path);
   return d;
