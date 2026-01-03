@@ -116,10 +116,11 @@ static void file_browser_process_pending_action_cb(void *user_data)
                     strcpy(fb_state.current_path, SDCARD_MOUNT_POINT);
                 }
                 if (read_directory(fb_state.current_path)) {
+                    // 组件内操作：目录导航使用局刷
+                    // 重要：必须先设置刷新模式，再触发渲染，否则脏区不会被记录
+                    lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
                     update_file_list_display();
                     lvgl_trigger_render(NULL);
-                    // 组件内操作：目录导航使用局刷
-                    lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
                     lvgl_display_refresh();
                 }
             }
@@ -146,10 +147,11 @@ static void file_browser_process_pending_action_cb(void *user_data)
         }
 
         if (read_directory(new_path)) {
+            // 组件内操作：目录导航使用局刷
+            // 重要：必须先设置刷新模式，再触发渲染，否则脏区不会被记录
+            lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
             update_file_list_display();
             lvgl_trigger_render(NULL);
-            // 组件内操作：目录导航使用局刷
-            lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
             lvgl_display_refresh();
         }
         return;
@@ -408,9 +410,10 @@ static void file_browser_row_focused_cb(lv_event_t *e)
         }
     }
 
-    // 手动刷新模式：触发渲染 + 刷新
-    lvgl_trigger_render(NULL);
+    // 手动刷新模式：先设置刷新模式，再触发渲染
+    // 重要：必须先设置刷新模式，再触发渲染，否则脏区不会被记录
     lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
+    lvgl_trigger_render(NULL);
     lvgl_display_refresh();
 }
 

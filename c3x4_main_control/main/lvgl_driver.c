@@ -211,6 +211,36 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
                  flush_count, (int)area->x1, (int)area->y1, (int)area->x2, (int)area->y2, (int)cf);
     }
 
+    // ============================================================
+    // 优化方案：计算实际需要绘制的区域（脏区裁剪）
+    // 如果是 PARTIAL 模式，只绘制与脏区相交的像素
+    // ============================================================
+    lv_area_t clip_area;
+    bool use_clip = false;
+
+    if (s_refresh_mode == EPD_REFRESH_PARTIAL && s_dirty_valid) {
+        // 获取脏区副本
+        portENTER_CRITICAL(&s_dirty_mux);
+        lv_area_t dirty = s_dirty_area;
+        portEXIT_CRITICAL(&s_dirty_mux);
+
+        // 计算当前 flush 区域与脏区的交集
+        clip_area.x1 = (area->x1 > dirty.x1) ? area->x1 : dirty.x1;
+        clip_area.y1 = (area->y1 > dirty.y1) ? area->y1 : dirty.y1;
+        clip_area.x2 = (area->x2 < dirty.x2) ? area->x2 : dirty.x2;
+        clip_area.y2 = (area->y2 < dirty.y2) ? area->y2 : dirty.y2;
+
+        // 检查是否有效相交
+        if (clip_area.x1 <= clip_area.x2 && clip_area.y1 <= clip_area.y2) {
+            use_clip = true;
+            if (flush_count <= 20) {
+                ESP_LOGI(TAG, "disp_flush_cb: clip enabled, original(%d,%d)-(%d,%d) -> clipped(%d,%d)-(%d,%d)",
+                         (int)area->x1, (int)area->y1, (int)area->x2, (int)area->y2,
+                         (int)clip_area.x1, (int)clip_area.y1, (int)clip_area.x2, (int)clip_area.y2);
+            }
+        }
+    }
+
     // 开始处理flush
     uint32_t black_count = 0;
     uint32_t white_count = 0;
@@ -219,6 +249,13 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
 
     for (y = area->y1; y <= area->y2; y++) {
         for (x = area->x1; x <= area->x2; x++) {
+            // 应用裁剪：如果当前像素不在裁剪区域内，跳过
+            if (use_clip) {
+                if (x < clip_area.x1 || x > clip_area.x2 ||
+                    y < clip_area.y1 || y > clip_area.y2) {
+                    continue;
+                }
+            }
             // 计算在缓冲区中的位置
             int32_t buf_x = x - area->x1;
             int32_t buf_y = y - area->y1;
@@ -284,8 +321,10 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     }
 
     // Flush处理完成
-    if (flush_count <= 3) {
-        ESP_LOGI(TAG, "disp_flush_cb #%u: black=%u, white=%u", flush_count, black_count, white_count);
+    if (flush_count <= 20) {
+        ESP_LOGI(TAG, "disp_flush_cb #%u: area(%d,%d)-(%d,%d), black=%u, white=%u, total=%u",
+                 flush_count, (int)area->x1, (int)area->y1, (int)area->x2, (int)area->y2,
+                 black_count, white_count, black_count + white_count);
     }
 
     // 只在 PARTIAL 模式下记录脏区域
@@ -422,12 +461,20 @@ static void epd_refresh_task(void *arg)
                 //    - 如果局刷计数 >= 10：强制执行全刷，重置计数器（消除鬼影）
                 // ============================================================
 
-                // 提前检查：如果 PARTIAL 即将触发强制全刷，立即切换模式
-                if (mode == EPD_REFRESH_PARTIAL &&
-                    s_partial_refresh_count >= FORCE_FULL_REFRESH_AFTER_N_PARTIAL - 1) {
-                    ESP_LOGI(TAG, "EPD refresh task: Upcoming forced FULL, switching mode early");
-                    mode = EPD_REFRESH_FULL;
-                    s_refresh_mode = EPD_REFRESH_FULL;  // 立即切换，让 disp_flush_cb 跳过脏区计算
+                // 检查是否需要强制全刷（消除鬼影）
+                // 在第 10 次局部刷新后，下一次会自动切换到 FULL 模式
+                if (s_partial_refresh_count >= FORCE_FULL_REFRESH_AFTER_N_PARTIAL) {
+                    ESP_LOGI(TAG, "EPD refresh task: Force FULL refresh after %u PARTIALs",
+                             s_partial_refresh_count);
+                    EPD_4in26_Display(s_epd_framebuffer);
+                    s_partial_refresh_count = 0;
+                    portENTER_CRITICAL(&s_dirty_mux);
+                    s_dirty_valid = false;
+                    portEXIT_CRITICAL(&s_dirty_mux);
+
+                    // 全刷后切换到 FAST 模式
+                    s_refresh_mode = EPD_REFRESH_FAST;
+                    ESP_LOGI(TAG, "Force FULL refresh completed, switched to FAST mode");
                 }
 
                 if (mode == EPD_REFRESH_FULL) {
@@ -446,97 +493,77 @@ static void epd_refresh_task(void *arg)
                         ESP_LOGI(TAG, "First FULL refresh completed, auto-switching to FAST mode");
                     }
 
-                } else if (mode == EPD_REFRESH_FAST) {
-                    ESP_LOGI(TAG, "EPD refresh task: FAST refresh (requested)");
-                    EPD_4in26_Display_Fast(s_epd_framebuffer);
-                    s_partial_refresh_count = 0;
+                } else if (mode == EPD_REFRESH_PARTIAL) {
+                    // Snapshot dirty area atomically to avoid concurrent modification by flush_cb.
+                    bool dirty_valid;
+                    lv_area_t dirty_area;
+                    portENTER_CRITICAL(&s_dirty_mux);
+                    dirty_valid = s_dirty_valid;
+                    dirty_area = s_dirty_area;
+                    portEXIT_CRITICAL(&s_dirty_mux);
+
+                    if (!dirty_valid) {
+                        ESP_LOGW(TAG, "EPD refresh task: PARTIAL requested but no dirty area, skipping");
+                        // Nothing to do.
+                        goto partial_done;
+                    }
+
+                    // ============================================================
+                    // 局部刷新优化方案：
+                    // 直接使用完整的 s_epd_framebuffer，只裁剪脏区发送给硬件
+                    // - s_epd_framebuffer 已经是 EPD 格式 (800x480, ROTATE_270)
+                    // - 只需计算要裁剪的区域，无需额外坐标转换
+                    // ============================================================
+
+                    // 获取脏区尺寸
+                    const int32_t dirty_w = dirty_area.x2 - dirty_area.x1 + 1;
+                    const int32_t dirty_h = dirty_area.y2 - dirty_area.y1 + 1;
+
+                    // LVGL 坐标系 (480x800) 到 EPD 物理坐标系 (800x480) 的映射
+                    // ROTATE_270: LVGL(x,y) -> EPD(memX=y, memY=EPD_HEIGHT-1-x)
+                    int32_t epd_x = dirty_area.y1;
+                    int32_t epd_y = (int32_t)EPD_HEIGHT - 1 - dirty_area.x2;
+                    int32_t epd_w = dirty_h;  // 注意：宽高互换
+                    int32_t epd_h = dirty_w;
+
+                    // EPD 硬件要求：X 坐标必须是 8 的倍数（字节对齐）
+                    if (epd_x % 8 != 0) {
+                        const int32_t orig_x = epd_x;
+                        epd_x = (epd_x / 8) * 8;  // 向下对齐
+                        epd_w += (orig_x - epd_x);  // 补偿宽度
+                    }
+                    if (epd_w % 8 != 0) {
+                        epd_w = ((epd_w + 7) / 8) * 8;  // 向上对齐
+                    }
+
+                    // 边界检查
+                    if (epd_x < 0) epd_x = 0;
+                    if (epd_y < 0) epd_y = 0;
+                    if (epd_x + epd_w > EPD_WIDTH) epd_w = EPD_WIDTH - epd_x;
+                    if (epd_y + epd_h > EPD_HEIGHT) epd_h = EPD_HEIGHT - epd_y;
+
+                    ESP_LOGI(TAG, "EPD refresh task: PARTIAL #%u/%u LVGL(%d,%d,%dx%d) -> EPD(x=%d,y=%d,%dx%d)",
+                             s_partial_refresh_count + 1, FORCE_FULL_REFRESH_AFTER_N_PARTIAL,
+                             (int)dirty_area.x1, (int)dirty_area.y1, (int)dirty_w, (int)dirty_h,
+                             (int)epd_x, (int)epd_y, (int)epd_w, (int)epd_h);
+
+                    // 从完整 framebuffer 裁剪脏区数据发送给硬件
+                    // 关键修复：传递完整 framebuffer 和坐标，让 EPD 函数自己裁剪
+                    if (epd_w > 0 && epd_h > 0) {
+                        // 使用完整 framebuffer，传递 EPD 物理坐标
+                        // EPD_4in26_Display_Partial 会从 framebuffer 中裁剪正确的区域
+                        EPD_4in26_Display_Partial(s_epd_framebuffer,
+                                                 (UWORD)epd_x, (UWORD)epd_y,
+                                                 (UWORD)epd_w, (UWORD)epd_h);
+                    } else {
+                        ESP_LOGW(TAG, "EPD refresh task: invalid area, fallback FAST");
+                        EPD_4in26_Display_Fast(s_epd_framebuffer);
+                    }
+                    s_partial_refresh_count++;
+partial_done:
                     portENTER_CRITICAL(&s_dirty_mux);
                     s_dirty_valid = false;
                     portEXIT_CRITICAL(&s_dirty_mux);
-
-                } else if (mode == EPD_REFRESH_PARTIAL) {
-                    // 检查是否需要强制全刷（消除鬼影）
-                    if (s_partial_refresh_count >= FORCE_FULL_REFRESH_AFTER_N_PARTIAL) {
-                        ESP_LOGI(TAG, "EPD refresh task: Force FULL refresh after %u PARTIALs",
-                                 s_partial_refresh_count);
-                        EPD_4in26_Display(s_epd_framebuffer);
-                        s_partial_refresh_count = 0;
-                        portENTER_CRITICAL(&s_dirty_mux);
-                        s_dirty_valid = false;
-                        portEXIT_CRITICAL(&s_dirty_mux);
-                    } else {
-                        // Snapshot dirty area atomically to avoid concurrent modification by flush_cb.
-                        bool dirty_valid;
-                        lv_area_t dirty_area;
-                        portENTER_CRITICAL(&s_dirty_mux);
-                        dirty_valid = s_dirty_valid;
-                        dirty_area = s_dirty_area;
-                        portEXIT_CRITICAL(&s_dirty_mux);
-
-                        if (!dirty_valid) {
-                            ESP_LOGW(TAG, "EPD refresh task: PARTIAL requested but no dirty area, skipping");
-                            // Nothing to do.
-                            goto partial_done;
-                        }
-
-                        // ============================================================
-                        // 局部刷新优化方案：
-                        // 直接使用完整的 s_epd_framebuffer，只裁剪脏区发送给硬件
-                        // - s_epd_framebuffer 已经是 EPD 格式 (800x480, ROTATE_270)
-                        // - 只需计算要裁剪的区域，无需额外坐标转换
-                        // ============================================================
-
-                        // 获取脏区尺寸
-                        const int32_t dirty_w = dirty_area.x2 - dirty_area.x1 + 1;
-                        const int32_t dirty_h = dirty_area.y2 - dirty_area.y1 + 1;
-
-                        // LVGL 坐标系 (480x800) 到 EPD 物理坐标系 (800x480) 的映射
-                        // ROTATE_270: LVGL(x,y) -> EPD(memX=y, memY=EPD_HEIGHT-1-x)
-                        int32_t epd_x = dirty_area.y1;
-                        int32_t epd_y = (int32_t)EPD_HEIGHT - 1 - dirty_area.x2;
-                        int32_t epd_w = dirty_h;  // 注意：宽高互换
-                        int32_t epd_h = dirty_w;
-
-                        // EPD 硬件要求：X 坐标必须是 8 的倍数（字节对齐）
-                        if (epd_x % 8 != 0) {
-                            const int32_t orig_x = epd_x;
-                            epd_x = (epd_x / 8) * 8;  // 向下对齐
-                            epd_w += (orig_x - epd_x);  // 补偿宽度
-                        }
-                        if (epd_w % 8 != 0) {
-                            epd_w = ((epd_w + 7) / 8) * 8;  // 向上对齐
-                        }
-
-                        // 边界检查
-                        if (epd_x < 0) epd_x = 0;
-                        if (epd_y < 0) epd_y = 0;
-                        if (epd_x + epd_w > EPD_WIDTH) epd_w = EPD_WIDTH - epd_x;
-                        if (epd_y + epd_h > EPD_HEIGHT) epd_h = EPD_HEIGHT - epd_y;
-
-                        ESP_LOGI(TAG, "EPD refresh task: PARTIAL #%u/%u LVGL(%d,%d,%dx%d) -> EPD(x=%d,y=%d,%dx%d)",
-                                 s_partial_refresh_count + 1, FORCE_FULL_REFRESH_AFTER_N_PARTIAL,
-                                 (int)dirty_area.x1, (int)dirty_area.y1, (int)dirty_w, (int)dirty_h,
-                                 (int)epd_x, (int)epd_y, (int)epd_w, (int)epd_h);
-
-                        // 从完整 framebuffer 裁剪脏区数据发送给硬件
-                        // 关键修复：传递完整 framebuffer 和坐标，让 EPD 函数自己裁剪
-                        if (epd_w > 0 && epd_h > 0) {
-                            // 使用完整 framebuffer，传递 EPD 物理坐标
-                            // EPD_4in26_Display_Partial 会从 framebuffer 中裁剪正确的区域
-                            EPD_4in26_Display_Partial(s_epd_framebuffer,
-                                                     (UWORD)epd_x, (UWORD)epd_y,
-                                                     (UWORD)epd_w, (UWORD)epd_h);
-                        } else {
-                            ESP_LOGW(TAG, "EPD refresh task: invalid area, fallback FAST");
-                            EPD_4in26_Display_Fast(s_epd_framebuffer);
-                        }
-                        s_partial_refresh_count++;
-partial_done:
-                        portENTER_CRITICAL(&s_dirty_mux);
-                        s_dirty_valid = false;
-                        portEXIT_CRITICAL(&s_dirty_mux);
-                    }
-
                 } else {
                     ESP_LOGE(TAG, "EPD refresh task: Unknown mode %d, fallback to FAST", mode);
                     EPD_4in26_Display_Fast(s_epd_framebuffer);
@@ -620,6 +647,14 @@ void lvgl_reset_refresh_state(void)
     s_dirty_valid = false;
     portEXIT_CRITICAL(&s_dirty_mux);
     s_partial_refresh_count = 0;
+
+    // 清空刷新队列，丢弃所有待处理的刷新请求
+    // 这对于屏幕切换很重要：旧屏幕的 PARTIAL 刷新请求不应该污染新屏幕
+    if (s_refresh_queue != NULL) {
+        xQueueReset(s_refresh_queue);
+        ESP_LOGI(TAG, "Cleared refresh queue during reset");
+    }
+
     ESP_LOGI(TAG, "Refresh state reset (dirty_valid=%d, partial_count=%u)",
              s_dirty_valid, s_partial_refresh_count);
 }

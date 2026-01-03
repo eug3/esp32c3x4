@@ -511,12 +511,20 @@ void EPD_4in26_Display(UBYTE *Image)
 	UWORD height = EPD_4in26_HEIGHT;
 	UWORD width = EPD_4in26_WIDTH/8;
 
+	ESP_LOGI("EPD", "EPD_4in26_Display: starting, height=%u, width=%u bytes", height, width);
+
+	// 打印前几行数据用于调试
+	ESP_LOGI("EPD", "EPD_4in26_Display: first 4 bytes of image: 0x%02X 0x%02X 0x%02X 0x%02X",
+	         Image[0], Image[1], Image[2], Image[3]);
+
 	// 写入当前图像缓冲区 (0x24)
 	EPD_4in26_SendCommand(0x24);   //write RAM for black(0)/white (1)
 	for(i=0; i<height; i++)
 	{
         EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
 	}
+
+	ESP_LOGI("EPD", "EPD_4in26_Display: 0x24 written, writing 0x26...");
 
 	// 同时写入上一帧缓冲区 (0x26)，确保局部刷新时对比正确
 	// 这是关键：如果不写 0x26，局部刷新会和旧数据对比，导致显示错误
@@ -526,7 +534,9 @@ void EPD_4in26_Display(UBYTE *Image)
         EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
 	}
 
+	ESP_LOGI("EPD", "EPD_4in26_Display: both RAMs written, triggering display...");
 	EPD_4in26_TurnOnDisplay();
+	ESP_LOGI("EPD", "EPD_4in26_Display: complete!");
 }
 
 void EPD_4in26_Display_Base(UBYTE *Image)
@@ -556,10 +566,17 @@ void EPD_4in26_Display_Fast(UBYTE *Image)
 	UWORD height = EPD_4in26_HEIGHT;
 	UWORD width = EPD_4in26_WIDTH/8;
 
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: height=%u, width=%u bytes", height, width);
+
+	// 打印前几行数据用于调试
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: first 4 bytes of image: 0x%02X 0x%02X 0x%02X 0x%02X",
+	         Image[0], Image[1], Image[2], Image[3]);
+
 	// 根据 GxEPD2：每次刷新前设置温度补偿
 	EPD_4in26_SendCommand(0x1A); // Write to temperature register
 	EPD_4in26_SendData(0x5A);    // 25°C 补偿值
 
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: writing to 0x24...");
 	// 写入当前图像缓冲区 (0x24)
 	EPD_4in26_SendCommand(0x24);   //write RAM for black(0)/white (1)
 	for(i=0; i<height; i++)
@@ -567,6 +584,7 @@ void EPD_4in26_Display_Fast(UBYTE *Image)
 		EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
 	}
 
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: 0x24 written, writing to 0x26...");
 	// 同时写入上一帧缓冲区 (0x26)，确保局部刷新时对比基准正确
 	// 快刷虽然速度快，但仍需同步 0x26，避免后续局部刷新出错
 	EPD_4in26_SendCommand(0x26);   //write RAM for previous frame
@@ -574,7 +592,7 @@ void EPD_4in26_Display_Fast(UBYTE *Image)
 	{
 		EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
 	}
-	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: data written to both 0x24 and 0x26, triggering refresh...");
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: both RAMs written, triggering refresh...");
 
 	// 根据 GxEPD2：使用 0xD7 进行快刷（full update with mode change）
 	// 0x21: Display Update Control

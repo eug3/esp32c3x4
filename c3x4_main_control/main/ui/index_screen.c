@@ -70,19 +70,20 @@ static void index_button_focus_event_cb(lv_event_t *e)
             }
         }
 
+        // 组件内操作：使用局刷模式（PARTIAL）提升响应速度
+        // 焦点切换是小范围更新，局刷足够且更快
+        // 重要：必须先设置刷新模式，再触发渲染，否则脏区不会被记录
+        lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
+
         // 手动刷新模式(RENDER_MODE_DIRECT): 必须手动触发渲染和刷新
         // lv_obj_invalidate() 只标记需要重绘,但不会自动触发flush_cb
         lv_obj_invalidate(btn);
-        
+
         // 触发LVGL渲染
         lvgl_trigger_render(NULL);
 
         // 记录当前焦点按钮
         s_last_focused_button = btn;
-
-        // 组件内操作：使用局刷模式（PARTIAL）提升响应速度
-        // 焦点切换是小范围更新，局刷足够且更快
-        lvgl_set_refresh_mode(EPD_REFRESH_PARTIAL);
 
         // 触发EPD刷新
         lvgl_display_refresh();
