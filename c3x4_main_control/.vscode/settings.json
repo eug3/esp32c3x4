@@ -1,7 +1,7 @@
 {
   "C_Cpp.intelliSenseEngine": "default",
   "idf.espIdfPath": "/Users/beijihu/esp/esp-idf",
-  "idf.pythonInstallPath": "/opt/homebrew/bin/python3",
+  "idf.pythonInstallPath": "C:\\Espressif\\tools\\idf-python\\3.11.2\\python.exe",
   "idf.openOcdConfigs": [
     "board/esp32c3-builtin.cfg"
   ],
@@ -16,5 +16,12 @@
     "--query-driver=**",
     "--compile-commands-dir=/Users/beijihu/Github/esp32c3x4/project-name/build"
   ],
+<<<<<<< Updated upstream
   "idf.flashType": "JTAG"
+=======
+  "idf.espIdfPathWin": "C:/Espressif/frameworks/esp-idf-v5.5.2/",
+  "idf.toolsPathWin": "C:\\Espressif",
+  "idf.flashType": "JTAG",
+  "idf.portWin": "COM5"
+>>>>>>> Stashed changes
 }

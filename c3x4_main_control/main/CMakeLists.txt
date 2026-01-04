@@ -13,6 +13,7 @@ if(EXISTS ${COMPONENT_DIR}/../tinyxml2)
     include_directories("${COMPONENT_DIR}/../tinyxml2")
 endif()
 
+<<<<<<< Updated upstream
 idf_component_register(SRCS "ui/home_screen.c"
                        "ui/file_browser_screen.c"
                        "ui/reader_screen_simple.c"
@@ -41,6 +42,12 @@ idf_component_register(SRCS "ui/home_screen.c"
                        "Fonts/source_sans_pro_16.c"
                        ${EPUB_PARSER_SOURCES}
                        PRIV_REQUIRES spi_flash esp_driver_gpio esp_driver_spi driver esp_wifi nvs_flash bt fatfs littlefs esp_adc esp_timer
+=======
+idf_component_register(SRCS "ui/chinese_font.c" "ui/builtin_chinese_font.c" "main.c" "DEV_Config.c" "EPD_4in26.c" "GUI_Paint.c" "ImageData.c"
+                       "Fonts/font12.c" "Fonts/font16.c" "Fonts/font20.c" "Fonts/font24.c" "Fonts/font8.c"
+                       ${EPUB_PARSER_SOURCES}
+                       PRIV_REQUIRES spi_flash esp_driver_gpio esp_driver_spi driver esp_wifi nvs_flash bt fatfs littlefs esp_adc
+>>>>>>> Stashed changes
                        INCLUDE_DIRS "." "Fonts" "ui")
 
 # Disable type-limits warning for GUI_Paint.c

@@ -39,6 +39,7 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_cali.h"
+<<<<<<< Updated upstream
 #include "ui/display_engine.h"      // 显示引擎
 #include "ui/input_handler.h"       // 输入处理
 #include "ui/font_renderer.h"       // 字体渲染器
@@ -49,6 +50,24 @@
 #include "ui/settings_screen_simple.h"// 设置屏幕
 #include "ui/image_viewer_screen.h" // 图片查看器
 #include "version.h"                // 自动生成的版本信息
+=======
+#include "version.h"       // 自动生成的版本信息
+>>>>>>> Stashed changes
+
+// 按钮枚举定义
+typedef enum {
+    BTN_NONE = 0,
+    BTN_RIGHT,
+    BTN_LEFT,
+    BTN_CONFIRM,
+    BTN_BACK,
+    BTN_VOLUME_UP,
+    BTN_VOLUME_DOWN,
+    BTN_POWER
+} button_t;
+
+// 外部函数声明
+button_t get_pressed_button(void);
 
 // ============================================================================
 // Xteink X4 引脚定义 - 参考 examples/xteink-x4-sample
@@ -72,8 +91,11 @@
 #define BTN_VOLUME_DOWN_VAL     3      // Volume Down按钮ADC值
 #define BTN_VOLUME_UP_VAL       2205   // Volume Up按钮ADC值
 
+<<<<<<< Updated upstream
 // 按钮枚举定义在 input_handler.h 中
 
+=======
+>>>>>>> Stashed changes
 // 电源按钮时间定义
 #define POWER_BUTTON_WAKEUP_MS    1000  // 从睡眠唤醒需要按下时间
 #define POWER_BUTTON_SLEEP_MS     1000  // 进入睡眠需要按下时间
@@ -1115,6 +1137,7 @@ void app_main(void)
         ESP_LOGW("MAIN", "File browser and SD-related features will be unavailable");
     }
 
+<<<<<<< Updated upstream
     // 手绘 UI 系统初始化
     ESP_LOGI("MAIN", "Initializing Hand-drawn UI system...");
 
@@ -1218,5 +1241,9 @@ static void button_event_callback(button_t btn, button_event_t event, void *user
         // 分发到当前屏幕
         screen_manager_handle_event(btn, event);
     }
+=======
+    ESP_LOGI("MAIN", "System initialized successfully.");
+    ESP_LOGI("MAIN", "Main task ending, FreeRTOS tasks continue running...");
+>>>>>>> Stashed changes
 }
 
