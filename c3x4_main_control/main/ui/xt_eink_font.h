@@ -13,7 +13,6 @@
 #ifndef XT_EINK_FONT_H
 #define XT_EINK_FONT_H
 
-#include "lvgl.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -89,13 +88,16 @@ typedef struct {
 } xt_eink_font_t;
 
 /**
- * @brief LVGL 字体包装器
+ * @brief 字形描述符（无 LVGL 版本）
  */
 typedef struct {
-    lv_font_t base;                // LVGL 字体基础结构
-    xt_eink_font_t *ctx;           // XTEink 字体上下文
-    int ref_count;                 // 引用计数
-} xt_eink_lv_font_t;
+    uint16_t adv_w;                // 字形宽度（像素）
+    uint8_t box_w;                 // 字形框宽度
+    uint8_t box_h;                 // 字形框高度
+    int8_t ofs_x;                  // X 偏移
+    int8_t ofs_y;                  // Y 偏移
+    uint8_t bpp;                   // 每像素位数
+} xt_eink_font_glyph_dsc_t;
 
 /**********************
  * GLOBAL PROTOTYPES
@@ -115,15 +117,15 @@ xt_eink_font_t *xt_eink_font_open(const char *path);
 void xt_eink_font_close(xt_eink_font_t *font);
 
 /**
- * @brief 获取字形描述符
+ * @brief 获取字形描述符（无 LVGL 版本）
  * @param font 字体上下文
  * @param unicode Unicode 码点
- * @param font_height 字体高度
- * @return 字形描述符指针（LVGL 格式），失败返回 NULL
+ * @param font_height 字体高度（保留参数，允许传 0）
+ * @return 字形描述符指针，失败返回 NULL
  */
-const lv_font_glyph_dsc_t *xt_eink_font_get_glyph_dsc(xt_eink_font_t *font,
-                                                       uint32_t unicode,
-                                                       uint32_t font_height);
+const xt_eink_font_glyph_dsc_t *xt_eink_font_get_glyph_dsc(xt_eink_font_t *font,
+                                                           uint32_t unicode,
+                                                           uint32_t font_height);
 
 /**
  * @brief 获取字形位图
@@ -133,18 +135,6 @@ const lv_font_glyph_dsc_t *xt_eink_font_get_glyph_dsc(xt_eink_font_t *font,
  */
 const uint8_t *xt_eink_font_get_bitmap(xt_eink_font_t *font, uint32_t unicode);
 
-/**
- * @brief 创建 LVGL 字体对象
- * @param path 字体文件路径
- * @return LVGL 字体指针，失败返回 NULL
- */
-lv_font_t *xt_eink_font_create(const char *path);
-
-/**
- * @brief 销毁 LVGL 字体对象
- * @param font LVGL 字体指针
- */
-void xt_eink_font_destroy(lv_font_t *font);
 
 /**
  * @brief 获取字体信息字符串
@@ -174,24 +164,5 @@ void xt_eink_font_get_cache_stats(xt_eink_font_t *font, uint32_t *hit, uint32_t 
  * @param font 字体上下文
  */
 void xt_eink_font_clear_cache(xt_eink_font_t *font);
-
-/**
- * @brief LVGL 字形描述符回调（用于 LVGL 字体注册）
- * @param font LVGL 字体指针
- * @param unicode Unicode 码点
- * @param font_height 字体高度
- * @return 字形描述符指针，失败返回 NULL
- */
-const lv_font_glyph_dsc_t *xt_eink_font_get_glyph_dsc_cb(const lv_font_t *font,
-                                                          uint32_t unicode,
-                                                          uint32_t font_height);
-
-/**
- * @brief LVGL 字形位图回调（用于 LVGL 字体注册）
- * @param font LVGL 字体指针
- * @param unicode Unicode 码点
- * @return 位图数据指针，失败返回 NULL
- */
-const uint8_t *xt_eink_font_get_glyph_bitmap_cb(const lv_font_t *font, uint32_t unicode);
 
 #endif // XT_EINK_FONT_H

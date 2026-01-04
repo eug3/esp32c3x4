@@ -7,7 +7,7 @@
 #include "EPD_4in26.h"
 #include "GUI_Paint.h"
 #include "Fonts/fonts.h"
-#include "chinese_font_impl.h"
+#include "xt_eink_font_impl.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -44,6 +44,11 @@ static bool text_has_non_ascii(const char *text);
 static int measure_text_width_utf8(const char *text, sFONT *ascii_font);
 static int measure_text_height_utf8(const char *text, sFONT *ascii_font);
 static int draw_text_utf8_locked(int x, int y, const char *text, sFONT *ascii_font, uint8_t color, uint8_t bg_color);
+
+static void ensure_xt_font_initialized(void);
+static int get_cjk_typical_width(void);
+static int get_ascii_advance_width(sFONT *ascii_font);
+static sFONT* choose_ascii_font_by_cjk_height(void);
 
 /**********************
  *  STATIC FUNCTIONS
@@ -106,6 +111,117 @@ static bool text_has_non_ascii(const char *text)
     return false;
 }
 
+static void ensure_xt_font_initialized(void)
+{
+    static bool xt_font_initialized = false;
+    if (!xt_font_initialized) {
+        xt_eink_font_init();
+        xt_font_initialized = true;
+    }
+}
+
+static sFONT* choose_ascii_font_by_cjk_height(void)
+{
+    ensure_xt_font_initialized();
+    int cjk_h = xt_eink_font_get_height();
+    if (cjk_h <= 0) {
+        return &Font12;
+    }
+
+    // 候选 ASCII 字体：只按高度挑选“最接近”的。
+    // SourceSansPro16 是 21px 高，能填补 Font20/Font24 之间的空档。
+    sFONT *candidates[] = {
+        &Font8,
+        &Font12,
+        &Font16,
+        &SourceSansPro16,
+        &Font20,
+        &Font24,
+    };
+
+    sFONT *best = candidates[0];
+    int best_diff = 0x7FFFFFFF;
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        sFONT *f = candidates[i];
+        int diff = (int)f->Height - cjk_h;
+        if (diff < 0) diff = -diff;
+
+        if (diff < best_diff) {
+            best = f;
+            best_diff = diff;
+        } else if (diff == best_diff) {
+            // 同差值时，优先选择更小的字体，避免英文“顶到行高”显得拥挤
+            if (f->Height < best->Height) {
+                best = f;
+            }
+        }
+    }
+    return best;
+}
+
+sFONT* display_get_default_ascii_font(void)
+{
+    return choose_ascii_font_by_cjk_height();
+}
+
+static int get_cjk_typical_width(void)
+{
+    // 使用常见汉字探测“全角宽度”，用于推导英文半角宽度
+    ensure_xt_font_initialized();
+
+    static const uint32_t probes[] = {
+        0x4E2Du, // 中
+        0x56FDu, // 国
+        0x6C49u, // 汉
+        0x6587u, // 文
+    };
+
+    for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+        uint32_t ch = probes[i];
+        if (!xt_eink_font_has_char(ch)) {
+            continue;
+        }
+        xt_eink_glyph_t glyph;
+        if (xt_eink_font_get_glyph(ch, &glyph) && glyph.width > 0) {
+            return glyph.width;
+        }
+    }
+
+    int h = xt_eink_font_get_height();
+    if (h > 0) {
+        // 字体文件通常接近方形，但本项目常用 19x25：宽度约为高度 * 0.76
+        // 这里取 3/4 作为稳健近似。
+        return (h * 3) / 4;
+    }
+    return 0;
+}
+
+static int get_ascii_advance_width(sFONT *ascii_font)
+{
+    if (ascii_font == NULL) {
+        ascii_font = choose_ascii_font_by_cjk_height();
+    }
+
+    int cjk_w = get_cjk_typical_width();
+    if (cjk_w <= 0) {
+        return (int)ascii_font->Width;
+    }
+
+    // 半角宽度：约等于全角宽度的一半
+    int target = (cjk_w + 1) / 2;
+    int base = (int)ascii_font->Width;
+    if (target <= base) {
+        return base;
+    }
+
+    // 通过增加字距来“选择合适的英文宽度”，不做像素级拉伸
+    int extra = target - base;
+    if (extra > base) {
+        extra = base; // 防止极端字体导致过大间距
+    }
+    return base + extra;
+}
+
 static int measure_text_width_utf8(const char *text, sFONT *ascii_font)
 {
     if (text == NULL || *text == '\0') {
@@ -113,22 +229,34 @@ static int measure_text_width_utf8(const char *text, sFONT *ascii_font)
     }
 
     if (ascii_font == NULL) {
-        ascii_font = &SourceSansPro16;
+        ascii_font = choose_ascii_font_by_cjk_height();
     }
+
+    ensure_xt_font_initialized();
+    int ascii_adv = get_ascii_advance_width(ascii_font);
 
     int width = 0;
     const char *p = text;
     while (*p != '\0') {
         uint32_t ch;
-        int offset = chinese_font_utf8_to_utf32(p, &ch);
+        int offset = xt_eink_font_utf8_to_utf32(p, &ch);
         if (offset <= 0) {
             break;
         }
 
-        if (chinese_font_has_char(ch)) {
-            width += CHINESE_FONT_SIZE;
+        // 规则：ASCII 永远走内置字体；非 ASCII 才尝试字体文件（xt_eink）
+        if (ch <= 0x7Fu) {
+            width += ascii_adv;
+        } else if (xt_eink_font_has_char(ch)) {
+            xt_eink_glyph_t glyph;
+            if (xt_eink_font_get_glyph(ch, &glyph) && glyph.width > 0) {
+                width += glyph.width;
+            } else {
+                width += xt_eink_font_get_height();
+            }
         } else {
-            width += ascii_font->Width;
+            // 非 ASCII 且字体文件没有：用 '?' 回退
+            width += ascii_adv;
         }
 
         p += offset;
@@ -142,12 +270,15 @@ static int measure_text_height_utf8(const char *text, sFONT *ascii_font)
     (void)text;
 
     if (ascii_font == NULL) {
-        ascii_font = &SourceSansPro16;
+        ascii_font = choose_ascii_font_by_cjk_height();
     }
 
+    ensure_xt_font_initialized();
+
     int h = ascii_font->Height;
-    if (CHINESE_FONT_SIZE > h) {
-        h = CHINESE_FONT_SIZE;
+    int xt_h = xt_eink_font_get_height();
+    if (xt_h > h) {
+        h = xt_h;
     }
     return h;
 }
@@ -159,14 +290,11 @@ static int draw_text_utf8_locked(int x, int y, const char *text, sFONT *ascii_fo
     }
 
     if (ascii_font == NULL) {
-        ascii_font = &SourceSansPro16;
+        ascii_font = choose_ascii_font_by_cjk_height();
     }
 
-    static bool chinese_font_initialized = false;
-    if (!chinese_font_initialized) {
-        chinese_font_init();
-        chinese_font_initialized = true;
-    }
+    ensure_xt_font_initialized();
+    int ascii_adv = get_ascii_advance_width(ascii_font);
 
     int text_w = measure_text_width_utf8(text, ascii_font);
     int text_h = measure_text_height_utf8(text, ascii_font);
@@ -180,15 +308,19 @@ static int draw_text_utf8_locked(int x, int y, const char *text, sFONT *ascii_fo
 
     while (*p != '\0') {
         uint32_t ch;
-        int offset = chinese_font_utf8_to_utf32(p, &ch);
+        int offset = xt_eink_font_utf8_to_utf32(p, &ch);
         if (offset <= 0) {
             break;
         }
 
-        if (chinese_font_has_char(ch)) {
-            chinese_glyph_t glyph;
-            if (!chinese_font_get_glyph(ch, &glyph) || glyph.bitmap == NULL) {
-                current_x += CHINESE_FONT_SIZE;
+        // 规则：ASCII 永远走内置字体；非 ASCII 才尝试字体文件（xt_eink）
+        if (ch <= 0x7Fu) {
+            Paint_DrawChar(current_x, y, (char)ch, ascii_font, color, bg_color);
+            current_x += ascii_adv;
+        } else if (xt_eink_font_has_char(ch)) {
+            xt_eink_glyph_t glyph;
+            if (!xt_eink_font_get_glyph(ch, &glyph) || glyph.bitmap == NULL) {
+                current_x += xt_eink_font_get_height();
                 p += offset;
                 continue;
             }
@@ -213,9 +345,8 @@ static int draw_text_utf8_locked(int x, int y, const char *text, sFONT *ascii_fo
 
             current_x += glyph.width;
         } else {
-            // ASCII
-            Paint_DrawChar(current_x, y, (char)ch, ascii_font, color, bg_color);
-            current_x += ascii_font->Width;
+            Paint_DrawChar(current_x, y, '?', ascii_font, color, bg_color);
+            current_x += ascii_adv;
         }
 
         p += offset;
@@ -632,7 +763,7 @@ int display_draw_text(int x, int y, const char *text, uint8_t color, uint8_t bg_
         return 0;
     }
 
-    return display_draw_text_font(x, y, text, &SourceSansPro16, color, bg_color);
+    return display_draw_text_font(x, y, text, NULL, color, bg_color);
 }
 
 int display_draw_text_font(int x, int y, const char *text, sFONT *font, uint8_t color, uint8_t bg_color)
@@ -642,7 +773,7 @@ int display_draw_text_font(int x, int y, const char *text, sFONT *font, uint8_t 
     }
 
     if (font == NULL) {
-        font = &SourceSansPro16;
+        font = choose_ascii_font_by_cjk_height();
     }
 
     lock_engine();
@@ -650,8 +781,14 @@ int display_draw_text_font(int x, int y, const char *text, sFONT *font, uint8_t 
     if (text_has_non_ascii(text)) {
         width = draw_text_utf8_locked(x, y, text, font, color, bg_color);
     } else {
-        Paint_DrawString_EN(x, y, text, font, color, bg_color);
-        width = strlen(text) * font->Width;
+        // 与混排保持一致：按“半角宽度”逐字符绘制
+        int ascii_adv = get_ascii_advance_width(font);
+        int cur_x = x;
+        for (const char *p = text; *p != '\0'; p++) {
+            Paint_DrawChar(cur_x, y, *p, font, color, bg_color);
+            cur_x += ascii_adv;
+        }
+        width = cur_x - x;
 
         if (s_config.use_partial_refresh) {
             expand_dirty_region(x, y, width, font->Height);
@@ -670,16 +807,18 @@ int display_draw_text_cn(int x, int y, const char *text, int font_size, uint8_t 
 
     lock_engine();
 
-    // 确保中文字体已初始化
-    static bool chinese_font_initialized = false;
-    if (!chinese_font_initialized) {
-        chinese_font_init();
-        chinese_font_initialized = true;
+    // 确保字体已初始化
+    static bool xt_font_initialized = false;
+    if (!xt_font_initialized) {
+        xt_eink_font_init();
+        xt_font_initialized = true;
     }
 
+    (void)font_size;
+
     // 获取文本宽度和高度
-    int text_width = chinese_font_get_text_width(text);
-    int text_height = chinese_font_get_height();
+    int text_width = xt_eink_font_get_text_width(text);
+    int text_height = xt_eink_font_get_height();
 
     // 绘制背景（如果需要）
     if (bg_color != COLOR_WHITE) {
@@ -689,8 +828,8 @@ int display_draw_text_cn(int x, int y, const char *text, int font_size, uint8_t 
     // 渲染中文文本到帧缓冲
     // 注意：color 参数是前景色，0=黑，1=白
     uint8_t render_color = (color == COLOR_BLACK) ? 0 : 1;
-    int actual_width = chinese_font_render_text(x, y, text, render_color,
-                                                  s_framebuffer, 800, 480);
+    int actual_width = xt_eink_font_render_text(x, y, text, render_color,
+                                                s_framebuffer, 800, 480);
 
     if (s_config.use_partial_refresh) {
         expand_dirty_region(x, y, actual_width, text_height);
@@ -708,7 +847,7 @@ int display_get_text_width(const char *text, int font_size)
     }
 
     (void)font_size;
-    return display_get_text_width_font(text, &SourceSansPro16);
+    return display_get_text_width_font(text, NULL);
 }
 
 int display_get_text_width_font(const char *text, sFONT *font)
@@ -718,31 +857,32 @@ int display_get_text_width_font(const char *text, sFONT *font)
     }
 
     if (font == NULL) {
-        font = &SourceSansPro16;
+        font = choose_ascii_font_by_cjk_height();
     }
 
     if (text_has_non_ascii(text)) {
         return measure_text_width_utf8(text, font);
     }
 
-    return strlen(text) * font->Width;
+    return (int)strlen(text) * get_ascii_advance_width(font);
 }
 
 int display_get_text_height(int font_size)
 {
     (void)font_size;
-    return display_get_text_height_font(&SourceSansPro16);
+    return display_get_text_height_font(NULL);
 }
 
 int display_get_text_height_font(sFONT *font)
 {
     if (font == NULL) {
-        font = &SourceSansPro16;
+        font = choose_ascii_font_by_cjk_height();
     }
 
     int h = font->Height;
-    if (CHINESE_FONT_SIZE > h) {
-        h = CHINESE_FONT_SIZE;
+    int xt_h = xt_eink_font_get_height();
+    if (xt_h > h) {
+        h = xt_h;
     }
     return h;
 }

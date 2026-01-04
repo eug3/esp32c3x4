@@ -16,7 +16,6 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "esp_bt.h"
 #include "nvs_flash.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
@@ -24,50 +23,19 @@
 #include "sdmmc_cmd.h"
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
-#include "host/ble_gatt.h"
-#include "host/ble_hs.h"
-#include "host/ble_uuid.h"
-#include "services/gap/ble_svc_gap.h"
-#include "services/gatt/ble_svc_gatt.h"
-#include "store/config/ble_store_config.h"
-#include "esp_nimble_hci.h"
-#include "nimble/nimble_port.h"
-#include "nimble/nimble_port_freertos.h"
 #include "DEV_Config.h"
 #include "EPD_4in26.h"
 #include "ImageData.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_cali.h"
-<<<<<<< Updated upstream
-#include "ui/display_engine.h"      // 显示引擎
-#include "ui/input_handler.h"       // 输入处理
-#include "ui/font_renderer.h"       // 字体渲染器
-#include "ui/screen_manager.h"      // 屏幕管理器
-#include "ui/home_screen.h"         // 首页屏幕
-#include "ui/file_browser_screen.h" // 文件浏览器
-#include "ui/reader_screen_simple.h"// 阅读器屏幕
-#include "ui/settings_screen_simple.h"// 设置屏幕
-#include "ui/image_viewer_screen.h" // 图片查看器
-#include "version.h"                // 自动生成的版本信息
-=======
 #include "version.h"       // 自动生成的版本信息
->>>>>>> Stashed changes
-
-// 按钮枚举定义
-typedef enum {
-    BTN_NONE = 0,
-    BTN_RIGHT,
-    BTN_LEFT,
-    BTN_CONFIRM,
-    BTN_BACK,
-    BTN_VOLUME_UP,
-    BTN_VOLUME_DOWN,
-    BTN_POWER
-} button_t;
-
-// 外部函数声明
-button_t get_pressed_button(void);
+#include "display_engine.h"
+#include "screen_manager.h"
+#include "home_screen.h"
+#include "settings_screen_simple.h"
+#include "file_browser_screen.h"
+#include "input_handler.h"
 
 // ============================================================================
 // Xteink X4 引脚定义 - 参考 examples/xteink-x4-sample
@@ -91,30 +59,16 @@ button_t get_pressed_button(void);
 #define BTN_VOLUME_DOWN_VAL     3      // Volume Down按钮ADC值
 #define BTN_VOLUME_UP_VAL       2205   // Volume Up按钮ADC值
 
-<<<<<<< Updated upstream
-// 按钮枚举定义在 input_handler.h 中
-
-=======
->>>>>>> Stashed changes
 // 电源按钮时间定义
 #define POWER_BUTTON_WAKEUP_MS    1000  // 从睡眠唤醒需要按下时间
 #define POWER_BUTTON_SLEEP_MS     1000  // 进入睡眠需要按下时间
 
 // 电池监测 - ESP-IDF 6.1 新 API
-adc_oneshot_unit_handle_t adc1_handle = NULL;  // 移除static，供input_handler使用
+adc_oneshot_unit_handle_t adc1_handle = NULL;
 static adc_cali_handle_t adc1_cali_handle = NULL;
 static bool do_calibration = true;
 
-// BLE connection state management
-static bool ble_connected = false;
-static bool ble_advertising = false;
-static uint16_t ble_conn_handle = 0;
-static char ble_peer_addr[18] = {0};
-static bool ble_pending_connection = false;
-static char ble_local_addr[18] = {0};
-static uint8_t own_addr_type;
-
-// 按钮状态（保留 current_pressed_button 供未来使用）
+// 按钮状态
 static volatile button_t current_pressed_button = BTN_NONE;
 
 // Define driver selection
@@ -125,10 +79,8 @@ static volatile button_t current_pressed_button = BTN_NONE;
 #define CURRENT_DRIVER TEST_DRIVER_SSD1681  // Change this to test different drivers
 
 // Forward declarations
-static int start_advertising(void);
 esp_err_t sd_card_init(void);
 void sd_card_test_read_write(const char *mount_point);
-static void button_event_callback(button_t btn, button_event_t event, void *user_data);
 
 #define SDCARD_MOUNT_POINT "/sdcard"
 #define SPI_DMA_CHAN    1
@@ -138,53 +90,6 @@ static void button_event_callback(button_t btn, button_event_t event, void *user
 #define PIN_NUM_MOSI  GPIO_NUM_10
 #define PIN_NUM_CLK   GPIO_NUM_8
 #define PIN_NUM_CS    GPIO_NUM_12   // SD_CS 专用引脚
-
-// BLE initialization function — use esp_nimble_hci_and_controller_init() to avoid
-// controller state conflicts on ESP32-C3
-#define DEVICE_NAME "ESP32-BLE"
-
-static const char *BLE_TAG = "BLE_MIN";
-
-// GATT service for receiving image data from mobile device
-#define IMAGE_SERVICE_UUID     0x1234
-#define IMAGE_DATA_CHAR_UUID   0x5678
-// GATT characteristic (ESP32 -> phone) for page control commands (notify ASCII: "prev"/"next"/"capture")
-#define CONTROL_CMD_CHAR_UUID  0x5679
-
-// Frame protocol (written by phone to 0x5678):
-// 0..3  : ASCII 'X4IM'
-// 4     : version = 1
-// 5     : format  = 1 (RGB565 little-endian)
-// 6..7  : reserved
-// 8..11 : payload length (uint32 LE)
-#define X4IM_HDR_LEN 12
-
-// JSON layout protocol:
-// 0..3  : ASCII 'X4JS'
-// 4     : version = 1
-// 5..7  : reserved
-// 8..11 : payload length (uint32 LE)
-#define X4JS_HDR_LEN 12
-
-// Image data storage - using external storage for large images
-// static uint8_t image_data[160 * 120 * 2]; // Removed to save DRAM
-static uint32_t image_data_len = 0;
-static uint32_t image_expected_len = (480u * 800u * 2u);
-static bool image_data_ready = false;
-static uint32_t image_frame_id = 0;
-static char current_image_filename[64] = {0};
-static FILE *image_file = NULL;
-
-// JSON layout storage
-static char current_json_filename[64] = {0};
-static FILE *json_file = NULL;
-static uint32_t json_data_len = 0;
-static uint32_t json_expected_len = 0;
-static bool json_data_ready = false;
-
-static uint16_t control_cmd_chr_val_handle = 0;
-static char last_control_cmd[16] = {0};
-static bool cmd_notify_enabled = false;
 
 // ============================================================================
 // Xteink X4 按钮和电池功能函数
@@ -347,471 +252,6 @@ static uint8_t read_battery_percentage(void) {
     if (voltage_mv < 3000) return 0;
     if (voltage_mv > 4200) return 100;
     return (voltage_mv - 3000) * 100 / (4200 - 3000);
-}
-
-static uint32_t read_le_u32(const uint8_t *p) {
-    return ((uint32_t)p[0]) | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static int control_cmd_chr_access(uint16_t conn_handle, uint16_t attr_handle,
-                                struct ble_gatt_access_ctxt *ctxt, void *arg)
-{
-    (void)conn_handle;
-    (void)attr_handle;
-    (void)arg;
-
-    // This characteristic is primarily NOTIFY (ESP32 -> phone). We allow READ so the phone
-    // can verify the channel and fetch the last command for debugging.
-    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        int rc = os_mbuf_append(ctxt->om, last_control_cmd, strlen(last_control_cmd));
-        return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
-    }
-
-    return BLE_ATT_ERR_READ_NOT_PERMITTED;
-}
-
-// GATT characteristic access functions
-static int image_data_chr_access(uint16_t conn_handle, uint16_t attr_handle,
-                                struct ble_gatt_access_ctxt *ctxt, void *arg)
-{
-    int rc;
-
-    switch (ctxt->op) {
-    case BLE_GATT_ACCESS_OP_READ_CHR:
-        // Return a small status header instead of dumping the full image buffer over GATT.
-        // Layout (13 bytes):
-        // [0]    ready(1)/pending(0)
-        // [1..4] received_len (uint32 LE)
-        // [5..8] expected_len (uint32 LE)
-        // [9..12] frame_id (uint32 LE)
-        {
-            uint8_t status[13];
-            status[0] = image_data_ready ? 1 : 0;
-            status[1] = (uint8_t)(image_data_len & 0xFF);
-            status[2] = (uint8_t)((image_data_len >> 8) & 0xFF);
-            status[3] = (uint8_t)((image_data_len >> 16) & 0xFF);
-            status[4] = (uint8_t)((image_data_len >> 24) & 0xFF);
-            status[5] = (uint8_t)(image_expected_len & 0xFF);
-            status[6] = (uint8_t)((image_expected_len >> 8) & 0xFF);
-            status[7] = (uint8_t)((image_expected_len >> 16) & 0xFF);
-            status[8] = (uint8_t)((image_expected_len >> 24) & 0xFF);
-            status[9] = (uint8_t)(image_frame_id & 0xFF);
-            status[10] = (uint8_t)((image_frame_id >> 8) & 0xFF);
-            status[11] = (uint8_t)((image_frame_id >> 16) & 0xFF);
-            status[12] = (uint8_t)((image_frame_id >> 24) & 0xFF);
-
-            rc = os_mbuf_append(ctxt->om, status, sizeof(status));
-            return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
-        }
-
-    case BLE_GATT_ACCESS_OP_WRITE_CHR:
-        // Streamed frame write (header + sequential chunks).
-        // Supports both X4IM (image) and X4JS (JSON layout)
-        {
-            uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
-            if (len == 0) {
-                return 0;
-            }
-            if (len > 600) {
-                ESP_LOGW(BLE_TAG, "Write too large for temp buffer: %u", len);
-                return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-            }
-            uint8_t tmp[600];
-            uint16_t copy_len = 0;
-            rc = ble_hs_mbuf_to_flat(ctxt->om, tmp, len, &copy_len);
-            if (rc != 0) {
-                return BLE_ATT_ERR_INSUFFICIENT_RES;
-            }
-
-            uint32_t offset = 0;
-
-            // Check for X4JS (JSON) header first
-            if ((json_data_len == 0 || json_data_ready) &&
-                copy_len >= X4JS_HDR_LEN &&
-                tmp[0] == 'X' && tmp[1] == '4' && tmp[2] == 'J' && tmp[3] == 'S' &&
-                tmp[4] == 1) {
-                const uint32_t payload_len = read_le_u32(&tmp[8]);
-                json_expected_len = payload_len;
-                json_data_len = 0;
-                json_data_ready = false;
-
-                if (json_file != NULL) {
-                    fclose(json_file);
-                    json_file = NULL;
-                }
-                memset(current_json_filename, 0, sizeof(current_json_filename));
-
-                time_t now;
-                time(&now);
-                struct tm timeinfo;
-                localtime_r(&now, &timeinfo);
-                strftime(current_json_filename, sizeof(current_json_filename), "/sdcard/layout_%Y%m%d_%H%M%S.json", &timeinfo);
-
-                json_file = fopen(current_json_filename, "wb");
-                if (json_file == NULL) {
-                    ESP_LOGE(BLE_TAG, "Failed to open JSON file");
-                    memset(current_json_filename, 0, sizeof(current_json_filename));
-                    return BLE_ATT_ERR_INSUFFICIENT_RES;
-                }
-
-                offset = X4JS_HDR_LEN;
-                ESP_LOGI(BLE_TAG, "JSON start len=%" PRIu32 ", file=%s", json_expected_len, current_json_filename);
-                
-                if (offset < copy_len) {
-                    uint32_t remaining = (uint32_t)(copy_len - offset);
-                    uint32_t space = json_expected_len;
-                    if (remaining > space) remaining = space;
-                    if (remaining > 0) {
-                        size_t written = fwrite(&tmp[offset], 1, remaining, json_file);
-                        if (written != remaining) {
-                            ESP_LOGE(BLE_TAG, "Failed to write JSON initial data (written=%zu, expected=%" PRIu32 ")", written, remaining);
-                            fclose(json_file);
-                            json_file = NULL;
-                            memset(current_json_filename, 0, sizeof(current_json_filename));
-                            return BLE_ATT_ERR_INSUFFICIENT_RES;
-                        }
-                        json_data_len += remaining;
-                    }
-                }
-                
-                if (json_data_len >= json_expected_len && json_expected_len > 0) {
-                    json_data_ready = true;
-                    fclose(json_file);
-                    json_file = NULL;
-                    ESP_LOGI(BLE_TAG, "JSON complete: %" PRIu32 " bytes", json_data_len);
-                }
-                return 0;
-            }
-            
-            // Continue JSON chunk
-            if (json_file != NULL && !json_data_ready) {
-                uint32_t remaining = copy_len;
-                uint32_t space = (json_expected_len > json_data_len) ? (json_expected_len - json_data_len) : 0;
-                if (remaining > space) remaining = space;
-                if (remaining > 0) {
-                    size_t written = fwrite(tmp, 1, remaining, json_file);
-                    if (written != remaining) {
-                        ESP_LOGE(BLE_TAG, "Failed to write JSON data (written=%zu, expected=%" PRIu32 ")", written, remaining);
-                        fclose(json_file);
-                        json_file = NULL;
-                        memset(current_json_filename, 0, sizeof(current_json_filename));
-                        return BLE_ATT_ERR_INSUFFICIENT_RES;
-                    }
-                    json_data_len += remaining;
-                }
-
-                if (json_data_len >= json_expected_len && json_expected_len > 0) {
-                    json_data_ready = true;
-                    fclose(json_file);
-                    json_file = NULL;
-                    ESP_LOGI(BLE_TAG, "JSON complete: %" PRIu32 " bytes", json_data_len);
-                }
-                return 0;
-            }
-
-            // Check for X4IM (image) header
-            if ((image_data_len == 0 || image_data_ready) &&
-                copy_len >= X4IM_HDR_LEN &&
-                tmp[0] == 'X' && tmp[1] == '4' && tmp[2] == 'I' && tmp[3] == 'M' &&
-                tmp[4] == 1 && tmp[5] == 1) {
-                const uint32_t payload_len = read_le_u32(&tmp[8]);
-                // Accept any size since we use external storage
-                image_expected_len = payload_len;
-                image_data_len = 0;
-                image_data_ready = false;
-                image_frame_id++;
-
-                // Close any previous file (e.g., aborted transfer)
-                if (image_file != NULL) {
-                    fclose(image_file);
-                    image_file = NULL;
-                }
-                memset(current_image_filename, 0, sizeof(current_image_filename));
-
-                // Create filename with timestamp
-                time_t now;
-                time(&now);
-                struct tm timeinfo;
-                localtime_r(&now, &timeinfo);
-                strftime(current_image_filename, sizeof(current_image_filename), "/sdcard/image_%Y%m%d_%H%M%S.raw", &timeinfo);
-
-                // Open file for writing
-                image_file = fopen(current_image_filename, "wb");
-                if (image_file == NULL) {
-                    ESP_LOGE(BLE_TAG, "Failed to open image file for writing");
-                    memset(current_image_filename, 0, sizeof(current_image_filename));
-                    return BLE_ATT_ERR_INSUFFICIENT_RES;
-                }
-
-                offset = X4IM_HDR_LEN;
-                ESP_LOGI(BLE_TAG, "frame start id=%" PRIu32 " len=%" PRIu32 ", file=%s", image_frame_id, image_expected_len, current_image_filename);
-            }
-
-            // Append remaining payload bytes.
-            if (offset < copy_len) {
-                uint32_t remaining = (uint32_t)(copy_len - offset);
-                uint32_t space = (image_expected_len > image_data_len) ? (image_expected_len - image_data_len) : 0;
-                if (remaining > space) {
-                    remaining = space;
-                }
-                if (remaining > 0 && image_file != NULL) {
-                    size_t written = fwrite(&tmp[offset], 1, remaining, image_file);
-                    if (written != remaining) {
-                        ESP_LOGE(BLE_TAG, "Failed to write to image file (written=%zu, expected=%" PRIu32 ")", written, remaining);
-                        fclose(image_file);
-                        image_file = NULL;
-                        memset(current_image_filename, 0, sizeof(current_image_filename));
-                        return BLE_ATT_ERR_INSUFFICIENT_RES;
-                    }
-                    // 修复：使用实际写入的字节数，而不是期望的字节数
-                    image_data_len += (uint32_t)written;
-                }
-            }
-
-            if (!image_data_ready && image_data_len >= image_expected_len && image_expected_len > 0) {
-                image_data_ready = true;
-                if (image_file != NULL) {
-                    fclose(image_file);
-                    image_file = NULL;
-                }
-                ESP_LOGI(BLE_TAG, "Received full frame id=%" PRIu32 " (%" PRIu32 " bytes), saved to %s", image_frame_id, image_data_len, current_image_filename);
-            }
-            return 0;
-        }
-
-    default:
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-}
-
-// GATT service definition
-static const struct ble_gatt_svc_def gatt_svr_defs[] = {
-    {
-        .type = BLE_GATT_SVC_TYPE_PRIMARY,
-        .uuid = BLE_UUID16_DECLARE(IMAGE_SERVICE_UUID),
-        .characteristics = (struct ble_gatt_chr_def[]) {
-            {
-                .uuid = BLE_UUID16_DECLARE(IMAGE_DATA_CHAR_UUID),
-                .access_cb = image_data_chr_access,
-                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
-            },
-            {
-                .uuid = BLE_UUID16_DECLARE(CONTROL_CMD_CHAR_UUID),
-                .access_cb = control_cmd_chr_access,
-                .val_handle = &control_cmd_chr_val_handle,
-                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
-            },
-            {
-                0, // No more characteristics
-            }
-        }
-    },
-    {
-        0, // No more services
-    }
-};
-
-
-
-static int gatt_svr_init(void)
-{
-    int rc = ble_gatts_count_cfg(gatt_svr_defs);
-    if (rc != 0) return rc;
-    rc = ble_gatts_add_svcs(gatt_svr_defs);
-    return rc;
-}
-
-static int gap_event_cb(struct ble_gap_event *event, void *arg)
-{
-    (void)arg;
-
-    switch (event->type) {
-    case BLE_GAP_EVENT_ADV_COMPLETE:
-        ESP_LOGI(BLE_TAG, "ADV complete; reason=%d", event->adv_complete.reason);
-        return 0;
-    case BLE_GAP_EVENT_CONNECT:
-        ESP_LOGI(BLE_TAG, "Connection %s; status=%d",
-                 event->connect.status == 0 ? "established" : "failed",
-                 event->connect.status);
-        if (event->connect.status == 0) {
-            ble_conn_handle = event->connect.conn_handle;
-            ble_connected = true;
-            ble_advertising = false;
-            ble_pending_connection = false;
-            {
-                struct ble_gap_conn_desc desc;
-                if (ble_gap_conn_find(event->connect.conn_handle, &desc) == 0) {
-                    snprintf(ble_peer_addr, sizeof(ble_peer_addr),
-                             "%02x:%02x:%02x:%02x:%02x:%02x",
-                             desc.peer_id_addr.val[0], desc.peer_id_addr.val[1], desc.peer_id_addr.val[2],
-                             desc.peer_id_addr.val[3], desc.peer_id_addr.val[4], desc.peer_id_addr.val[5]);
-                }
-            }
-            ESP_LOGI(BLE_TAG, "BLE server connected, handle=%d", ble_conn_handle);
-        }
-        return 0;
-    case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(BLE_TAG, "Disconnect; reason=%d", event->disconnect.reason);
-        ble_connected = false;
-        ble_conn_handle = 0;
-        memset(ble_peer_addr, 0, sizeof(ble_peer_addr));
-        ble_advertising = true;
-        cmd_notify_enabled = false;
-
-        // If an image transfer was in progress, close the file and reset state.
-        if (image_file != NULL) {
-            fclose(image_file);
-            image_file = NULL;
-        }
-        image_data_len = 0;
-        image_data_ready = false;
-        memset(current_image_filename, 0, sizeof(current_image_filename));
-        
-        // Also reset JSON state
-        if (json_file != NULL) {
-            fclose(json_file);
-            json_file = NULL;
-        }
-        json_data_len = 0;
-        json_data_ready = false;
-        memset(current_json_filename, 0, sizeof(current_json_filename));
-
-        // Restart advertising
-        start_advertising();
-        return 0;
-    case BLE_GAP_EVENT_SUBSCRIBE:
-        ESP_LOGI(BLE_TAG, "Subscribe event; attr_handle=%d cur_notify=%d cur_indicate=%d",
-                 event->subscribe.attr_handle, event->subscribe.cur_notify, event->subscribe.cur_indicate);
-        if (event->subscribe.attr_handle == control_cmd_chr_val_handle) {
-            cmd_notify_enabled = event->subscribe.cur_notify;
-            ESP_LOGI(BLE_TAG, "CMD notify %s",
-                     cmd_notify_enabled ? "ENABLED" : "DISABLED");
-        }
-        return 0;
-    case BLE_GAP_EVENT_PASSKEY_ACTION:
-        ESP_LOGI(BLE_TAG, "Passkey action event; action=%d",
-                 event->passkey.params.action);
-        if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
-            // Display passkey (for this demo, we'll use a fixed passkey)
-            struct ble_sm_io pk;
-            pk.action = event->passkey.params.action;
-            pk.passkey = 123456; // Fixed passkey for demo
-            ESP_LOGI(BLE_TAG, "Display passkey: %06d", pk.passkey);
-            ble_sm_inject_io(event->passkey.conn_handle, &pk);
-        }
-        return 0;
-    case BLE_GAP_EVENT_ENC_CHANGE:
-        ESP_LOGI(BLE_TAG, "Encryption change event; status=%d",
-                 event->enc_change.status);
-        return 0;
-    case BLE_GAP_EVENT_DISC_COMPLETE:
-        ESP_LOGI(BLE_TAG, "Discovery complete; reason=%d", event->disc_complete.reason);
-        return 0;
-    default:
-        return 0;
-    }
-}
-
-static int start_advertising(void)
-{
-    int rc;
-
-    struct ble_hs_adv_fields fields;
-    memset(&fields, 0, sizeof(fields));
-    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.name = (const uint8_t *)DEVICE_NAME;
-    fields.name_len = strlen(DEVICE_NAME);
-    fields.name_is_complete = 1;
-
-    rc = ble_gap_adv_set_fields(&fields);
-    if (rc != 0) {
-        ESP_LOGE(BLE_TAG, "ble_gap_adv_set_fields failed: %d", rc);
-        return rc;
-    }
-
-    struct ble_gap_adv_params adv_params;
-    memset(&adv_params, 0, sizeof(adv_params));
-    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;  // Connectable undirected advertising
-    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-
-    rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER, &adv_params, gap_event_cb, NULL);
-    if (rc != 0) {
-        ESP_LOGE(BLE_TAG, "ble_gap_adv_start failed: %d", rc);
-        return rc;
-    }
-
-    ble_advertising = true;
-
-    ESP_LOGI(BLE_TAG, "Advertising started (connectable), name=%s", DEVICE_NAME);
-    return 0;
-}
-
-
-static void ble_on_sync(void)
-{
-    int rc;
-
-    rc = ble_hs_id_infer_auto(0, &own_addr_type);
-    if (rc != 0) {
-        ESP_LOGE(BLE_TAG, "ble_hs_id_infer_auto failed: %d", rc);
-        return;
-    }
-
-    rc = ble_svc_gap_device_name_set(DEVICE_NAME);
-    if (rc != 0) {
-        ESP_LOGE(BLE_TAG, "ble_svc_gap_device_name_set failed: %d", rc);
-        return;
-    }
-
-    ESP_LOGI(BLE_TAG, "BLE synced; name=%s", DEVICE_NAME);
-    (void)start_advertising();
-}
-
-void host_task(void *param)
-{
-    nimble_port_run();
-    nimble_port_freertos_deinit();
-}
-
-void bt_init(void)
-{
-    ESP_LOGI(BLE_TAG, "Starting BLE initialization...");
-
-    // Recommended NimBLE sequence (ESP-IDF): nimble_port_init handles controller + transport
-    ESP_ERROR_CHECK(nimble_port_init());
-
-    ble_svc_gap_init();
-    ble_svc_gatt_init();
-
-    // Configure security manager for pairing
-    ble_hs_cfg.sm_bonding = 1;  // Enable bonding
-    ble_hs_cfg.sm_mitm = 1;     // Enable MITM protection
-    ble_hs_cfg.sm_sc = 1;       // Enable Secure Connections
-    ble_hs_cfg.sm_io_cap = BLE_HS_IO_DISPLAY_ONLY;  // Display passkey only
-    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
-    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
-
-    ble_hs_cfg.sync_cb = ble_on_sync;
-    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
-
-    (void)ble_svc_gap_device_name_set(DEVICE_NAME);
-    (void)gatt_svr_init();
-    nimble_port_freertos_init(host_task);
-
-    ESP_LOGI(BLE_TAG, "BLE initialized in SERVER mode with image service");
-
-    // Read and log local BLE (BT) MAC address
-    {
-        uint8_t mac[6];
-        if (esp_read_mac(mac, ESP_MAC_BT) == ESP_OK) {
-            sprintf(ble_local_addr, "%02x:%02x:%02x:%02x:%02x:%02x",
-                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-            ESP_LOGI(BLE_TAG, "Local BLE MAC: %s", ble_local_addr);
-        } else {
-            strcpy(ble_local_addr, "00:00:00:00:00:00");
-            ESP_LOGW(BLE_TAG, "Failed to read local BLE MAC");
-        }
-    }
 }
 
 // WiFi event handler
@@ -1071,6 +511,22 @@ void sd_card_test_read_write(const char *mount_point)
 // Save received image to SD card
 
 
+static void ui_button_event_cb(button_t btn, button_event_t event, void *user_data)
+{
+    (void)user_data;
+    screen_manager_handle_event(btn, event);
+}
+
+static void input_poll_task(void *arg)
+{
+    (void)arg;
+    while (1) {
+        input_handler_poll();
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+
 void app_main(void)
 {
     printf("ESP32 BLE and WiFi System Starting...\n");
@@ -1106,30 +562,10 @@ void app_main(void)
     EPD_4in26_Clear_Fast();
 
     // Add delay before initializing high-power components to prevent brownout
-    ESP_LOGI("MAIN", "Waiting 1 second before initializing BLE/WiFi to prevent brownout...");
+    ESP_LOGI("MAIN", "Waiting 1 second before initializing SD card to prevent brownout...");
     vTaskDelay(1000 / portTICK_PERIOD_MS);
 
-    // Initialize BLE AFTER EPD (ESP32-C3 requires BLE controller init before Wi-Fi)
-    ESP_LOGI("MAIN", "Initializing BLE...");
-    bt_init();
-
-    // ========================================================================
-    // CRITICAL: ESP32-C3只有100KB RAM,无法同时运行WiFi+BLE+SD+LVGL
-    // 优先级: BLE(必须) > SD卡(必须) > WiFi(可选)
-    // 方案: 完全跳过WiFi初始化,避免内存耗尽导致SD卡SPI DMA分配失败
-    // ========================================================================
-    ESP_LOGI("MAIN", "Skipping WiFi to conserve memory (using BLE instead)");
-    
-    // WiFi初始化已禁用 - 取消注释以下代码以重新启用(需要足够RAM)
-    /*
-    ESP_LOGI("MAIN", "Initializing WiFi...");
-    esp_err_t wifi_ret = wifi_init_sta();
-    if (wifi_ret != ESP_OK) {
-        ESP_LOGW("MAIN", "WiFi init failed (%s); continuing without WiFi", esp_err_to_name(wifi_ret));
-    }
-    */
-
-    // Initialize SD card (CRITICAL: 必须在WiFi之后或WiFi禁用时初始化)
+    // Initialize SD card
     ESP_LOGI("MAIN", "Initializing SD card...");
     esp_err_t sd_ret = sd_card_init();
     if (sd_ret != ESP_OK) {
@@ -1137,113 +573,50 @@ void app_main(void)
         ESP_LOGW("MAIN", "File browser and SD-related features will be unavailable");
     }
 
-<<<<<<< Updated upstream
-    // 手绘 UI 系统初始化
-    ESP_LOGI("MAIN", "Initializing Hand-drawn UI system...");
+    // ============================================================================
+    // Xteink X4: 初始化显示引擎和屏幕管理器
+    // ============================================================================
 
-    // 1. 初始化显示引擎
+    // 创建屏幕上下文
+    screen_context_t context = {0};
+    context.battery_pct = read_battery_percentage();
+    context.version_str = VERSION_STRING;
+
+    // 初始化显示引擎
+    ESP_LOGI("MAIN", "Initializing display engine...");
     display_config_t disp_config = {
         .use_partial_refresh = true,
         .auto_refresh = false,
-        .default_mode = REFRESH_MODE_PARTIAL
+        .default_mode = REFRESH_MODE_PARTIAL,
     };
     if (!display_engine_init(&disp_config)) {
-        ESP_LOGE("MAIN", "Failed to initialize display engine");
-        return;
+        ESP_LOGE("MAIN", "Display engine init failed!");
     }
 
-    // 2. 初始化输入处理（注意：回调函数在screen_manager初始化后设置）
-    input_config_t input_config = {
-        .enable_debounce = true,
-        .enable_long_press = true,
-        .enable_repeat = true,
-        .debounce_ms = 50,
-        .long_press_ms = 1000,
-        .repeat_delay_ms = 300,
-        .repeat_interval_ms = 150
-    };
-    if (!input_handler_init(&input_config)) {
-        ESP_LOGE("MAIN", "Failed to initialize input handler");
-        return;
-    }
-
-    // 3. 初始化字体渲染器
-    if (!font_renderer_init()) {
-        ESP_LOGW("MAIN", "Font renderer initialization failed, using default font");
-    }
-
-    // 4. 初始化屏幕管理器
+    // 初始化屏幕管理器
     ESP_LOGI("MAIN", "Initializing screen manager...");
-    static screen_context_t screen_ctx;
-    screen_ctx.battery_mv = read_battery_voltage_mv();
-    screen_ctx.battery_pct = read_battery_percentage();
-    screen_ctx.charging = is_charging();
-    screen_ctx.version_str = VERSION_FULL;
-    screen_ctx.read_battery_voltage_mv = read_battery_voltage_mv;
-    screen_ctx.read_battery_percentage = read_battery_percentage;
-    screen_ctx.is_charging = is_charging;
-    screen_manager_init(&screen_ctx);
+    screen_manager_init(&context);
 
-    // 5. 注册所有屏幕
+    // 注册屏幕
+    home_screen_init();
+    settings_screen_simple_init();
+    file_browser_screen_init();
     screen_manager_register(home_screen_get_instance());
+    screen_manager_register(settings_screen_simple_get_instance());
     screen_manager_register(file_browser_screen_get_instance());
-    screen_manager_register(reader_screen_get_instance());
-    screen_manager_register(settings_screen_get_instance());
-    screen_manager_register(image_viewer_screen_get_instance());
 
-    // 6. 显示首页
+    // 显示主屏幕
     ESP_LOGI("MAIN", "Showing home screen...");
-    screen_manager_show_index();
-    ESP_LOGI("MAIN", "Home screen displayed");
+    screen_manager_show("home");
 
-    ESP_LOGI("MAIN", "Hand-drawn UI initialized successfully!");
-    ESP_LOGI("MAIN", "Use UP/DOWN buttons to navigate, CONFIRM to select");
-    
-    // 7. （已注释）测试局刷功能：避免启动时覆盖/干扰当前 UI
-    // ESP_LOGI("MAIN", "Running partial refresh test...");
-    // vTaskDelay(pdMS_TO_TICKS(500));  // 等待500ms确保屏幕稳定
-    // test_partial_refresh_rect();
-    // ESP_LOGI("MAIN", "Partial refresh test complete");
+    // ============================================================================
+    // Xteink X4: 初始化按键输入处理（轮询 + 事件派发到当前屏幕）
+    // ============================================================================
+    input_handler_init(NULL);
+    input_handler_register_callback(ui_button_event_cb, NULL);
+    // 注意：input_poll 里可能触发屏幕切换/目录扫描等较深调用栈，给更大的栈以避免 stack protection fault
+    xTaskCreate(input_poll_task, "input_poll", 8192, NULL, 5, NULL);
 
-    // 8. 设置按键回调 - 将按键事件分发到screen_manager
-    input_handler_register_callback(button_event_callback, NULL);
-    ESP_LOGI("MAIN", "Button callback registered");
-
-    ESP_LOGI("MAIN", "Starting main UI loop...");
-
-    // 8. 主循环：轮询按键并处理事件
-    int loop_count = 0;
-    while (true) {
-        // 轮询按键状态
-        input_handler_poll();
-
-        // 每5秒输出一次心跳日志
-        if (++loop_count % 250 == 0) {
-            ESP_LOGI("MAIN", "UI loop running... (loops=%d)", loop_count);
-        }
-
-        // 延时减少CPU占用
-        vTaskDelay(pdMS_TO_TICKS(20));  // 50Hz轮询频率
-    }
-}
-
-/**
- * @brief 按键事件回调函数 - 将事件分发到screen_manager
- */
-static void button_event_callback(button_t btn, button_event_t event, void *user_data)
-{
-    ESP_LOGI("BTN_CALLBACK", "Button: %s, Event: %s", 
-             input_handler_get_button_name(btn),
-             input_handler_get_event_name(event));
-
-    // 只处理按下事件（避免重复处理）
-    if (event == BTN_EVENT_PRESSED) {
-        // 分发到当前屏幕
-        screen_manager_handle_event(btn, event);
-    }
-=======
     ESP_LOGI("MAIN", "System initialized successfully.");
-    ESP_LOGI("MAIN", "Main task ending, FreeRTOS tasks continue running...");
->>>>>>> Stashed changes
 }
 

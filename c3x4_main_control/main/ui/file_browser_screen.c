@@ -7,6 +7,7 @@
 #include "display_engine.h"
 #include "screen_manager.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include <string.h>
 #include <strings.h>
 #include <dirent.h>
@@ -77,12 +78,18 @@ static bool scan_directory(const char *path)
         return false;
     }
 
-    // 临时存储文件名
-    char *file_names[256];
+    // 临时存储文件名（放到堆上，避免在 input_poll 等小栈任务里扫描目录时栈溢出）
+    const int max_entries = 256;
+    char **file_names = (char **)heap_caps_calloc(max_entries, sizeof(char *), MALLOC_CAP_8BIT);
+    if (file_names == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate temp file name list");
+        closedir(dir);
+        return false;
+    }
     int temp_count = 0;
 
     struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL && temp_count < 256) {
+    while ((entry = readdir(dir)) != NULL && temp_count < max_entries) {
         // 跳过隐藏文件（以.开头）
         if (entry->d_name[0] == '.') {
             continue;
@@ -100,6 +107,7 @@ static bool scan_directory(const char *path)
 
     if (temp_count == 0) {
         ESP_LOGI(TAG, "No files found in directory");
+        heap_caps_free(file_names);
         return true;
     }
 
@@ -110,6 +118,7 @@ static bool scan_directory(const char *path)
         for (int i = 0; i < temp_count; i++) {
             free(file_names[i]);
         }
+        heap_caps_free(file_names);
         return false;
     }
 
@@ -148,6 +157,8 @@ static bool scan_directory(const char *path)
         free(file_names[i]);
     }
 
+    heap_caps_free(file_names);
+
     s_browser_state.file_count = temp_count;
     ESP_LOGI(TAG, "Found %d files (%d directories, %d files)", temp_count, dir_count, file_count);
 
@@ -171,7 +182,7 @@ static void free_file_list(void)
  */
 static void draw_single_file(int display_index, const file_info_t *file, bool is_selected)
 {
-    sFONT *ui_font = &SourceSansPro16;
+    sFONT *ui_font = display_get_default_ascii_font();
 
     // 计算位置
     int start_y = 80;
@@ -243,7 +254,7 @@ static void draw_page_indicator(void)
     char page_str[32];
     snprintf(page_str, sizeof(page_str), "%d/%d", s_browser_state.current_page + 1, total_pages);
 
-    sFONT *ui_font = &SourceSansPro16;
+    sFONT *ui_font = display_get_default_ascii_font();
     int text_width = display_get_text_width_font(page_str, ui_font);
     display_draw_text_font(SCREEN_WIDTH - text_width - 20, SCREEN_HEIGHT - 30, page_str, ui_font, COLOR_BLACK, COLOR_WHITE);
 }
@@ -275,7 +286,7 @@ static void on_draw(screen_t *screen)
     // 清屏
     display_clear(COLOR_WHITE);
 
-    sFONT *ui_font = &SourceSansPro16;
+    sFONT *ui_font = display_get_default_ascii_font();
 
     // 绘制标题栏
     display_draw_text_font(20, 20, "File Browser", ui_font, COLOR_BLACK, COLOR_WHITE);

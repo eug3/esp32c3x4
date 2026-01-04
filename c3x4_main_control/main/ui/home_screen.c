@@ -6,10 +6,9 @@
 #include "home_screen.h"
 #include "display_engine.h"
 #include "ui_region_manager.h"
-#include "font_renderer.h"
 #include "GUI_Paint.h"
 #include "fonts.h"
-#include "chinese_font_impl.h"
+#include "xt_eink_font_impl.h"
 #include "esp_log.h"
 #include <string.h>
 
@@ -49,27 +48,65 @@ static void paint_draw_text_utf8(UWORD x, UWORD y, const char *text, sFONT *asci
     }
 
     if (ascii_font == NULL) {
-        ascii_font = &SourceSansPro16;
+        ascii_font = display_get_default_ascii_font();
     }
 
-    static bool s_chinese_inited = false;
-    if (!s_chinese_inited) {
-        chinese_font_init();
-        s_chinese_inited = true;
+    static bool s_xt_inited = false;
+    if (!s_xt_inited) {
+        xt_eink_font_init();
+        s_xt_inited = true;
+    }
+
+    // 英文宽度：根据中文字体全角宽度推导半角宽度（通过字距补齐）
+    int cjk_w = 0;
+    {
+        static const uint32_t probes[] = { 0x4E2Du, 0x56FDu, 0x6C49u, 0x6587u };
+        for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+            uint32_t ch = probes[i];
+            if (!xt_eink_font_has_char(ch)) {
+                continue;
+            }
+            xt_eink_glyph_t g;
+            if (xt_eink_font_get_glyph(ch, &g) && g.width > 0) {
+                cjk_w = g.width;
+                break;
+            }
+        }
+        if (cjk_w <= 0) {
+            int h = xt_eink_font_get_height();
+            if (h > 0) {
+                cjk_w = (h * 3) / 4;
+            }
+        }
+    }
+    int ascii_adv = (int)ascii_font->Width;
+    if (cjk_w > 0) {
+        int target = (cjk_w + 1) / 2;
+        if (target > ascii_adv) {
+            int extra = target - ascii_adv;
+            if (extra > ascii_adv) {
+                extra = ascii_adv;
+            }
+            ascii_adv += extra;
+        }
     }
 
     int current_x = x;
     const char *p = text;
     while (*p != '\0') {
         uint32_t ch;
-        int offset = chinese_font_utf8_to_utf32(p, &ch);
+        int offset = xt_eink_font_utf8_to_utf32(p, &ch);
         if (offset <= 0) {
             break;
         }
 
-        if (chinese_font_has_char(ch)) {
-            chinese_glyph_t glyph;
-            if (chinese_font_get_glyph(ch, &glyph) && glyph.bitmap != NULL) {
+        // 规则：ASCII 永远走内置字体；非 ASCII 才尝试字体文件（xt_eink）
+        if (ch <= 0x7Fu) {
+            Paint_DrawChar(current_x, y, (char)ch, ascii_font, color_fg, color_bg);
+            current_x += ascii_adv;
+        } else if (xt_eink_font_has_char(ch)) {
+            xt_eink_glyph_t glyph;
+            if (xt_eink_font_get_glyph(ch, &glyph) && glyph.bitmap != NULL) {
                 int bytes_per_row = (glyph.width + 7) / 8;
                 for (int row = 0; row < glyph.height; row++) {
                     for (int col = 0; col < glyph.width; col++) {
@@ -83,11 +120,11 @@ static void paint_draw_text_utf8(UWORD x, UWORD y, const char *text, sFONT *asci
                 }
                 current_x += glyph.width;
             } else {
-                current_x += CHINESE_FONT_SIZE;
+                current_x += xt_eink_font_get_height();
             }
         } else {
-            Paint_DrawChar(current_x, y, (char)ch, ascii_font, color_fg, color_bg);
-            current_x += ascii_font->Width;
+            Paint_DrawChar(current_x, y, '?', ascii_font, color_fg, color_bg);
+            current_x += ascii_adv;
         }
 
         p += offset;
@@ -135,7 +172,7 @@ static void on_draw(screen_t *screen)
     display_clear(COLOR_WHITE);
     ESP_LOGI(TAG, "Screen cleared");
 
-    sFONT *menu_font = &SourceSansPro16;
+    sFONT *menu_font = display_get_default_ascii_font();
 
     // 绘制标题栏
     int title_y = 20;
@@ -318,7 +355,7 @@ static void draw_single_menu_item(int index, bool is_selected)
     int local_x = menu_x - 10;  // 区域内的X坐标
     int local_y = 0;            // 区域内的Y坐标从0开始
     
-    sFONT *menu_font = &SourceSansPro16;
+    sFONT *menu_font = display_get_default_ascii_font();
     int text_y = (region_height - menu_font->Height) / 2;
     if (text_y < 0) {
         text_y = 0;

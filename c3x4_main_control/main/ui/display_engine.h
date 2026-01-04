@@ -186,7 +186,7 @@ int display_draw_text(int x, int y, const char *text, uint8_t color, uint8_t bg_
  * @param x 起始 X
  * @param y 起始 Y
  * @param text 文本
- * @param font 字体（NULL 则使用 SourceSansPro16）
+ * @param font 字体（NULL 则使用内置默认字体 Font12，作为“14号”的近似）
  * @param color 前景色
  * @param bg_color 背景色
  * @return 文本宽度
@@ -216,7 +216,7 @@ int display_get_text_width(const char *text, int font_size);
 /**
  * @brief 获取 ASCII 文本宽度（自定义字体）
  * @param text 文本
- * @param font 字体（NULL 则使用 SourceSansPro16）
+ * @param font 字体（NULL 则使用内置默认字体 Font12，作为“14号”的近似）
  * @return 文本宽度（像素）
  */
 int display_get_text_width_font(const char *text, sFONT *font);
@@ -230,10 +230,18 @@ int display_get_text_height(int font_size);
 
 /**
  * @brief 获取 ASCII 文本高度（自定义字体）
- * @param font 字体（NULL 则使用 SourceSansPro16）
+ * @param font 字体（NULL 则使用内置默认字体 Font12，作为“14号”的近似）
  * @return 文本高度（像素）
  */
 int display_get_text_height_font(sFONT *font);
+
+/**
+ * @brief 获取当前推荐的英文/ASCII字体（按中文字体高度自动选择）
+ *
+ * 规则：根据已加载的字体文件（xt_eink）的高度，自动选择最接近的内置 ASCII 字体。
+ * 若字体文件未就绪/高度未知，则回退到 Font12。
+ */
+sFONT* display_get_default_ascii_font(void);
 
 /**
  * @brief 绘制图像（1bpp 位图）

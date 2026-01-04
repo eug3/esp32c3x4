@@ -8,7 +8,7 @@
 
 #include "screen_manager.h"
 
-void settings_screen_init(void);
-screen_t* settings_screen_get_instance(void);
+void settings_screen_simple_init(void);
+screen_t* settings_screen_simple_get_instance(void);
 
 #endif

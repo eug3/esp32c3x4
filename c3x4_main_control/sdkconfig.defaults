@@ -1,2 +1,8 @@
 # GUI Paint Configuration for Xteink X4 EPD
 # No special configuration needed - using default ESP-IDF settings
+
+# FATFS: enable UTF-8 API encoding so Chinese/long filenames work
+CONFIG_FATFS_LFN_STACK=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+CONFIG_FATFS_CODEPAGE_936=y

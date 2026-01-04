@@ -141,7 +141,7 @@ bool epub_html_next_block(epub_html_parser_t *parser, epub_text_block_t *block) 
     const char *end = parser->content + parser->length;
 
     // 跳过空白
-    while (content < end && isspace(*content)) {
+    while (content < end && isspace((unsigned char)*content)) {
         content++;
     }
 

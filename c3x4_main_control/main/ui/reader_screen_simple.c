@@ -27,7 +27,7 @@ static void on_hide(screen_t *screen)
 
 static void on_draw(screen_t *screen)
 {
-    sFONT *body_font = &SourceSansPro16;
+    sFONT *body_font = display_get_default_ascii_font();
 
     display_clear(COLOR_WHITE);
     display_draw_text_font(20, 20, "Reader", body_font, COLOR_BLACK, COLOR_WHITE);

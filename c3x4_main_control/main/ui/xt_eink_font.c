@@ -6,17 +6,311 @@
 #include "xt_eink_font.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include <dirent.h>
+#include <errno.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 static const char *TAG = "XT_EINK_FONT";
+
+// fontdecode.cs 格式：固定 0x10000 个字形（U+0000..U+FFFF），无文件头
+#define XT_EINK_TOTAL_CHARS 0x10000u
 
 // 字形位图缓冲区（临时缓存，用于从文件读取）
 static uint8_t *g_glyph_buffer = NULL;
 static size_t g_glyph_buffer_size = 0;
 
-// LVGL 字形描述符（静态分配，避免频繁分配）
-static lv_font_glyph_dsc_t g_glyph_dsc;
+// 字形描述符（静态分配，避免频繁分配）
+static xt_eink_font_glyph_dsc_t g_glyph_dsc;
+
+static void dump_dir_limited(const char *path, int max_entries)
+{
+    if (path == NULL || max_entries <= 0) {
+        return;
+    }
+
+    DIR *dir = opendir(path);
+    if (dir == NULL) {
+        int err = errno;
+        ESP_LOGW(TAG, "opendir('%s') failed: errno=%d (%s)", path, err, strerror(err));
+        return;
+    }
+
+    ESP_LOGI(TAG, "Directory listing: %s", path);
+    struct dirent *ent = NULL;
+    int n = 0;
+    while ((ent = readdir(dir)) != NULL && n < max_entries) {
+        if (ent->d_name[0] == '\0') {
+            continue;
+        }
+        ESP_LOGI(TAG, "  - %s", ent->d_name);
+        n++;
+    }
+    closedir(dir);
+}
+
+static void log_stat_result(const char *path)
+{
+    if (path == NULL) {
+        return;
+    }
+
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        ESP_LOGI(TAG, "stat('%s') ok: mode=0x%lx size=%lu", path,
+                 (unsigned long)st.st_mode, (unsigned long)st.st_size);
+        return;
+    }
+
+    int err = errno;
+    ESP_LOGW(TAG, "stat('%s') failed: errno=%d (%s)", path, err, strerror(err));
+}
+
+static const char *get_basename(const char *path)
+{
+    if (path == NULL) {
+        return "";
+    }
+    const char *last_slash = strrchr(path, '/');
+    return (last_slash != NULL) ? (last_slash + 1) : path;
+}
+
+static bool parse_font_hint_size_from_path(const char *path, uint16_t *out_size)
+{
+    if (path == NULL || out_size == NULL) {
+        return false;
+    }
+
+    const char *base = get_basename(path);
+    const char *dot = strrchr(base, '.');
+    size_t name_len = (dot != NULL) ? (size_t)(dot - base) : strlen(base);
+    if (name_len == 0) {
+        return false;
+    }
+
+    char name[128];
+    if (name_len >= sizeof(name)) {
+        name_len = sizeof(name) - 1;
+    }
+    memcpy(name, base, name_len);
+    name[name_len] = '\0';
+
+    int i = (int)strlen(name) - 1;
+    while (i >= 0 && (name[i] < '0' || name[i] > '9')) {
+        i--;
+    }
+    if (i < 0) {
+        return false;
+    }
+    while (i >= 0 && (name[i] >= '0' && name[i] <= '9')) {
+        i--;
+    }
+
+    const char *num = &name[i + 1];
+    uint32_t size = (uint32_t)strtoul(num, NULL, 10);
+    if (size == 0 || size > 255) {
+        return false;
+    }
+    *out_size = (uint16_t)size;
+    return true;
+}
+
+static bool infer_font_dimensions_from_file_size(uint32_t file_size, uint16_t hint_size,
+                                                 uint16_t *out_w, uint16_t *out_h)
+{
+    if (out_w == NULL || out_h == NULL) {
+        return false;
+    }
+
+    // fontdecode.cs：总字形固定 0x10000，每字形字节数应为整数。
+    if (file_size == 0 || (file_size % XT_EINK_TOTAL_CHARS) != 0) {
+        return false;
+    }
+
+    uint32_t char_byte = file_size / XT_EINK_TOTAL_CHARS;
+    if (char_byte == 0 || char_byte > 4096) {
+        return false;
+    }
+
+    // 常用候选（优先匹配）
+    // 注意：优先选宽度是 8 的倍数的尺寸，避免把实际占用的位列截断。
+    // 即使真实字模宽度是 14/15，这类 raw 格式也会按 widthByte=2（16位）存储；
+    // 固件用 16 作为渲染宽度只会多出空白列，更安全。
+    static const struct { uint16_t w; uint16_t h; } candidates[] = {
+        { 8, 16 },
+        { 16, 12 },
+        { 16, 14 },
+        { 16, 16 },
+        { 16, 20 },
+        { 24, 24 },
+        { 32, 32 },
+    };
+
+    int best_idx = -1;
+    uint32_t best_score = UINT32_MAX;
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        uint32_t width_byte = (candidates[i].w + 7u) / 8u;
+        uint32_t glyph_size = width_byte * (uint32_t)candidates[i].h;
+        if (glyph_size != char_byte) {
+            continue;
+        }
+        uint32_t score = 0;
+        if (hint_size != 0) {
+            uint32_t dh = (candidates[i].h > hint_size) ? (candidates[i].h - hint_size) : (hint_size - candidates[i].h);
+            score += dh;
+        }
+        // 更偏好接近正方形
+        uint32_t dwh = (candidates[i].w > candidates[i].h) ? (candidates[i].w - candidates[i].h)
+                                                          : (candidates[i].h - candidates[i].w);
+        score += dwh;
+        if (score < best_score) {
+            best_score = score;
+            best_idx = (int)i;
+        }
+    }
+    if (best_idx >= 0) {
+        *out_w = candidates[best_idx].w;
+        *out_h = candidates[best_idx].h;
+        return true;
+    }
+
+    // 兜底：从 char_byte 分解出 height 与 widthByte，width 取 widthByte*8
+    int best_found = 0;
+    uint16_t best_w = 0;
+    uint16_t best_h = 0;
+    uint32_t best_fallback_score = UINT32_MAX;
+    for (uint16_t h = 1; h <= 255; h++) {
+        if ((char_byte % h) != 0) {
+            continue;
+        }
+        uint32_t width_byte = char_byte / h;
+        if (width_byte == 0 || width_byte > 32) {
+            continue;
+        }
+        uint16_t w = (uint16_t)(width_byte * 8u);
+        uint32_t score = 0;
+        if (hint_size != 0) {
+            uint32_t dh = (h > hint_size) ? (h - hint_size) : (hint_size - h);
+            score += dh;
+        }
+        uint32_t dwh = (w > h) ? (w - h) : (h - w);
+        score += dwh;
+
+        if (!best_found || score < best_fallback_score) {
+            best_found = 1;
+            best_fallback_score = score;
+            best_w = w;
+            best_h = h;
+        }
+    }
+    if (!best_found) {
+        return false;
+    }
+
+    *out_w = best_w;
+    *out_h = best_h;
+    return true;
+}
+
+static bool parse_font_dimensions_from_path(const char *path, uint16_t *out_w, uint16_t *out_h)
+{
+    if (path == NULL || out_w == NULL || out_h == NULL) {
+        return false;
+    }
+
+    // 仅用文件名推断：
+    // 1) 支持 "... 16x20.bin" / "... 16×20.bin" / "...16X20.bin"
+    // 2) 支持 "msyh-14.bin" 这种，只取末尾数字，默认 w=h=size
+
+    const char *base = get_basename(path);
+    const char *dot = strrchr(base, '.');
+    size_t name_len = (dot != NULL) ? (size_t)(dot - base) : strlen(base);
+    if (name_len == 0) {
+        return false;
+    }
+
+    char name[128];
+    if (name_len >= sizeof(name)) {
+        name_len = sizeof(name) - 1;
+    }
+    memcpy(name, base, name_len);
+    name[name_len] = '\0';
+
+    // 尝试找 "x" / "X"
+    char *sep = strrchr(name, 'x');
+    if (sep == NULL) {
+        sep = strrchr(name, 'X');
+    }
+
+    // 尝试找 UTF-8 的 "×"
+    if (sep == NULL) {
+        char *mul = strstr(name, "×");
+        if (mul != NULL) {
+            sep = mul; // 指向多字节起始
+        }
+    }
+
+    if (sep != NULL) {
+        // 找到分隔符，解析左右数字
+        // 左侧数字起点：从 sep 往左跳过非数字，再继续往左找到数字段的起点
+        char *l_end = sep;
+        while (l_end > name && (l_end[-1] < '0' || l_end[-1] > '9')) {
+            l_end--;
+        }
+        char *l_start = l_end;
+        while (l_start > name && (l_start[-1] >= '0' && l_start[-1] <= '9')) {
+            l_start--;
+        }
+
+        // 右侧数字起点：跳过分隔符本身（可能是 1 字节 x/X 或 2 字节 ×）
+        char *r_start = sep;
+        if (*r_start == 'x' || *r_start == 'X') {
+            r_start++;
+        } else {
+            // "×" 的 UTF-8 是两个字节
+            r_start += strlen("×");
+        }
+        while (*r_start != '\0' && (*r_start < '0' || *r_start > '9')) {
+            r_start++;
+        }
+
+        char *r_end = r_start;
+        while (*r_end >= '0' && *r_end <= '9') {
+            r_end++;
+        }
+
+        if (l_start < l_end && r_start < r_end) {
+            uint32_t w = (uint32_t)strtoul(l_start, NULL, 10);
+            uint32_t h = (uint32_t)strtoul(r_start, NULL, 10);
+            if (w > 0 && w <= 255 && h > 0 && h <= 255) {
+                *out_w = (uint16_t)w;
+                *out_h = (uint16_t)h;
+                return true;
+            }
+        }
+    }
+
+    // 兜底：取末尾数字，例如 "msyh-14" -> 14
+    int i = (int)strlen(name) - 1;
+    while (i >= 0 && (name[i] < '0' || name[i] > '9')) {
+        i--;
+    }
+    if (i < 0) {
+        return false;
+    }
+    while (i >= 0 && (name[i] >= '0' && name[i] <= '9')) {
+        i--;
+    }
+    const char *num = &name[i + 1];
+    uint32_t size = (uint32_t)strtoul(num, NULL, 10);
+    if (size == 0 || size > 255) {
+        return false;
+    }
+    *out_w = (uint16_t)size;
+    *out_h = (uint16_t)size;
+    return true;
+}
 
 /**
  * @brief 确保字形缓冲区足够大
@@ -29,7 +323,7 @@ static bool ensure_glyph_buffer(size_t size)
         }
         g_glyph_buffer = (uint8_t *)malloc(size);
         if (g_glyph_buffer == NULL) {
-            ESP_LOGE(TAG, "Failed to allocate glyph buffer (%u bytes)", size);
+            ESP_LOGE(TAG, "Failed to allocate glyph buffer (%u bytes)", (unsigned int)size);
             return false;
         }
         g_glyph_buffer_size = size;
@@ -106,11 +400,9 @@ static bool read_glyph_from_file(xt_eink_font_t *font, uint32_t unicode, uint8_t
         return false;
     }
 
-    // 计算字形在文件中的偏移
-    // 字形数据从文件头之后开始
-    uint32_t header_size = sizeof(xt_eink_font_header_t);
+    // fontdecode.cs 格式：无文件头，直接按 unicode 索引
     uint32_t glyph_index = unicode - font->header.first_char;
-    uint32_t offset = header_size + glyph_index * font->header.glyph_size;
+    uint32_t offset = glyph_index * font->header.glyph_size;
 
     if (offset + font->header.glyph_size > font->file_size) {
         ESP_LOGE(TAG, "Glyph offset out of range: offset=%u, size=%u, file_size=%u",
@@ -144,7 +436,13 @@ xt_eink_font_t *xt_eink_font_open(const char *path)
     // 检查文件是否存在
     FILE *fp = fopen(path, "rb");
     if (fp == NULL) {
-        ESP_LOGE(TAG, "Failed to open font file: %s", path);
+        int err = errno;
+        ESP_LOGE(TAG, "Failed to open font file: %s (errno=%d: %s)", path, err, strerror(err));
+        log_stat_result("/sdcard");
+        log_stat_result("/sdcard/fonts");
+        log_stat_result(path);
+        dump_dir_limited("/sdcard", 24);
+        dump_dir_limited("/sdcard/fonts", 48);
         return NULL;
     }
 
@@ -153,40 +451,52 @@ xt_eink_font_t *xt_eink_font_open(const char *path)
     long file_size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    if (file_size < (long)sizeof(xt_eink_font_header_t)) {
-        ESP_LOGE(TAG, "Font file too small: %s (%ld bytes)", path, file_size);
+    if (file_size <= 0) {
+        ESP_LOGE(TAG, "Font file size invalid: %s (%ld)", path, file_size);
         fclose(fp);
         return NULL;
     }
 
-    // 读取文件头
-    xt_eink_font_header_t header;
-    size_t read_size = fread(&header, 1, sizeof(header), fp);
-    if (read_size != sizeof(header)) {
-        ESP_LOGE(TAG, "Failed to read font header");
+    uint32_t u_file_size = (uint32_t)file_size;
+    if ((u_file_size % XT_EINK_TOTAL_CHARS) != 0) {
+        ESP_LOGE(TAG, "Font file size not divisible by 0x10000: %s (%lu)",
+                 path, (unsigned long)u_file_size);
         fclose(fp);
         return NULL;
     }
 
-    // 验证魔数
-    if (header.magic != XT_EINK_MAGIC) {
-        ESP_LOGE(TAG, "Invalid font format: magic=0x%08X (expected 0x%08X)",
-                 header.magic, XT_EINK_MAGIC);
-        fclose(fp);
-        return NULL;
+    // fontdecode.cs 格式：从文件名解析宽高，并用文件大小校验
+    uint16_t w = 0, h = 0;
+    uint16_t hint_size = 0;
+    (void)parse_font_hint_size_from_path(path, &hint_size);
+
+    bool have_explicit_dims = parse_font_dimensions_from_path(path, &w, &h);
+    uint32_t char_byte = u_file_size / XT_EINK_TOTAL_CHARS;
+    if (have_explicit_dims) {
+        uint32_t width_byte = (w + 7u) / 8u;
+        uint32_t glyph_size = width_byte * h;
+        if (glyph_size != char_byte) {
+            ESP_LOGW(TAG, "Filename dims %ux%u do not match file layout (charByte=%lu); inferring from file size",
+                     (unsigned int)w, (unsigned int)h, (unsigned long)char_byte);
+            have_explicit_dims = false;
+        }
     }
 
-    // 验证版本
-    if (header.version != XT_EINK_VERSION) {
-        ESP_LOGE(TAG, "Unsupported font version: %u (expected %u)",
-                 header.version, XT_EINK_VERSION);
-        fclose(fp);
-        return NULL;
+    if (!have_explicit_dims) {
+        if (!infer_font_dimensions_from_file_size(u_file_size, hint_size, &w, &h)) {
+            ESP_LOGE(TAG, "Cannot infer font size from file size: %s (%lu bytes)",
+                     path, (unsigned long)u_file_size);
+            fclose(fp);
+            return NULL;
+        }
     }
 
-    // 验证 bpp
-    if (header.bpp != 1) {
-        ESP_LOGE(TAG, "Unsupported bpp: %u (only 1-bit supported)", header.bpp);
+    uint32_t width_byte = (w + 7u) / 8u;
+    uint32_t glyph_size = width_byte * h;
+    if (glyph_size != char_byte) {
+        ESP_LOGE(TAG, "Inferred dims %ux%u inconsistent (glyphSize=%lu, charByte=%lu): %s",
+                 (unsigned int)w, (unsigned int)h,
+                 (unsigned long)glyph_size, (unsigned long)char_byte, path);
         fclose(fp);
         return NULL;
     }
@@ -201,21 +511,31 @@ xt_eink_font_t *xt_eink_font_open(const char *path)
 
     memset(font, 0, sizeof(xt_eink_font_t));
 
-    // 初始化上下文
+    // 初始化上下文（raw 格式）
     strncpy(font->file_path, path, sizeof(font->file_path) - 1);
     font->fp = fp;
-    font->file_size = (uint32_t)file_size;
-    font->header = header;
-    font->width = header.width;
-    font->height = header.height;
-    font->glyph_size = header.glyph_size;
-    font->line_height = header.height;
+    font->file_size = u_file_size;
+    memset(&font->header, 0, sizeof(font->header));
+    font->header.version = 0;
+    font->header.width = (uint8_t)w;
+    font->header.height = (uint8_t)h;
+    font->header.bpp = 1;
+    font->header.char_count = XT_EINK_TOTAL_CHARS;
+    font->header.first_char = 0;
+    font->header.last_char = 0xFFFF;
+    font->header.glyph_size = glyph_size;
+    font->header.file_size = font->file_size;
+
+    font->width = w;
+    font->height = h;
+    font->glyph_size = (uint16_t)glyph_size;
+    font->line_height = h;
 
     ESP_LOGI(TAG, "Font opened: %s", path);
-    ESP_LOGI(TAG, "  Size: %dx%d, bpp=%u", header.width, header.height, header.bpp);
-    ESP_LOGI(TAG, "  Chars: U+%04X - U+%04X (%u chars)",
-             header.first_char, header.last_char, header.char_count);
-    ESP_LOGI(TAG, "  Glyph size: %u bytes", header.glyph_size);
+    ESP_LOGI(TAG, "  Raw Size: %ux%u, bpp=%u", (unsigned int)w, (unsigned int)h, 1u);
+    ESP_LOGI(TAG, "  Chars: U+0000 - U+FFFF (%lu chars)", (unsigned long)XT_EINK_TOTAL_CHARS);
+    ESP_LOGI(TAG, "  Glyph size: %lu bytes (file charByte=%lu)",
+             (unsigned long)glyph_size, (unsigned long)char_byte);
 
     return font;
 }
@@ -239,9 +559,9 @@ void xt_eink_font_close(xt_eink_font_t *font)
     ESP_LOGI(TAG, "Font closed");
 }
 
-const lv_font_glyph_dsc_t *xt_eink_font_get_glyph_dsc(xt_eink_font_t *font,
-                                                       uint32_t unicode,
-                                                       uint32_t font_height)
+const xt_eink_font_glyph_dsc_t *xt_eink_font_get_glyph_dsc(xt_eink_font_t *font,
+                                                           uint32_t unicode,
+                                                           uint32_t font_height)
 {
     if (font == NULL || font->fp == NULL) {
         return NULL;
@@ -254,8 +574,8 @@ const lv_font_glyph_dsc_t *xt_eink_font_get_glyph_dsc(xt_eink_font_t *font,
 
     // 检查字体高度是否匹配
     if (font_height != 0 && font_height != font->height) {
-        ESP_LOGW(TAG, "Font height mismatch: requested=%u, actual=%u",
-                 font_height, font->height);
+        ESP_LOGW(TAG, "Font height mismatch: requested=%lu, actual=%u",
+                 (unsigned long)font_height, (unsigned int)font->height);
     }
 
     // 设置字形描述符
@@ -298,49 +618,6 @@ const uint8_t *xt_eink_font_get_bitmap(xt_eink_font_t *font, uint32_t unicode)
     return g_glyph_buffer;
 }
 
-lv_font_t *xt_eink_font_create(const char *path)
-{
-    xt_eink_font_t *ctx = xt_eink_font_open(path);
-    if (ctx == NULL) {
-        return NULL;
-    }
-
-    // 分配 LVGL 字体包装器
-    xt_eink_lv_font_t *font = (xt_eink_lv_font_t *)malloc(sizeof(xt_eink_lv_font_t));
-    if (font == NULL) {
-        xt_eink_font_close(ctx);
-        return NULL;
-    }
-
-    // 设置 LVGL 字体回调
-    font->base.get_glyph_dsc = xt_eink_font_get_glyph_dsc_cb;
-    font->base.get_glyph_bitmap = xt_eink_font_get_glyph_bitmap_cb;
-    font->base.subpx = LV_FONT_SUBPX_NONE;
-    font->base.line_height = ctx->line_height;
-    font->base.base_line = 0;
-    font->base.dsc = ctx;  // 保存上下文指针
-    font->base.user_data = font;  // 保存包装器指针
-    font->ctx = ctx;
-    font->ref_count = 1;
-
-    ESP_LOGI(TAG, "LVGL font created from: %s", path);
-    return (lv_font_t *)font;
-}
-
-void xt_eink_font_destroy(lv_font_t *lv_font)
-{
-    if (lv_font == NULL) {
-        return;
-    }
-
-    xt_eink_lv_font_t *font = (xt_eink_lv_font_t *)lv_font;
-    if (font->ctx != NULL) {
-        xt_eink_font_close(font->ctx);
-    }
-    free(font);
-    ESP_LOGI(TAG, "LVGL font destroyed");
-}
-
 void xt_eink_font_get_info(xt_eink_font_t *font, char *buffer, size_t buffer_size)
 {
     if (font == NULL || buffer == NULL) {
@@ -351,19 +628,19 @@ void xt_eink_font_get_info(xt_eink_font_t *font, char *buffer, size_t buffer_siz
              "XTEink Font\n"
              "  Path: %s\n"
              "  Size: %dx%d\n"
-             "  Chars: %u (U+%04X - U+%04X)\n"
-             "  Glyph size: %u bytes\n"
-             "  Cache: %u/%u (hit=%u, miss=%u)",
+                 "  Chars: %lu (U+%04lX - U+%04lX)\n"
+                 "  Glyph size: %lu bytes\n"
+                 "  Cache: %lu/%u (hit=%lu, miss=%lu)",
              font->file_path,
              font->width, font->height,
-             font->header.char_count,
-             font->header.first_char, font->header.last_char,
-             font->header.glyph_size,
-             font->cache_hit + font->cache_miss > 0
-                ? (font->cache_hit * 100) / (font->cache_hit + font->cache_miss)
-                : 0,
+                 (unsigned long)font->header.char_count,
+                 (unsigned long)font->header.first_char, (unsigned long)font->header.last_char,
+                 (unsigned long)font->header.glyph_size,
+                 (unsigned long)(font->cache_hit + font->cache_miss > 0
+                     ? (font->cache_hit * 100UL) / (font->cache_hit + font->cache_miss)
+                     : 0),
              XT_EINK_GLYPH_CACHE_SIZE,
-             font->cache_hit, font->cache_miss);
+                 (unsigned long)font->cache_hit, (unsigned long)font->cache_miss);
 }
 
 bool xt_eink_font_is_valid(const char *path)
@@ -377,15 +654,18 @@ bool xt_eink_font_is_valid(const char *path)
         return false;
     }
 
-    xt_eink_font_header_t header;
-    bool valid = false;
-
-    if (fread(&header, 1, sizeof(header), fp) == sizeof(header)) {
-        valid = (header.magic == XT_EINK_MAGIC && header.version == XT_EINK_VERSION);
-    }
-
+    fseek(fp, 0, SEEK_END);
+    long file_size = ftell(fp);
     fclose(fp);
-    return valid;
+
+    uint16_t w = 0, h = 0;
+    if (!parse_font_dimensions_from_path(path, &w, &h)) {
+        return false;
+    }
+    uint32_t width_byte = (w + 7u) / 8u;
+    uint32_t glyph_size = width_byte * h;
+    uint32_t expected_size = glyph_size * XT_EINK_TOTAL_CHARS;
+    return (file_size >= 0) && ((uint32_t)file_size >= expected_size);
 }
 
 void xt_eink_font_get_cache_stats(xt_eink_font_t *font, uint32_t *hit, uint32_t *miss)
@@ -412,30 +692,4 @@ void xt_eink_font_clear_cache(xt_eink_font_t *font)
     }
     font->cache_hit = 0;
     font->cache_miss = 0;
-}
-
-/**
- * @brief LVGL 字形描述符回调
- */
-const lv_font_glyph_dsc_t *xt_eink_font_get_glyph_dsc_cb(const lv_font_t *font,
-                                                          uint32_t unicode,
-                                                          uint32_t font_height)
-{
-    xt_eink_lv_font_t *xt_font = (xt_eink_lv_font_t *)font;
-    if (xt_font->ctx == NULL) {
-        return NULL;
-    }
-    return xt_eink_font_get_glyph_dsc(xt_font->ctx, unicode, font_height);
-}
-
-/**
- * @brief LVGL 字形位图回调
- */
-const uint8_t *xt_eink_font_get_glyph_bitmap_cb(const lv_font_t *font, uint32_t unicode)
-{
-    xt_eink_lv_font_t *xt_font = (xt_eink_lv_font_t *)font;
-    if (xt_font->ctx == NULL) {
-        return NULL;
-    }
-    return xt_eink_font_get_bitmap(xt_font->ctx, unicode);
 }
