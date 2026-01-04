@@ -7,6 +7,7 @@
 #include "EPD_4in26.h"
 #include "GUI_Paint.h"
 #include "Fonts/fonts.h"
+#include "chinese_font_impl.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -38,6 +39,11 @@ static void expand_dirty_region(int x, int y, int width, int height);
 static void clear_dirty_internal(void);  // 内部版本，调用者必须持有锁
 static void convert_logical_to_physical_region(int lx, int ly, int lw, int lh,
                                                 int *px, int *py, int *pw, int *ph);
+
+static bool text_has_non_ascii(const char *text);
+static int measure_text_width_utf8(const char *text, sFONT *ascii_font);
+static int measure_text_height_utf8(const char *text, sFONT *ascii_font);
+static int draw_text_utf8_locked(int x, int y, const char *text, sFONT *ascii_font, uint8_t color, uint8_t bg_color);
 
 /**********************
  *  STATIC FUNCTIONS
@@ -82,6 +88,144 @@ static void expand_dirty_region(int x, int y, int width, int height)
         s_dirty_region.width = ((x2 > nx2) ? x2 : nx2) - s_dirty_region.x + 1;
         s_dirty_region.height = ((y2 > ny2) ? y2 : ny2) - s_dirty_region.y + 1;
     }
+}
+
+static bool text_has_non_ascii(const char *text)
+{
+    if (text == NULL) {
+        return false;
+    }
+
+    const unsigned char *p = (const unsigned char *)text;
+    while (*p != '\0') {
+        if ((*p & 0x80) != 0) {
+            return true;
+        }
+        p++;
+    }
+    return false;
+}
+
+static int measure_text_width_utf8(const char *text, sFONT *ascii_font)
+{
+    if (text == NULL || *text == '\0') {
+        return 0;
+    }
+
+    if (ascii_font == NULL) {
+        ascii_font = &SourceSansPro16;
+    }
+
+    int width = 0;
+    const char *p = text;
+    while (*p != '\0') {
+        uint32_t ch;
+        int offset = chinese_font_utf8_to_utf32(p, &ch);
+        if (offset <= 0) {
+            break;
+        }
+
+        if (chinese_font_has_char(ch)) {
+            width += CHINESE_FONT_SIZE;
+        } else {
+            width += ascii_font->Width;
+        }
+
+        p += offset;
+    }
+
+    return width;
+}
+
+static int measure_text_height_utf8(const char *text, sFONT *ascii_font)
+{
+    (void)text;
+
+    if (ascii_font == NULL) {
+        ascii_font = &SourceSansPro16;
+    }
+
+    int h = ascii_font->Height;
+    if (CHINESE_FONT_SIZE > h) {
+        h = CHINESE_FONT_SIZE;
+    }
+    return h;
+}
+
+static int draw_text_utf8_locked(int x, int y, const char *text, sFONT *ascii_font, uint8_t color, uint8_t bg_color)
+{
+    if (text == NULL || *text == '\0') {
+        return 0;
+    }
+
+    if (ascii_font == NULL) {
+        ascii_font = &SourceSansPro16;
+    }
+
+    static bool chinese_font_initialized = false;
+    if (!chinese_font_initialized) {
+        chinese_font_init();
+        chinese_font_initialized = true;
+    }
+
+    int text_w = measure_text_width_utf8(text, ascii_font);
+    int text_h = measure_text_height_utf8(text, ascii_font);
+
+    if (bg_color != COLOR_WHITE) {
+        Paint_DrawRectangle(x, y, x + text_w - 1, y + text_h - 1, bg_color, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+    }
+
+    int current_x = x;
+    const char *p = text;
+
+    while (*p != '\0') {
+        uint32_t ch;
+        int offset = chinese_font_utf8_to_utf32(p, &ch);
+        if (offset <= 0) {
+            break;
+        }
+
+        if (chinese_font_has_char(ch)) {
+            chinese_glyph_t glyph;
+            if (!chinese_font_get_glyph(ch, &glyph) || glyph.bitmap == NULL) {
+                current_x += CHINESE_FONT_SIZE;
+                p += offset;
+                continue;
+            }
+
+            int bytes_per_row = (glyph.width + 7) / 8;
+            for (int row = 0; row < glyph.height; row++) {
+                for (int col = 0; col < glyph.width; col++) {
+                    int byte_idx = row * bytes_per_row + col / 8;
+                    int bit_idx = 7 - (col % 8);
+                    bool pixel_set = (glyph.bitmap[byte_idx] >> bit_idx) & 1;
+                    if (!pixel_set) {
+                        continue;
+                    }
+
+                    int px = current_x + col;
+                    int py = y + row;
+                    if (px >= 0 && px < SCREEN_WIDTH && py >= 0 && py < SCREEN_HEIGHT) {
+                        Paint_SetPixel(px, py, color);
+                    }
+                }
+            }
+
+            current_x += glyph.width;
+        } else {
+            // ASCII
+            Paint_DrawChar(current_x, y, (char)ch, ascii_font, color, bg_color);
+            current_x += ascii_font->Width;
+        }
+
+        p += offset;
+    }
+
+    if (s_config.use_partial_refresh) {
+        expand_dirty_region(x, y, text_w, text_h);
+    }
+
+    return text_w;
 }
 
 /**
@@ -267,6 +411,7 @@ void display_refresh(refresh_mode_t mode)
         case REFRESH_MODE_FAST:
             EPD_4in26_Display_Fast(s_framebuffer);
             break;
+        case REFRESH_MODE_PARTIAL_FAST:
         case REFRESH_MODE_PARTIAL:
         default:
             // 最简单且一致的策略：局刷只刷新“当前脏区”(逻辑坐标 480x800)
@@ -290,7 +435,11 @@ void display_refresh(refresh_mode_t mode)
             int phys_x, phys_y, phys_w, phys_h;
             convert_logical_to_physical_region(x, y, width, height, &phys_x, &phys_y, &phys_w, &phys_h);
 
-            EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
+            if (mode == REFRESH_MODE_PARTIAL_FAST) {
+                EPD_4in26_Display_Part_Stream_Fast(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
+            } else {
+                EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
+            }
             break;
     }
 
@@ -314,7 +463,7 @@ void display_refresh_region(int x, int y, int width, int height, refresh_mode_t 
              x, y, width, height, mode);
 
     // 只有部分刷新支持区域刷新
-    if (mode == REFRESH_MODE_PARTIAL) {
+    if (mode == REFRESH_MODE_PARTIAL || mode == REFRESH_MODE_PARTIAL_FAST) {
         // 将逻辑坐标转换为物理坐标（ROTATE_270）
         int phys_x, phys_y, phys_w, phys_h;
         convert_logical_to_physical_region(x, y, width, height,
@@ -325,7 +474,11 @@ void display_refresh_region(int x, int y, int width, int height, refresh_mode_t 
         
         // 使用Stream版本，直接从完整framebuffer读取区域数据
         // framebuffer stride = 800/8 = 100字节/行
-        EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
+        if (mode == REFRESH_MODE_PARTIAL_FAST) {
+            EPD_4in26_Display_Part_Stream_Fast(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
+        } else {
+            EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
+        }
     } else {
         // 全刷和快刷不支持区域，使用全屏刷新
         if (mode == REFRESH_MODE_FULL) {
@@ -479,15 +632,30 @@ int display_draw_text(int x, int y, const char *text, uint8_t color, uint8_t bg_
         return 0;
     }
 
+    return display_draw_text_font(x, y, text, &SourceSansPro16, color, bg_color);
+}
+
+int display_draw_text_font(int x, int y, const char *text, sFONT *font, uint8_t color, uint8_t bg_color)
+{
+    if (text == NULL || *text == '\0') {
+        return 0;
+    }
+
+    if (font == NULL) {
+        font = &SourceSansPro16;
+    }
+
     lock_engine();
-    // 使用 GUI_Paint 的默认字体（font12）
-    Paint_DrawString_EN(x, y, text, &Font12, color, bg_color);
+    int width;
+    if (text_has_non_ascii(text)) {
+        width = draw_text_utf8_locked(x, y, text, font, color, bg_color);
+    } else {
+        Paint_DrawString_EN(x, y, text, font, color, bg_color);
+        width = strlen(text) * font->Width;
 
-    // 计算文本宽度
-    int width = strlen(text) * Font12.Width;
-
-    if (s_config.use_partial_refresh) {
-        expand_dirty_region(x, y, width, Font12.Height);
+        if (s_config.use_partial_refresh) {
+            expand_dirty_region(x, y, width, font->Height);
+        }
     }
     unlock_engine();
 
@@ -502,17 +670,35 @@ int display_draw_text_cn(int x, int y, const char *text, int font_size, uint8_t 
 
     lock_engine();
 
-    // TODO: 实现中文字体渲染
-    // 暂时使用英文字体替代
-    Paint_DrawString_EN(x, y, text, &Font12, color, bg_color);
-    int width = strlen(text) * Font12.Width;
+    // 确保中文字体已初始化
+    static bool chinese_font_initialized = false;
+    if (!chinese_font_initialized) {
+        chinese_font_init();
+        chinese_font_initialized = true;
+    }
+
+    // 获取文本宽度和高度
+    int text_width = chinese_font_get_text_width(text);
+    int text_height = chinese_font_get_height();
+
+    // 绘制背景（如果需要）
+    if (bg_color != COLOR_WHITE) {
+        display_clear_region(x, y, text_width, text_height, bg_color);
+    }
+
+    // 渲染中文文本到帧缓冲
+    // 注意：color 参数是前景色，0=黑，1=白
+    uint8_t render_color = (color == COLOR_BLACK) ? 0 : 1;
+    int actual_width = chinese_font_render_text(x, y, text, render_color,
+                                                  s_framebuffer, 800, 480);
 
     if (s_config.use_partial_refresh) {
-        expand_dirty_region(x, y, width, Font12.Height);
+        expand_dirty_region(x, y, actual_width, text_height);
     }
+
     unlock_engine();
 
-    return width;
+    return actual_width;
 }
 
 int display_get_text_width(const char *text, int font_size)
@@ -521,14 +707,44 @@ int display_get_text_width(const char *text, int font_size)
         return 0;
     }
 
-    // TODO: 根据字体大小计算
-    return strlen(text) * Font12.Width;
+    (void)font_size;
+    return display_get_text_width_font(text, &SourceSansPro16);
+}
+
+int display_get_text_width_font(const char *text, sFONT *font)
+{
+    if (text == NULL) {
+        return 0;
+    }
+
+    if (font == NULL) {
+        font = &SourceSansPro16;
+    }
+
+    if (text_has_non_ascii(text)) {
+        return measure_text_width_utf8(text, font);
+    }
+
+    return strlen(text) * font->Width;
 }
 
 int display_get_text_height(int font_size)
 {
-    // TODO: 根据字体大小返回
-    return Font12.Height;
+    (void)font_size;
+    return display_get_text_height_font(&SourceSansPro16);
+}
+
+int display_get_text_height_font(sFONT *font)
+{
+    if (font == NULL) {
+        font = &SourceSansPro16;
+    }
+
+    int h = font->Height;
+    if (CHINESE_FONT_SIZE > h) {
+        h = CHINESE_FONT_SIZE;
+    }
+    return h;
 }
 
 void display_draw_bitmap(int x, int y, int width, int height, const uint8_t *bitmap, bool invert)

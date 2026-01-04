@@ -21,6 +21,7 @@ idf_component_register(SRCS "ui/home_screen.c"
                        "ui/screen_manager.c"
                        "ui/display_engine.c"
                        "ui/font_renderer.c"
+                       "ui/chinese_font_impl.c"
                        "ui/input_handler.c"
                        "ui/txt_reader.c"
                        "ui/epub_parser.c"
@@ -37,6 +38,7 @@ idf_component_register(SRCS "ui/home_screen.c"
                        "Fonts/font20.c"
                        "Fonts/font24.c"
                        "Fonts/font8.c"
+                       "Fonts/source_sans_pro_16.c"
                        ${EPUB_PARSER_SOURCES}
                        PRIV_REQUIRES spi_flash esp_driver_gpio esp_driver_spi driver esp_wifi nvs_flash bt fatfs littlefs esp_adc esp_timer
                        INCLUDE_DIRS "." "Fonts" "ui")

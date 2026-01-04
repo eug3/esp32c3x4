@@ -6,6 +6,7 @@
 #include "reader_screen_simple.h"
 #include "display_engine.h"
 #include "screen_manager.h"
+#include "fonts.h"
 #include "esp_log.h"
 #include <string.h>
 
@@ -26,18 +27,20 @@ static void on_hide(screen_t *screen)
 
 static void on_draw(screen_t *screen)
 {
+    sFONT *body_font = &SourceSansPro16;
+
     display_clear(COLOR_WHITE);
-    display_draw_text(20, 20, "Reader", COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_font(20, 20, "Reader", body_font, COLOR_BLACK, COLOR_WHITE);
 
     if (screen->user_data != NULL) {
         char info[128];
         snprintf(info, sizeof(info), "File: %s", (char*)screen->user_data);
-        display_draw_text(20, 100, info, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_font(20, 100, info, body_font, COLOR_BLACK, COLOR_WHITE);
     }
 
-    display_draw_text(20, SCREEN_HEIGHT - 60,
-                     "UP/DOWN: Page  BACK: Return",
-                     COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_font(20, SCREEN_HEIGHT - 60,
+                           "UP/DOWN: Page  BACK: Return",
+                           body_font, COLOR_BLACK, COLOR_WHITE);
 }
 
 static void on_event(screen_t *screen, button_t btn, button_event_t event)

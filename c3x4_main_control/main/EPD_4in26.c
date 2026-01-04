@@ -31,6 +31,8 @@
 #include "EPD_4in26.h"
 #include "Debug.h"
 #include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
 #include "esp_log.h"
 
 const unsigned char LUT_DATA_4Gray[112] =    //112bytes
@@ -125,6 +127,44 @@ static void EPD_4in26_SendData2(UBYTE *pData, UDOUBLE len)
     DEV_Digital_Write(EPD_CS_PIN, 1);
 }
 
+static void EPD_4in26_SendRegion_FromFramebuffer(UBYTE *full_framebuffer,
+									 uint32_t fb_stride,
+									 UWORD x_offset_bytes,
+									 UWORD w_bytes,
+									 UWORD y,
+									 UWORD h_actual)
+{
+	// 优先尝试“整块发送”：
+	// - 若窗口是全宽字节（x=0 且 w_bytes==stride），则 framebuffer 中该区域是连续内存，可直接一次性发送。
+	// - 否则，尝试分配临时缓冲，把每行的窗口数据拼成连续内存，再一次性发送。
+	// - 若 malloc 失败，则回退到逐行发送（当前的流式方式）。
+
+	if (x_offset_bytes == 0 && w_bytes == fb_stride) {
+		UBYTE *base = full_framebuffer + (uint32_t)y * fb_stride;
+		const UDOUBLE len = (UDOUBLE)((uint32_t)h_actual * fb_stride);
+		EPD_4in26_SendData2(base, len);
+		return;
+	}
+
+	const size_t total_bytes = (size_t)w_bytes * (size_t)h_actual;
+	UBYTE *block = (UBYTE *)malloc(total_bytes);
+	if (block) {
+		for (UWORD i = 0; i < h_actual; i++) {
+			UBYTE *row_ptr = full_framebuffer + (uint32_t)(y + i) * fb_stride + x_offset_bytes;
+			memcpy(block + (size_t)i * w_bytes, row_ptr, w_bytes);
+		}
+		EPD_4in26_SendData2(block, (UDOUBLE)total_bytes);
+		free(block);
+		return;
+	}
+
+	// fallback: row-by-row
+	for (UWORD i = 0; i < h_actual; i++) {
+		UBYTE *row_ptr = full_framebuffer + (uint32_t)(y + i) * fb_stride + x_offset_bytes;
+		EPD_4in26_SendData2(row_ptr, w_bytes);
+	}
+}
+
 /******************************************************************************
 function :	Wait until the busy_pin goes LOW
 parameter:
@@ -178,9 +218,32 @@ static void EPD_4in26_TurnOnDisplay_Fast(void)
 
 static void EPD_4in26_TurnOnDisplay_Part(void)
 {
-	EPD_4in26_SendCommand(0x22); //Display Update Control
-	EPD_4in26_SendData(0xFF);
-	EPD_4in26_SendCommand(0x20); //Activate Display Update Sequence
+	// 更“用力”的局刷序列：部分屏在默认局刷下纯黑会偏灰。
+	// 这里采用与 GxEPD2 类似的 0xFC，并重复触发一次以加深黑度。
+	// 代价：局刷时间略增加。
+	EPD_4in26_SendCommand(0x21); // Display Update Control (2 bytes)
+	EPD_4in26_SendData(0x00);
+	EPD_4in26_SendData(0x00);
+
+	for (int pass = 0; pass < 2; pass++) {
+		EPD_4in26_SendCommand(0x22); // Display Update Control
+		EPD_4in26_SendData(0xFC);    // partial update mode (stronger than 0xFF on some panels)
+		EPD_4in26_SendCommand(0x20); // Activate Display Update Sequence
+		EPD_4in26_ReadBusy();
+	}
+}
+
+static void EPD_4in26_TurnOnDisplay_Part_Fast(void)
+{
+	// 使用 fast update 序列触发“局刷”刷新。
+	// 注意：不同屏幕/波形下，0xC7 可能更快但也可能更闪或残影更明显。
+	EPD_4in26_SendCommand(0x21); // Display Update Control (2 bytes)
+	EPD_4in26_SendData(0x00);
+	EPD_4in26_SendData(0x00);
+
+	EPD_4in26_SendCommand(0x22); // Display Update Control
+	EPD_4in26_SendData(0xC7);    // fast update sequence
+	EPD_4in26_SendCommand(0x20); // Activate Display Update Sequence
 	EPD_4in26_ReadBusy();
 }
 
@@ -871,11 +934,10 @@ void EPD_4in26_Display_Part(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h)
 //   fb_stride: framebuffer 的行字节宽度 (800/8 = 100)
 //   x, y: 局部刷新区域的起始坐标（EPD 物理坐标）
 //   w, h: 局部刷新区域的宽度和高度（像素）
-void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, uint32_t fb_stride,
-                                     UWORD x, UWORD y, UWORD w, UWORD h)
+static void EPD_4in26_Display_Part_Stream_Impl(UBYTE *full_framebuffer, uint32_t fb_stride,
+											   UWORD x, UWORD y, UWORD w, UWORD h,
+											   bool fast_update)
 {
-	UWORD i;
-
 	if (w == 0 || h == 0) {
 		ESP_LOGW("EPD_PART", "[WARN] Invalid size: w=%u, h=%u", w, h);
 		return;
@@ -991,26 +1053,33 @@ void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, uint32_t fb_stride,
 		}
 	}
 	
-	for(i=0; i<h_actual; i++)
-	{
-		// 计算当前行在 framebuffer 中的起始位置
-		UBYTE *row_ptr = full_framebuffer + (y + i) * fb_stride + x_offset_bytes;
-		EPD_4in26_SendData2(row_ptr, w_bytes);
-	}
+	EPD_4in26_SendRegion_FromFramebuffer(full_framebuffer, fb_stride, x_offset_bytes, w_bytes, y, h_actual);
 
 	// 同步更新上一帧缓冲区 (0x26)，否则下一次局刷对比基准会错，表现为“位置/内容不稳定”
 	EPD_4in26_SetCursor(x_aligned, y_end_reversed);
 	EPD_4in26_SendCommand(0x26);
-	for(i=0; i<h_actual; i++)
-	{
-		UBYTE *row_ptr = full_framebuffer + (y + i) * fb_stride + x_offset_bytes;
-		EPD_4in26_SendData2(row_ptr, w_bytes);
-	}
+	EPD_4in26_SendRegion_FromFramebuffer(full_framebuffer, fb_stride, x_offset_bytes, w_bytes, y, h_actual);
 
 	// ============================================
 	// 7. 触发局部刷新显示
 	// ============================================
-	EPD_4in26_TurnOnDisplay_Part();
+	if (fast_update) {
+		EPD_4in26_TurnOnDisplay_Part_Fast();
+	} else {
+		EPD_4in26_TurnOnDisplay_Part();
+	}
+}
+
+void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, uint32_t fb_stride,
+                                   UWORD x, UWORD y, UWORD w, UWORD h)
+{
+	EPD_4in26_Display_Part_Stream_Impl(full_framebuffer, fb_stride, x, y, w, h, false);
+}
+
+void EPD_4in26_Display_Part_Stream_Fast(UBYTE *full_framebuffer, uint32_t fb_stride,
+                                        UWORD x, UWORD y, UWORD w, UWORD h)
+{
+	EPD_4in26_Display_Part_Stream_Impl(full_framebuffer, fb_stride, x, y, w, h, true);
 }
 
 void EPD_4in26_4GrayDisplay(UBYTE *Image)

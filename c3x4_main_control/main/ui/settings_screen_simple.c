@@ -6,6 +6,7 @@
 #include "settings_screen_simple.h"
 #include "display_engine.h"
 #include "screen_manager.h"
+#include "fonts.h"
 #include "esp_log.h"
 
 static const char *TAG = "SETTINGS_SCREEN";
@@ -24,10 +25,12 @@ static void on_hide(screen_t *screen)
 
 static void on_draw(screen_t *screen)
 {
+    sFONT *ui_font = &SourceSansPro16;
+
     display_clear(COLOR_WHITE);
-    display_draw_text(20, 20, "Settings", COLOR_BLACK, COLOR_WHITE);
-    display_draw_text(20, 100, "Settings coming soon...", COLOR_BLACK, COLOR_WHITE);
-    display_draw_text(20, SCREEN_HEIGHT - 60, "BACK: Return", COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_font(20, 20, "设置", ui_font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_font(20, 100, "设置功能开发中...", ui_font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_font(20, SCREEN_HEIGHT - 60, "返回: 返回", ui_font, COLOR_BLACK, COLOR_WHITE);
 }
 
 static void on_event(screen_t *screen, button_t btn, button_event_t event)

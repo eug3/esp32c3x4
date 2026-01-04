@@ -9,6 +9,7 @@
 #include "font_renderer.h"
 #include "GUI_Paint.h"
 #include "fonts.h"
+#include "chinese_font_impl.h"
 #include "esp_log.h"
 #include <string.h>
 
@@ -36,9 +37,62 @@ typedef struct {
 } menu_info_t;
 
 static const menu_info_t s_menu_items[MENU_ITEM_COUNT] = {
-    [MENU_ITEM_FILE_BROWSER] = { .label = "Files", .icon = NULL },
-    [MENU_ITEM_SETTINGS]       = { .label = "Settings", .icon = NULL },
+    [MENU_ITEM_FILE_BROWSER] = { .label = "文件", .icon = NULL },
+    [MENU_ITEM_SETTINGS]       = { .label = "设置", .icon = NULL },
 };
+
+static void paint_draw_text_utf8(UWORD x, UWORD y, const char *text, sFONT *ascii_font,
+                                 UWORD color_fg, UWORD color_bg)
+{
+    if (text == NULL || *text == '\0') {
+        return;
+    }
+
+    if (ascii_font == NULL) {
+        ascii_font = &SourceSansPro16;
+    }
+
+    static bool s_chinese_inited = false;
+    if (!s_chinese_inited) {
+        chinese_font_init();
+        s_chinese_inited = true;
+    }
+
+    int current_x = x;
+    const char *p = text;
+    while (*p != '\0') {
+        uint32_t ch;
+        int offset = chinese_font_utf8_to_utf32(p, &ch);
+        if (offset <= 0) {
+            break;
+        }
+
+        if (chinese_font_has_char(ch)) {
+            chinese_glyph_t glyph;
+            if (chinese_font_get_glyph(ch, &glyph) && glyph.bitmap != NULL) {
+                int bytes_per_row = (glyph.width + 7) / 8;
+                for (int row = 0; row < glyph.height; row++) {
+                    for (int col = 0; col < glyph.width; col++) {
+                        int byte_idx = row * bytes_per_row + col / 8;
+                        int bit_idx = 7 - (col % 8);
+                        bool pixel_set = (glyph.bitmap[byte_idx] >> bit_idx) & 1;
+                        if (pixel_set) {
+                            Paint_SetPixel(current_x + col, y + row, color_fg);
+                        }
+                    }
+                }
+                current_x += glyph.width;
+            } else {
+                current_x += CHINESE_FONT_SIZE;
+            }
+        } else {
+            Paint_DrawChar(current_x, y, (char)ch, ascii_font, color_fg, color_bg);
+            current_x += ascii_font->Width;
+        }
+
+        p += offset;
+    }
+}
 
 /**********************
  *  STATIC PROTOTYPES
@@ -81,20 +135,24 @@ static void on_draw(screen_t *screen)
     display_clear(COLOR_WHITE);
     ESP_LOGI(TAG, "Screen cleared");
 
+    sFONT *menu_font = &SourceSansPro16;
+
     // 绘制标题栏
     int title_y = 20;
     ESP_LOGI(TAG, "Drawing title...");
-    display_draw_text(20, title_y, "Xteink X4 eReader", COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_font(20, title_y, "Monster For Pan", menu_font, COLOR_BLACK, COLOR_WHITE);
 
     // 绘制电池信息
     char bat_str[32];
-    snprintf(bat_str, sizeof(bat_str), "BAT: %u%%", s_context->battery_pct);
-    int bat_width = display_get_text_width(bat_str, 12);
-    display_draw_text(SCREEN_WIDTH - bat_width - 20, title_y, bat_str, COLOR_BLACK, COLOR_WHITE);
+    snprintf(bat_str, sizeof(bat_str), "电量: %u%%", s_context->battery_pct);
+    int bat_width = display_get_text_width_font(bat_str, menu_font);
+    display_draw_text_font(SCREEN_WIDTH - bat_width - 20, title_y, bat_str, menu_font, COLOR_BLACK, COLOR_WHITE);
 
     // 绘制版本信息
     if (s_context->version_str != NULL) {
-        display_draw_text(20, SCREEN_HEIGHT - 30, s_context->version_str, COLOR_BLACK, COLOR_WHITE);
+        char ver_str[96];
+        snprintf(ver_str, sizeof(ver_str), "版本: %s", s_context->version_str);
+        display_draw_text_font(20, SCREEN_HEIGHT - 30, ver_str, menu_font, COLOR_BLACK, COLOR_WHITE);
     }
 
     // 绘制菜单
@@ -106,22 +164,26 @@ static void on_draw(screen_t *screen)
     for (int i = 0; i < MENU_ITEM_COUNT; i++) {
         int item_y = menu_start_y + i * menu_item_height;
         bool is_selected = (i == s_menu_state.selected_item);
+        int text_y = (item_y - 5) + ((menu_item_height - 10 - menu_font->Height) / 2);
+        if (text_y < item_y - 5) {
+            text_y = item_y - 5;
+        }
 
         // 绘制菜单项背景
         if (is_selected) {
             display_draw_rect(menu_x - 10, item_y - 5, menu_width + 20, menu_item_height - 10,
                              COLOR_BLACK, true);
-            display_draw_text(menu_x, item_y, s_menu_items[i].label, COLOR_WHITE, COLOR_BLACK);
+            display_draw_text_font(menu_x, text_y, s_menu_items[i].label, menu_font, COLOR_WHITE, COLOR_BLACK);
         } else {
             display_draw_rect(menu_x - 10, item_y - 5, menu_width + 20, menu_item_height - 10,
                              COLOR_BLACK, false);
-            display_draw_text(menu_x, item_y, s_menu_items[i].label, COLOR_BLACK, COLOR_WHITE);
+            display_draw_text_font(menu_x, text_y, s_menu_items[i].label, menu_font, COLOR_BLACK, COLOR_WHITE);
         }
     }
 
     // 绘制底部提示
-    display_draw_text(20, SCREEN_HEIGHT - 60, "UP/DOWN: Navigate  CONFIRM: Select",
-                     COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_font(20, SCREEN_HEIGHT - 60, "上下: 选择  确认: 进入",
+                           menu_font, COLOR_BLACK, COLOR_WHITE);
     
     ESP_LOGI(TAG, "on_draw END");
 }
@@ -129,17 +191,18 @@ static void on_draw(screen_t *screen)
 /**
  * @brief 绘制单个菜单项
  */
+
+#if 0
 /**
  * @brief 测试局刷功能 - 绘制一个成比例的矩形框
  */
-// 辅助函数：绘制单个测试矩形
 static void draw_test_rect(int rect_x, int rect_y, int rect_width, int rect_height)
 {
     ESP_LOGI(TAG, "=== Drawing TEST Rect ===");
     ESP_LOGI(TAG, "Logical coords: x=%d, y=%d, w=%d, h=%d", rect_x, rect_y, rect_width, rect_height);
     ESP_LOGI(TAG, "User view: right_margin=%d, bottom_margin=%d",
              SCREEN_WIDTH - rect_x - rect_width, SCREEN_HEIGHT - rect_y - rect_height);
-    
+
     // 计算预期的物理坐标范围
     int expected_phys_x_min = rect_y;
     int expected_phys_x_max = rect_y + rect_height - 1;
@@ -148,67 +211,33 @@ static void draw_test_rect(int rect_x, int rect_y, int rect_width, int rect_heig
     ESP_LOGI(TAG, "Expected physical range: x=[%d,%d], y=[%d,%d]",
              expected_phys_x_min, expected_phys_x_max,
              expected_phys_y_min, expected_phys_y_max);
-    
+
     // 直接在主framebuffer上写入（使用与display_engine一致的ROTATE_270映射）
     UBYTE *main_fb = display_get_framebuffer();
     int pixels_written = 0;
-    
+
     for (int temp_y = 0; temp_y < rect_height; temp_y++) {
         for (int temp_x = 0; temp_x < rect_width; temp_x++) {
             // 计算物理framebuffer位置（ROTATE_270）
             // logical(x,y) -> physical(y, 479-x)
             int phys_x = rect_y + temp_y;
             int phys_y = 479 - (rect_x + temp_x);
-            
+
             if (phys_x < 0 || phys_x >= 800 || phys_y < 0 || phys_y >= 480) continue;
-            
+
             int phys_byte_idx = phys_y * 100 + phys_x / 8;
             int phys_bit = 7 - (phys_x % 8);
             main_fb[phys_byte_idx] &= ~(1 << phys_bit);  // 黑色
             pixels_written++;
         }
     }
-    
+
     ESP_LOGI(TAG, "Pixels written to framebuffer: %d", pixels_written);
-    
+
     // 3. 触发局刷
     ESP_LOGI(TAG, "Calling display_refresh_region...");
     display_refresh_region(rect_x, rect_y, rect_width, rect_height, REFRESH_MODE_PARTIAL);
     ESP_LOGI(TAG, "=== Rect Complete ===");
-}
-
-// 直接使用物理坐标测试（绕过convert_logical_to_physical_region）
-static void draw_test_rect_physical(int phys_x, int phys_y, int phys_w, int phys_h)
-{
-    ESP_LOGI(TAG, "=== Drawing Rect with PHYSICAL coords ===");
-    ESP_LOGI(TAG, "Physical coords: x=%d, y=%d, w=%d, h=%d", phys_x, phys_y, phys_w, phys_h);
-    
-    // 直接在物理framebuffer上绘制黑色矩形
-    UBYTE *main_fb = display_get_framebuffer();
-    int pixels_written = 0;
-    
-    for (int py = 0; py < phys_h; py++) {
-        for (int px = 0; px < phys_w; px++) {
-            int fb_x = phys_x + px;
-            int fb_y = phys_y + py;
-            
-            if (fb_x >= 800 || fb_y >= 480) continue;
-            
-            int byte_idx = fb_y * 100 + fb_x / 8;
-            int bit = 7 - (fb_x % 8);
-            main_fb[byte_idx] &= ~(1 << bit);  // 黑色
-            pixels_written++;
-        }
-    }
-    
-    ESP_LOGI(TAG, "Pixels written: %d", pixels_written);
-    
-    // 直接调用EPD刷新（物理坐标）
-    extern void EPD_4in26_Display_Part_Stream(const UBYTE *full_framebuffer, int fb_stride,
-                                               int x, int y, int w, int h);
-    EPD_4in26_Display_Part_Stream(main_fb, 100, phys_x, phys_y, phys_w, phys_h);
-    
-    ESP_LOGI(TAG, "=== Physical Rect Complete ===");
 }
 
 void test_partial_refresh_rect(void)
@@ -254,6 +283,7 @@ void test_partial_refresh_rect(void)
 
     ESP_LOGI(TAG, "=== Test Complete: 4 markers + centered 3:5 rectangle ===");
 }
+#endif
 
 static void draw_single_menu_item(int index, bool is_selected)
 {
@@ -288,18 +318,24 @@ static void draw_single_menu_item(int index, bool is_selected)
     int local_x = menu_x - 10;  // 区域内的X坐标
     int local_y = 0;            // 区域内的Y坐标从0开始
     
+    sFONT *menu_font = &SourceSansPro16;
+    int text_y = (region_height - menu_font->Height) / 2;
+    if (text_y < 0) {
+        text_y = 0;
+    }
+
     if (is_selected) {
         // 绘制填充矩形
         Paint_DrawRectangle(local_x, local_y, local_x + menu_width + 20, local_y + region_height - 1,
                            BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
         // 绘制文字（白色前景，黑色背景）
-        Paint_DrawString_EN(menu_x, local_y + 5, s_menu_items[index].label, &Font12, BLACK, WHITE);
+        paint_draw_text_utf8(menu_x, local_y + text_y, s_menu_items[index].label, menu_font, WHITE, BLACK);
     } else {
         // 绘制空心矩形
         Paint_DrawRectangle(local_x, local_y, local_x + menu_width + 20, local_y + region_height - 1,
                            BLACK, DOT_PIXEL_1X1, DRAW_FILL_EMPTY);
         // 绘制文字（黑色前景，白色背景）
-        Paint_DrawString_EN(menu_x, local_y + 5, s_menu_items[index].label, &Font12, WHITE, BLACK);
+        paint_draw_text_utf8(menu_x, local_y + text_y, s_menu_items[index].label, menu_font, BLACK, WHITE);
     }
     
     // 4. 将临时buffer复制到主framebuffer的对应物理位置
@@ -411,8 +447,6 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
         // 计算菜单项区域（暂时扩大到整个菜单区域以便测试）
         int menu_start_y = 100;
         int menu_item_height = 60;
-        int menu_width = 400;
-        int menu_x = (SCREEN_WIDTH - menu_width) / 2;
         
         // 暂时使用更大的刷新区域来测试
         int region_x = 0;  // 从屏幕左边缘开始
@@ -441,7 +475,7 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
         draw_single_menu_item(old_selection, false);
         ESP_LOGI(TAG, "  FB[1200]=%02X after draw", fb[1200]);
         
-        display_refresh_region(region_x, old_y, region_w, region_h, REFRESH_MODE_PARTIAL);
+        // 不要在这里立刻局刷：连续两次局刷会显得像“动画/分步刷新”。
         
         // 重绘新焦点（设置为选中状态，颜色翻转）
         ESP_LOGI(TAG, "Redrawing new item %d (selected, inverted)", new_selection);
@@ -451,9 +485,14 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
         display_clear_region(region_x, new_y, region_w, region_h, COLOR_WHITE);
         // 然后绘制菜单项（黑底白字）
         draw_single_menu_item(new_selection, true);
-        display_refresh_region(region_x, new_y, region_w, region_h, REFRESH_MODE_PARTIAL);
-        
-        ESP_LOGI(TAG, "Focus update complete (2 partial refreshes)");
+        // 一次性刷新覆盖旧/新焦点的并集区域，减少分步刷新的观感
+        int refresh_y = old_y < new_y ? old_y : new_y;
+        int refresh_bottom = (old_y > new_y ? old_y : new_y) + region_h;
+        int refresh_h = refresh_bottom - refresh_y;
+        // 焦点切换优先用“快刷局刷”，减少可见的多阶段波形效果（更像动画）。
+        display_refresh_region(region_x, refresh_y, region_w, refresh_h, REFRESH_MODE_PARTIAL_FAST);
+
+        ESP_LOGI(TAG, "Focus update complete (1 partial refresh: y=%d h=%d)", refresh_y, refresh_h);
     }
 }
 

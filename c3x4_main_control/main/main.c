@@ -1176,11 +1176,11 @@ void app_main(void)
     ESP_LOGI("MAIN", "Hand-drawn UI initialized successfully!");
     ESP_LOGI("MAIN", "Use UP/DOWN buttons to navigate, CONFIRM to select");
     
-    // 7. 测试局刷功能（在EPD全屏刷新完成后）
-    ESP_LOGI("MAIN", "Running partial refresh test...");
-    vTaskDelay(pdMS_TO_TICKS(500));  // 等待500ms确保屏幕稳定
-    test_partial_refresh_rect();
-    ESP_LOGI("MAIN", "Partial refresh test complete");
+    // 7. （已注释）测试局刷功能：避免启动时覆盖/干扰当前 UI
+    // ESP_LOGI("MAIN", "Running partial refresh test...");
+    // vTaskDelay(pdMS_TO_TICKS(500));  // 等待500ms确保屏幕稳定
+    // test_partial_refresh_rect();
+    // ESP_LOGI("MAIN", "Partial refresh test complete");
 
     // 8. 设置按键回调 - 将按键事件分发到screen_manager
     input_handler_register_callback(button_event_callback, NULL);

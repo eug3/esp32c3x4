@@ -66,4 +66,9 @@ void EPD_4in26_Display_Part(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h);
 void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, uint32_t fb_stride,
                                    UWORD x, UWORD y, UWORD w, UWORD h);
 
+// 快刷局刷（流式版本）
+// 与 EPD_4in26_Display_Part_Stream 相同的数据写入方式，但使用 fast update 序列触发刷新
+void EPD_4in26_Display_Part_Stream_Fast(UBYTE *full_framebuffer, uint32_t fb_stride,
+                                        UWORD x, UWORD y, UWORD w, UWORD h);
+
 #endif

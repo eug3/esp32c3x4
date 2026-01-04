@@ -13,6 +13,7 @@
 #define DISPLAY_ENGINE_H
 
 #include "DEV_Config.h"
+#include "Fonts/fonts.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -28,7 +29,8 @@
 typedef enum {
     REFRESH_MODE_FULL,      // 全刷（最高清晰度，2s）
     REFRESH_MODE_FAST,      // 快刷（较快，1.5s）
-    REFRESH_MODE_PARTIAL    // 局刷（最快，0.3s，可能留残影）
+    REFRESH_MODE_PARTIAL,   // 局刷（最快，0.3s，可能留残影）
+    REFRESH_MODE_PARTIAL_FAST // 快刷局刷（更快/更黑或更闪，依屏幕波形而定）
 } refresh_mode_t;
 
 // 颜色定义（与 GUI_Paint 兼容）
@@ -180,6 +182,18 @@ void display_draw_rect(int x, int y, int width, int height, uint8_t color, bool 
 int display_draw_text(int x, int y, const char *text, uint8_t color, uint8_t bg_color);
 
 /**
+ * @brief 绘制文本（ASCII，自定义字体）
+ * @param x 起始 X
+ * @param y 起始 Y
+ * @param text 文本
+ * @param font 字体（NULL 则使用 SourceSansPro16）
+ * @param color 前景色
+ * @param bg_color 背景色
+ * @return 文本宽度
+ */
+int display_draw_text_font(int x, int y, const char *text, sFONT *font, uint8_t color, uint8_t bg_color);
+
+/**
  * @brief 绘制文本（中文）
  * @param x 起始 X
  * @param y 起始 Y
@@ -200,11 +214,26 @@ int display_draw_text_cn(int x, int y, const char *text, int font_size, uint8_t 
 int display_get_text_width(const char *text, int font_size);
 
 /**
+ * @brief 获取 ASCII 文本宽度（自定义字体）
+ * @param text 文本
+ * @param font 字体（NULL 则使用 SourceSansPro16）
+ * @return 文本宽度（像素）
+ */
+int display_get_text_width_font(const char *text, sFONT *font);
+
+/**
  * @brief 获取文本高度
  * @param font_size 字体大小
  * @return 文本高度（像素）
  */
 int display_get_text_height(int font_size);
+
+/**
+ * @brief 获取 ASCII 文本高度（自定义字体）
+ * @param font 字体（NULL 则使用 SourceSansPro16）
+ * @return 文本高度（像素）
+ */
+int display_get_text_height_font(sFONT *font);
 
 /**
  * @brief 绘制图像（1bpp 位图）

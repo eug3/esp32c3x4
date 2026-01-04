@@ -85,6 +85,9 @@ extern sFONT Font16;
 extern sFONT Font12;
 extern sFONT Font8;
 
+// Generated TTF-based ASCII font(s)
+extern sFONT SourceSansPro16;
+
 extern cFONT Font12CN;
 extern cFONT Font24CN;
 #ifdef __cplusplus
