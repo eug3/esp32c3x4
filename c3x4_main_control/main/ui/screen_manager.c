@@ -202,7 +202,9 @@ bool screen_manager_show_screen(screen_t *screen)
     screen_manager_draw();
 
     // 刷新显示
+    ESP_LOGI(TAG, "Calling display_refresh...");
     display_refresh(REFRESH_MODE_FULL);
+    ESP_LOGI(TAG, "display_refresh returned, screen_manager_show complete");
 
     return true;
 }

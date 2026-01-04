@@ -183,12 +183,28 @@ bool input_handler_get_event(button_t *btn, button_event_t *event, int timeout_m
 
 void input_handler_poll(void)
 {
+    static bool first_poll = true;
+    if (first_poll) {
+        ESP_LOGI(TAG, "First poll - checking button state");
+        first_poll = false;
+    }
+    
     if (!s_initialized) {
+        ESP_LOGW(TAG, "Poll called but not initialized!");
         return;
     }
 
     button_t current_btn = read_button_adc();
     int64_t current_time = get_time_ms();
+    
+    // 添加调试：检测到按键时输出
+    static button_t last_detected = BTN_NONE;
+    if (current_btn != last_detected) {
+        ESP_LOGI(TAG, "Button changed: %s -> %s", 
+                 input_handler_get_button_name(last_detected),
+                 input_handler_get_button_name(current_btn));
+        last_detected = current_btn;
+    }
 
     if (current_btn == BTN_NONE) {
         // 没有按键按下

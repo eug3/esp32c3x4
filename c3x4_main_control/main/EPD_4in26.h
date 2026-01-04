@@ -58,5 +58,12 @@ void EPD_4in26_Display_Partial(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h)
 // 坐标对齐和参数验证已移入函数内部，简化调用
 void EPD_4in26_Display_Part(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h);
 
+// 局部刷新（流式版本）
+// 直接从完整framebuffer读取指定区域并发送
+// full_framebuffer: 完整的800x480帧缓冲
+// fb_stride: 每行字节数（800/8=100）
+// x, y, w, h: 物理坐标系下的刷新区域
+void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, uint32_t fb_stride,
+                                   UWORD x, UWORD y, UWORD w, UWORD h);
 
 #endif

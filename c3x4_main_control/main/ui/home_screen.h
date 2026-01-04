@@ -26,4 +26,9 @@ void home_screen_init(void);
  */
 screen_t* home_screen_get_instance(void);
 
+/**
+ * @brief 测试局刷功能 - 绘制一个成比例的矩形框
+ */
+void test_partial_refresh_rect(void);
+
 #endif // HOME_SCREEN_H

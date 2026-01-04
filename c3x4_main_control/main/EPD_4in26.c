@@ -876,6 +876,11 @@ void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, uint32_t fb_stride,
 {
 	UWORD i;
 
+	if (w == 0 || h == 0) {
+		ESP_LOGW("EPD_PART", "[WARN] Invalid size: w=%u, h=%u", w, h);
+		return;
+	}
+
 	// ============================================
 	// 1. 参数验证和边界检查
 	// ============================================
@@ -951,20 +956,53 @@ void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, uint32_t fb_stride,
 	EPD_4in26_SendCommand(0x3C); // BorderWavefrom
 	EPD_4in26_SendData(0x80);
 
-	// 设置刷新窗口（已对齐的坐标）
-	EPD_4in26_SetWindows(x_aligned, y, x_end, y_end);
+	// ============================================
+	// **重要**: 这块屏幕的Y坐标是反向的！
+	// 参考 GxEPD2_426_GDEQ0426T82::_setPartialRamArea
+	// 1. 设置 data entry mode 为 X增Y减
+	// 2. 翻转 Y 坐标: y_reversed = HEIGHT - y - h
+	// ============================================
+	EPD_4in26_SendCommand(0x11); // set ram entry mode
+	EPD_4in26_SendData(0x01);    // x increase, y decrease : y reversed
+	
+	UWORD y_reversed = EPD_4in26_HEIGHT - y - h_actual;
+	UWORD y_end_reversed = y_reversed + h_actual - 1;
 
-	// 设置光标到起始位置
-	EPD_4in26_SetCursor(x_aligned, y);
+	// 关键点：当前采用 Y 递减模式 (0x11=0x01)
+	// 因此窗口/光标必须用“从大到小”的 Y 顺序：Ystart = y_end_reversed, Yend = y_reversed
+	EPD_4in26_SetWindows(x_aligned, y_end_reversed, x_end, y_reversed);
+	EPD_4in26_SetCursor(x_aligned, y_end_reversed);
 
 	EPD_4in26_SendCommand(0x24);   // Write Black and White image to RAM
 
 	// ============================================
 	// 6. 流式发送：直接从 framebuffer 逐行发送
 	// ============================================
+	// 调试：打印前3行的数据
+	if (h_actual >= 3) {
+		for (int debug_row = 0; debug_row < 3; debug_row++) {
+			UBYTE *row_ptr = full_framebuffer + (y + debug_row) * fb_stride + x_offset_bytes;
+			char hex_str[32] = {0};
+			int len = w_bytes < 8 ? w_bytes : 8;
+			for (int j = 0; j < len && j*3 < 30; j++) {
+				snprintf(hex_str + j*3, 4, "%02X ", row_ptr[j]);
+			}
+			ESP_LOGI("EPD_PART", "[DATA] Row %d: %s%s", debug_row, hex_str, w_bytes > 8 ? "..." : "");
+		}
+	}
+	
 	for(i=0; i<h_actual; i++)
 	{
 		// 计算当前行在 framebuffer 中的起始位置
+		UBYTE *row_ptr = full_framebuffer + (y + i) * fb_stride + x_offset_bytes;
+		EPD_4in26_SendData2(row_ptr, w_bytes);
+	}
+
+	// 同步更新上一帧缓冲区 (0x26)，否则下一次局刷对比基准会错，表现为“位置/内容不稳定”
+	EPD_4in26_SetCursor(x_aligned, y_end_reversed);
+	EPD_4in26_SendCommand(0x26);
+	for(i=0; i<h_actual; i++)
+	{
 		UBYTE *row_ptr = full_framebuffer + (y + i) * fb_stride + x_offset_bytes;
 		EPD_4in26_SendData2(row_ptr, w_bytes);
 	}

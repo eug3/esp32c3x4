@@ -5,7 +5,7 @@
   "idf.openOcdConfigs": [
     "board/esp32c3-builtin.cfg"
   ],
-  "idf.port": "/dev/tty.usbmodem2101",
+  "idf.port": "/dev/tty.usbmodem1101",
   "idf.toolsPath": "/Users/beijihu/.espressif",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32c3"
@@ -15,5 +15,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=/Users/beijihu/Github/esp32c3x4/project-name/build"
-  ]
+  ],
+  "idf.flashType": "JTAG"
 }

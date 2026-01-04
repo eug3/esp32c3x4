@@ -79,7 +79,7 @@
 #define POWER_BUTTON_SLEEP_MS     1000  // 进入睡眠需要按下时间
 
 // 电池监测 - ESP-IDF 6.1 新 API
-static adc_oneshot_unit_handle_t adc1_handle = NULL;
+adc_oneshot_unit_handle_t adc1_handle = NULL;  // 移除static，供input_handler使用
 static adc_cali_handle_t adc1_cali_handle = NULL;
 static bool do_calibration = true;
 
@@ -106,6 +106,7 @@ static volatile button_t current_pressed_button = BTN_NONE;
 static int start_advertising(void);
 esp_err_t sd_card_init(void);
 void sd_card_test_read_write(const char *mount_point);
+static void button_event_callback(button_t btn, button_event_t event, void *user_data);
 
 #define SDCARD_MOUNT_POINT "/sdcard"
 #define SPI_DMA_CHAN    1
@@ -810,7 +811,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 
 // WiFi initialization function
 // 注意：在 4 灰度模式下帧缓冲更大（96KB），WiFi 初始化可能因内存不足失败。
-// 不要 ESP_ERROR_CHECK 直接 abort，改为返回错误让系统继续运行（至少保证 EPD/LVGL 可用）。
+// 不要 ESP_ERROR_CHECK 直接 abort，改为返回错误让系统继续运行。
 esp_err_t wifi_init_sta(void)
 {
     ESP_LOGI("WIFI", "Initializing WiFi in station mode...");
@@ -1095,8 +1096,7 @@ void app_main(void)
     // 优先级: BLE(必须) > SD卡(必须) > WiFi(可选)
     // 方案: 完全跳过WiFi初始化,避免内存耗尽导致SD卡SPI DMA分配失败
     // ========================================================================
-    ESP_LOGI("MAIN", "Skipping WiFi initialization to conserve memory for SD card and LVGL");
-    ESP_LOGI("MAIN", "Use BLE for data transfer instead of WiFi");
+    ESP_LOGI("MAIN", "Skipping WiFi to conserve memory (using BLE instead)");
     
     // WiFi初始化已禁用 - 取消注释以下代码以重新启用(需要足够RAM)
     /*
@@ -1115,13 +1115,7 @@ void app_main(void)
         ESP_LOGW("MAIN", "File browser and SD-related features will be unavailable");
     }
 
-    // TODO: Font manager needs to be rewritten without LVGL dependency
-    // For now, skip font manager initialization
-    ESP_LOGI("MAIN", "Skipping font manager initialization (needs LVGL-free implementation)");
-
-    // ============================================================================
-    // 手绘 UI GUI 初始化（无 LVGL）
-    // ============================================================================
+    // 手绘 UI 系统初始化
     ESP_LOGI("MAIN", "Initializing Hand-drawn UI system...");
 
     // 1. 初始化显示引擎
@@ -1135,7 +1129,7 @@ void app_main(void)
         return;
     }
 
-    // 2. 初始化输入处理
+    // 2. 初始化输入处理（注意：回调函数在screen_manager初始化后设置）
     input_config_t input_config = {
         .enable_debounce = true,
         .enable_long_press = true,
@@ -1177,11 +1171,52 @@ void app_main(void)
     // 6. 显示首页
     ESP_LOGI("MAIN", "Showing home screen...");
     screen_manager_show_index();
+    ESP_LOGI("MAIN", "Home screen displayed");
 
     ESP_LOGI("MAIN", "Hand-drawn UI initialized successfully!");
     ESP_LOGI("MAIN", "Use UP/DOWN buttons to navigate, CONFIRM to select");
+    
+    // 7. 测试局刷功能（在EPD全屏刷新完成后）
+    ESP_LOGI("MAIN", "Running partial refresh test...");
+    vTaskDelay(pdMS_TO_TICKS(500));  // 等待500ms确保屏幕稳定
+    test_partial_refresh_rect();
+    ESP_LOGI("MAIN", "Partial refresh test complete");
 
-    ESP_LOGI("MAIN", "System initialized. Hand-drawn UI is ready.");
-    ESP_LOGI("MAIN", "Main task ending, FreeRTOS tasks continue running...");
+    // 8. 设置按键回调 - 将按键事件分发到screen_manager
+    input_handler_register_callback(button_event_callback, NULL);
+    ESP_LOGI("MAIN", "Button callback registered");
+
+    ESP_LOGI("MAIN", "Starting main UI loop...");
+
+    // 8. 主循环：轮询按键并处理事件
+    int loop_count = 0;
+    while (true) {
+        // 轮询按键状态
+        input_handler_poll();
+
+        // 每5秒输出一次心跳日志
+        if (++loop_count % 250 == 0) {
+            ESP_LOGI("MAIN", "UI loop running... (loops=%d)", loop_count);
+        }
+
+        // 延时减少CPU占用
+        vTaskDelay(pdMS_TO_TICKS(20));  // 50Hz轮询频率
+    }
+}
+
+/**
+ * @brief 按键事件回调函数 - 将事件分发到screen_manager
+ */
+static void button_event_callback(button_t btn, button_event_t event, void *user_data)
+{
+    ESP_LOGI("BTN_CALLBACK", "Button: %s, Event: %s", 
+             input_handler_get_button_name(btn),
+             input_handler_get_event_name(event));
+
+    // 只处理按下事件（避免重复处理）
+    if (event == BTN_EVENT_PRESSED) {
+        // 分发到当前屏幕
+        screen_manager_handle_event(btn, event);
+    }
 }
 

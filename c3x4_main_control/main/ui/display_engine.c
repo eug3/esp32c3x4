@@ -35,6 +35,9 @@ static dirty_region_t s_dirty_region = {0};
 static void lock_engine(void);
 static void unlock_engine(void);
 static void expand_dirty_region(int x, int y, int width, int height);
+static void clear_dirty_internal(void);  // 内部版本，调用者必须持有锁
+static void convert_logical_to_physical_region(int lx, int ly, int lw, int lh,
+                                                int *px, int *py, int *pw, int *ph);
 
 /**********************
  *  STATIC FUNCTIONS
@@ -79,6 +82,63 @@ static void expand_dirty_region(int x, int y, int width, int height)
         s_dirty_region.width = ((x2 > nx2) ? x2 : nx2) - s_dirty_region.x + 1;
         s_dirty_region.height = ((y2 > ny2) ? y2 : ny2) - s_dirty_region.y + 1;
     }
+}
+
+/**
+ * @brief 将逻辑坐标(ROTATE_270)转换为物理坐标
+ * 
+ * ROTATE_270转换规则（来自GUI_Paint.c）：
+ *   物理X = 逻辑Y
+ *   物理Y = 物理高度 - 逻辑X - 1
+ * 
+ * 对于区域转换：
+ *   逻辑区域：(lx, ly, lw, lh) - 480x800坐标系
+ *   物理区域：(px, py, pw, ph) - 800x480坐标系
+ * 
+ * @param lx 逻辑起始X（0~479）
+ * @param ly 逻辑起始Y（0~799）
+ * @param lw 逻辑宽度
+ * @param lh 逻辑高度
+ * @param px 输出：物理起始X
+ * @param py 输出：物理起始Y
+ * @param pw 输出：物理宽度
+ * @param ph 输出：物理高度
+ */
+static void convert_logical_to_physical_region(int lx, int ly, int lw, int lh,
+                                                int *px, int *py, int *pw, int *ph)
+{
+    // 物理尺寸（帧缓冲实际尺寸）
+    const int PHYSICAL_HEIGHT = 480;
+    
+    // 逻辑区域的四个角点
+    int lx1 = lx;
+    int ly1 = ly;
+    int lx2 = lx + lw - 1;
+    int ly2 = ly + lh - 1;
+    
+    // 转换四个角点到物理坐标
+    // 左上角 (lx1, ly1) -> (ly1, PHYSICAL_HEIGHT - lx1 - 1)
+    int p_x1 = ly1;
+    int p_y1 = PHYSICAL_HEIGHT - lx1 - 1;
+    
+    // 右下角 (lx2, ly2) -> (ly2, PHYSICAL_HEIGHT - lx2 - 1)
+    int p_x2 = ly2;
+    int p_y2 = PHYSICAL_HEIGHT - lx2 - 1;
+    
+    // 注意：由于旋转，物理Y坐标是反向的（lx越大，p_y越小）
+    // 所以需要交换p_y1和p_y2
+    int temp = p_y1;
+    p_y1 = p_y2;
+    p_y2 = temp;
+    
+    // 计算物理区域的起始点和尺寸
+    *px = p_x1;
+    *py = p_y1;
+    *pw = p_x2 - p_x1 + 1;
+    *ph = p_y2 - p_y1 + 1;
+    
+    ESP_LOGD(TAG, "Coord convert: logical(%d,%d,%d,%d) -> physical(%d,%d,%d,%d)",
+             lx, ly, lw, lh, *px, *py, *pw, *ph);
 }
 
 /**********************
@@ -162,7 +222,9 @@ void display_clear(uint8_t color)
     Paint_Clear(color);
     ESP_LOGI(TAG, "Paint_Clear done");
     
-    display_mark_dirty(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+    if (s_config.use_partial_refresh) {
+        expand_dirty_region(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+    }
     ESP_LOGI(TAG, "Unlocking...");
     unlock_engine();
     ESP_LOGI(TAG, "display_clear END");
@@ -176,7 +238,9 @@ void display_clear_region(int x, int y, int width, int height, uint8_t color)
 {
     lock_engine();
     Paint_ClearWindows(x, y, x + width - 1, y + height - 1, color);
-    display_mark_dirty(x, y, width, height);
+    if (s_config.use_partial_refresh) {
+        expand_dirty_region(x, y, width, height);
+    }
     unlock_engine();
 
     if (s_config.auto_refresh) {
@@ -205,17 +269,40 @@ void display_refresh(refresh_mode_t mode)
             break;
         case REFRESH_MODE_PARTIAL:
         default:
-            EPD_4in26_Display_Part(s_framebuffer, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+            // 最简单且一致的策略：局刷只刷新“当前脏区”(逻辑坐标 480x800)
+            // 避免全屏局刷导致“只画了局部却把整屏刷成空白/白屏”的观感。
+            if (!s_dirty_region.valid) {
+                ESP_LOGI(TAG, "No dirty region; skip partial refresh");
+                break;
+            }
+
+            // 边界检查（逻辑坐标）
+            int x = s_dirty_region.x;
+            int y = s_dirty_region.y;
+            int width = s_dirty_region.width;
+            int height = s_dirty_region.height;
+            if (x < 0) x = 0;
+            if (y < 0) y = 0;
+            if (x + width > SCREEN_WIDTH) width = SCREEN_WIDTH - x;
+            if (y + height > SCREEN_HEIGHT) height = SCREEN_HEIGHT - y;
+
+            // 逻辑 -> 物理（ROTATE_270）
+            int phys_x, phys_y, phys_w, phys_h;
+            convert_logical_to_physical_region(x, y, width, height, &phys_x, &phys_y, &phys_w, &phys_h);
+
+            EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
             break;
     }
 
-    display_clear_dirty();
+    clear_dirty_internal();  // 使用内部版本，避免嵌套锁
     unlock_engine();
+    
+    ESP_LOGI(TAG, "display_refresh complete");
 }
 
 void display_refresh_region(int x, int y, int width, int height, refresh_mode_t mode)
 {
-    // 边界检查
+    // 边界检查（逻辑坐标）
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x + width > SCREEN_WIDTH) width = SCREEN_WIDTH - x;
@@ -223,12 +310,22 @@ void display_refresh_region(int x, int y, int width, int height, refresh_mode_t 
 
     lock_engine();
 
-    ESP_LOGI(TAG, "Refreshing region: x=%d, y=%d, w=%d, h=%d (mode=%d)",
+    ESP_LOGI(TAG, "Refreshing region (logical): x=%d, y=%d, w=%d, h=%d (mode=%d)",
              x, y, width, height, mode);
 
     // 只有部分刷新支持区域刷新
     if (mode == REFRESH_MODE_PARTIAL) {
-        EPD_4in26_Display_Part(s_framebuffer, x, y, width, height);
+        // 将逻辑坐标转换为物理坐标（ROTATE_270）
+        int phys_x, phys_y, phys_w, phys_h;
+        convert_logical_to_physical_region(x, y, width, height,
+                                          &phys_x, &phys_y, &phys_w, &phys_h);
+        
+        ESP_LOGI(TAG, "Physical region: x=%d, y=%d, w=%d, h=%d",
+                 phys_x, phys_y, phys_w, phys_h);
+        
+        // 使用Stream版本，直接从完整framebuffer读取区域数据
+        // framebuffer stride = 800/8 = 100字节/行
+        EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
     } else {
         // 全刷和快刷不支持区域，使用全屏刷新
         if (mode == REFRESH_MODE_FULL) {
@@ -238,7 +335,7 @@ void display_refresh_region(int x, int y, int width, int height, refresh_mode_t 
         }
     }
 
-    display_clear_dirty();
+    clear_dirty_internal();  // 使用内部版本，避免嵌套锁
     unlock_engine();
 }
 
@@ -264,10 +361,16 @@ const dirty_region_t* display_get_dirty_region(void)
     return &s_dirty_region;
 }
 
+// 内部函数：清除脏区域（调用者必须已持有锁）
+static void clear_dirty_internal(void)
+{
+    s_dirty_region.valid = false;
+}
+
 void display_clear_dirty(void)
 {
     lock_engine();
-    s_dirty_region.valid = false;
+    clear_dirty_internal();
     unlock_engine();
 }
 
@@ -279,7 +382,9 @@ void display_draw_pixel(int x, int y, uint8_t color)
 
     lock_engine();
     Paint_SetPixel(x, y, color);
-    display_mark_dirty(x, y, 1, 1);
+    if (s_config.use_partial_refresh) {
+        expand_dirty_region(x, y, 1, 1);
+    }
     unlock_engine();
 }
 
@@ -300,7 +405,9 @@ void display_draw_hline(int x, int y, int width, uint8_t color)
     for (int i = 0; i < width; i++) {
         Paint_SetPixel(x + i, y, color);
     }
-    display_mark_dirty(x, y, width, 1);
+    if (s_config.use_partial_refresh) {
+        expand_dirty_region(x, y, width, 1);
+    }
     unlock_engine();
 }
 
@@ -321,7 +428,9 @@ void display_draw_vline(int x, int y, int height, uint8_t color)
     for (int i = 0; i < height; i++) {
         Paint_SetPixel(x, y + i, color);
     }
-    display_mark_dirty(x, y, 1, height);
+    if (s_config.use_partial_refresh) {
+        expand_dirty_region(x, y, 1, height);
+    }
     unlock_engine();
 }
 
@@ -341,14 +450,26 @@ void display_draw_rect(int x, int y, int width, int height, uint8_t color, bool 
             }
         }
     } else {
-        // 空心矩形
-        display_draw_hline(x, y, width, color);
-        display_draw_hline(x, y + height - 1, width, color);
-        display_draw_vline(x, y, height, color);
-        display_draw_vline(x + width - 1, y, height, color);
+        // 空心矩形 - 直接绘制避免嵌套锁
+        for (int i = 0; i < width; i++) {
+            int px = x + i;
+            if (px >= 0 && px < SCREEN_WIDTH) {
+                if (y >= 0 && y < SCREEN_HEIGHT) Paint_SetPixel(px, y, color);
+                if (y + height - 1 >= 0 && y + height - 1 < SCREEN_HEIGHT) Paint_SetPixel(px, y + height - 1, color);
+            }
+        }
+        for (int j = 0; j < height; j++) {
+            int py = y + j;
+            if (py >= 0 && py < SCREEN_HEIGHT) {
+                if (x >= 0 && x < SCREEN_WIDTH) Paint_SetPixel(x, py, color);
+                if (x + width - 1 >= 0 && x + width - 1 < SCREEN_WIDTH) Paint_SetPixel(x + width - 1, py, color);
+            }
+        }
     }
 
-    display_mark_dirty(x, y, width, height);
+    if (s_config.use_partial_refresh) {
+        expand_dirty_region(x, y, width, height);
+    }
     unlock_engine();
 }
 
@@ -365,7 +486,9 @@ int display_draw_text(int x, int y, const char *text, uint8_t color, uint8_t bg_
     // 计算文本宽度
     int width = strlen(text) * Font12.Width;
 
-    display_mark_dirty(x, y, width, Font12.Height);
+    if (s_config.use_partial_refresh) {
+        expand_dirty_region(x, y, width, Font12.Height);
+    }
     unlock_engine();
 
     return width;
@@ -384,7 +507,9 @@ int display_draw_text_cn(int x, int y, const char *text, int font_size, uint8_t 
     Paint_DrawString_EN(x, y, text, &Font12, color, bg_color);
     int width = strlen(text) * Font12.Width;
 
-    display_mark_dirty(x, y, width, Font12.Height);
+    if (s_config.use_partial_refresh) {
+        expand_dirty_region(x, y, width, Font12.Height);
+    }
     unlock_engine();
 
     return width;
@@ -417,7 +542,9 @@ void display_draw_bitmap(int x, int y, int width, int height, const uint8_t *bit
     // TODO: 实现位图绘制
     // GUI_Paint 的 Paint_DrawBitMap 需要特定格式
 
-    display_mark_dirty(x, y, width, height);
+    if (s_config.use_partial_refresh) {
+        expand_dirty_region(x, y, width, height);
+    }
     unlock_engine();
 }
 
