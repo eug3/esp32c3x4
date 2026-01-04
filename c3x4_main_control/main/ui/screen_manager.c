@@ -1,262 +1,359 @@
 /**
  * @file screen_manager.c
- * @brief 屏幕导航管理器实现
+ * @brief 屏幕导航管理器实现（手绘 UI 版本，无 LVGL 依赖）
  */
 
 #include "screen_manager.h"
-#include "../lvgl_driver.h"
+#include "display_engine.h"
 #include "esp_log.h"
 #include <string.h>
 
 static const char *TAG = "SCREEN_MGR";
 
-// 导航历史栈 - 最大深度 10
-#define NAVIGATION_STACK_MAX_DEPTH 10
+// 屏幕管理器全局状态
+static screen_manager_t g_mgr = {0};
+static bool g_initialized = false;
 
-static screen_context_t *g_context = NULL;
-static screen_type_t g_navigation_stack[NAVIGATION_STACK_MAX_DEPTH] = {SCREEN_TYPE_INDEX};
-static int g_navigation_stack_top = 0;  // 栈顶指针（指向当前屏幕）
-static screen_type_t g_current_screen = SCREEN_TYPE_INDEX;
+// 导航栈
+static screen_t *g_nav_stack[NAV_STACK_DEPTH] = {0};
+static int g_nav_stack_top = -1;
 
-void screen_manager_init(screen_context_t *ctx)
+// 外部屏幕声明（将在各屏幕模块中定义）
+extern screen_t g_home_screen;
+extern screen_t g_file_browser_screen;
+extern screen_t g_reader_screen;
+extern screen_t g_settings_screen;
+extern screen_t g_image_viewer_screen;
+
+/**********************
+ *  STATIC PROTOTYPES
+ **********************/
+
+static void push_nav_stack(screen_t *screen);
+static screen_t* pop_nav_stack(void);
+
+/**********************
+ *  STATIC FUNCTIONS
+ **********************/
+
+static void push_nav_stack(screen_t *screen)
 {
-    g_context = ctx;
-    g_navigation_stack[0] = SCREEN_TYPE_INDEX;
-    g_navigation_stack_top = 0;
-    g_current_screen = SCREEN_TYPE_INDEX;
-    ESP_LOGI(TAG, "Screen manager initialized");
-}
-
-// 内部函数：将屏幕压入导航栈
-static void push_screen(screen_type_t screen_type)
-{
-    if (g_navigation_stack_top < NAVIGATION_STACK_MAX_DEPTH - 1) {
-        g_navigation_stack_top++;
-        g_navigation_stack[g_navigation_stack_top] = screen_type;
-        g_current_screen = screen_type;
-        ESP_LOGI(TAG, "Pushed screen %d to stack (top=%d)", screen_type, g_navigation_stack_top);
+    if (g_nav_stack_top < NAV_STACK_DEPTH - 1) {
+        g_nav_stack_top++;
+        g_nav_stack[g_nav_stack_top] = screen;
+        ESP_LOGI(TAG, "Pushed screen '%s' to nav stack (top=%d)",
+                 screen ? screen->name : "NULL", g_nav_stack_top);
     } else {
-        ESP_LOGW(TAG, "Navigation stack full, replacing top");
-        g_navigation_stack[g_navigation_stack_top] = screen_type;
-        g_current_screen = screen_type;
+        ESP_LOGW(TAG, "Nav stack full, replacing top");
+        g_nav_stack[g_nav_stack_top] = screen;
     }
 }
 
-void screen_manager_show_index(void)
+static screen_t* pop_nav_stack(void)
 {
-    if (g_context == NULL) {
-        ESP_LOGE(TAG, "Screen manager not initialized!");
-        return;
+    if (g_nav_stack_top < 0) {
+        return NULL;
     }
-
-    ESP_LOGI(TAG, "Navigating to index screen");
-
-    // 重置刷新状态，确保新的屏幕刷新不受旧状态影响
-    lvgl_reset_refresh_state();
-
-    // 组件间切换：强制使用全刷模式，确保屏幕完全清晰
-    lvgl_set_refresh_mode(EPD_REFRESH_FULL);
-
-    extern void index_screen_create(uint32_t battery_mv, uint8_t battery_pct, bool charging, const char *version_str, lv_indev_t *indev);
-
-    // 首页总是作为栈底，清空栈
-    g_navigation_stack[0] = SCREEN_TYPE_INDEX;
-    g_navigation_stack_top = 0;
-    g_current_screen = SCREEN_TYPE_INDEX;
-
-    index_screen_create(
-        g_context->battery_mv,
-        g_context->battery_pct,
-        g_context->charging,
-        g_context->version_str,
-        g_context->indev
-    );
+    screen_t *screen = g_nav_stack[g_nav_stack_top];
+    g_nav_stack_top--;
+    ESP_LOGI(TAG, "Popped screen '%s' from nav stack (top=%d)",
+             screen ? screen->name : "NULL", g_nav_stack_top);
+    return screen;
 }
 
-void screen_manager_show_file_browser(void)
+/**********************
+ * GLOBAL FUNCTIONS
+ **********************/
+
+bool screen_manager_init(screen_context_t *ctx)
 {
-    if (g_context == NULL) {
-        ESP_LOGE(TAG, "Screen manager not initialized!");
-        return;
+    if (g_initialized) {
+        ESP_LOGW(TAG, "Screen manager already initialized");
+        return true;
     }
 
-    ESP_LOGI(TAG, "Navigating to file browser screen");
+    ESP_LOGI(TAG, "Initializing screen manager...");
 
-    // 重置刷新状态，确保新的屏幕刷新不受旧状态影响
-    lvgl_reset_refresh_state();
+    // 清零状态
+    memset(&g_mgr, 0, sizeof(g_mgr));
+    g_nav_stack_top = -1;
 
-    // 组件间切换：强制使用全刷模式，确保屏幕完全清晰
-    lvgl_set_refresh_mode(EPD_REFRESH_FULL);
+    // 保存上下文
+    g_mgr.context = ctx;
 
-    extern void file_browser_screen_create(lv_indev_t *indev);
+    // 注册屏幕（这些屏幕将在各自的模块中定义）
+    // screen_manager_register(&g_home_screen);
+    // screen_manager_register(&g_file_browser_screen);
+    // ...
 
-    // 压入导航栈
-    push_screen(SCREEN_TYPE_FILE_BROWSER);
-
-    file_browser_screen_create(g_context->indev);
-}
-
-void screen_manager_show_settings(void)
-{
-    if (g_context == NULL) {
-        ESP_LOGE(TAG, "Screen manager not initialized!");
-        return;
-    }
-
-    ESP_LOGI(TAG, "Navigating to settings screen");
-
-    // 重置刷新状态，确保新的屏幕刷新不受旧状态影响
-    lvgl_reset_refresh_state();
-
-    // 组件间切换：强制使用全刷模式，确保屏幕完全清晰
-    lvgl_set_refresh_mode(EPD_REFRESH_FULL);
-
-    extern void settings_screen_create(lv_indev_t *indev);
-
-    // 压入导航栈
-    push_screen(SCREEN_TYPE_SETTINGS);
-
-    settings_screen_create(g_context->indev);
-}
-
-void screen_manager_show_reader(const char *file_path)
-{
-    if (g_context == NULL) {
-        ESP_LOGE(TAG, "Screen manager not initialized!");
-        return;
-    }
-
-    if (file_path == NULL) {
-        ESP_LOGE(TAG, "File path is NULL");
-        return;
-    }
-
-    ESP_LOGI(TAG, "Navigating to reader screen: %s", file_path);
-
-    // 重置刷新状态，确保新的屏幕刷新不受旧状态影响
-    lvgl_reset_refresh_state();
-
-    // 组件间切换：强制使用全刷模式，确保屏幕完全清晰
-    lvgl_set_refresh_mode(EPD_REFRESH_FULL);
-
-    extern void reader_screen_create_wrapper(const char *file_path, lv_indev_t *indev);
-
-    // 压入导航栈
-    push_screen(SCREEN_TYPE_READER);
-
-    reader_screen_create_wrapper(file_path, g_context->indev);
-}
-
-void screen_manager_show_image_browser(const char *directory)
-{
-    if (g_context == NULL) {
-        ESP_LOGE(TAG, "Screen manager not initialized!");
-        return;
-    }
-
-    if (directory == NULL) {
-        ESP_LOGE(TAG, "Directory is NULL");
-        return;
-    }
-
-    ESP_LOGI(TAG, "Navigating to image browser screen: %s", directory);
-
-    // 重置刷新状态，确保新的屏幕刷新不受旧状态影响
-    lvgl_reset_refresh_state();
-
-    // 组件间切换：强制使用全刷模式，确保屏幕完全清晰
-    lvgl_set_refresh_mode(EPD_REFRESH_FULL);
-
-    extern void image_browser_screen_create(const char *directory, int start_index, lv_indev_t *indev);
-
-    // 压入导航栈
-    push_screen(SCREEN_TYPE_IMAGE_BROWSER);
-
-    image_browser_screen_create(directory, 0, g_context->indev);
-}
-
-bool screen_manager_go_back(void)
-{
-    if (g_context == NULL) {
-        ESP_LOGE(TAG, "Screen manager not initialized!");
-        return false;
-    }
-
-    // 如果已经在首页，无法返回
-    if (g_navigation_stack_top == 0) {
-        ESP_LOGI(TAG, "Already at index screen, cannot go back");
-        return false;
-    }
-
-    // 弹出栈顶
-    g_navigation_stack_top--;
-    screen_type_t prev_screen = g_navigation_stack[g_navigation_stack_top];
-    g_current_screen = prev_screen;
-
-    ESP_LOGI(TAG, "Going back to screen %d (stack top: %d)", prev_screen, g_navigation_stack_top);
-
-    // 重置刷新状态，确保新的屏幕刷新不受旧状态影响
-    lvgl_reset_refresh_state();
-
-    // 组件间切换：强制使用全刷模式，确保屏幕完全清晰
-    lvgl_set_refresh_mode(EPD_REFRESH_FULL);
-
-    // 根据屏幕类型切换
-    switch (prev_screen) {
-        case SCREEN_TYPE_INDEX:
-            {
-                extern void index_screen_create(uint32_t battery_mv, uint8_t battery_pct, bool charging, const char *version_str, lv_indev_t *indev);
-                index_screen_create(
-                    g_context->battery_mv,
-                    g_context->battery_pct,
-                    g_context->charging,
-                    g_context->version_str,
-                    g_context->indev
-                );
-            }
-            break;
-        case SCREEN_TYPE_FILE_BROWSER:
-            {
-                extern void file_browser_screen_create(lv_indev_t *indev);
-                file_browser_screen_create(g_context->indev);
-            }
-            break;
-        case SCREEN_TYPE_READER:
-            {
-                // 阅读器屏幕需要文件路径，但返回时不应该再次打开
-                // 这里我们返回到文件浏览器
-                ESP_LOGW(TAG, "Cannot return to reader screen without file path, redirecting to file browser");
-                extern void file_browser_screen_create(lv_indev_t *indev);
-                file_browser_screen_create(g_context->indev);
-            }
-            break;
-        case SCREEN_TYPE_SETTINGS:
-            {
-                extern void settings_screen_create(lv_indev_t *indev);
-                settings_screen_create(g_context->indev);
-            }
-            break;
-        case SCREEN_TYPE_IMAGE_BROWSER:
-            {
-                // 图片浏览器返回时回到文件浏览器
-                extern void file_browser_screen_create(lv_indev_t *indev);
-                file_browser_screen_create(g_context->indev);
-            }
-            break;
-        default:
-            ESP_LOGE(TAG, "Unknown screen type: %d", prev_screen);
-            return false;
-    }
+    g_initialized = true;
+    ESP_LOGI(TAG, "Screen manager initialized");
 
     return true;
 }
 
-screen_type_t screen_manager_get_current_screen(void)
+void screen_manager_deinit(void)
 {
-    return g_current_screen;
+    if (!g_initialized) {
+        return;
+    }
+
+    // 隐藏当前屏幕
+    if (g_mgr.current_screen != NULL &&
+        g_mgr.current_screen->on_hide != NULL) {
+        g_mgr.current_screen->on_hide(g_mgr.current_screen);
+    }
+
+    memset(&g_mgr, 0, sizeof(g_mgr));
+    g_nav_stack_top = -1;
+    g_initialized = false;
+
+    ESP_LOGI(TAG, "Screen manager deinitialized");
+}
+
+bool screen_manager_register(screen_t *screen)
+{
+    if (screen == NULL) {
+        ESP_LOGE(TAG, "Cannot register NULL screen");
+        return false;
+    }
+
+    if (g_mgr.screen_count >= MAX_SCREENS) {
+        ESP_LOGE(TAG, "Max screens reached (%d)", MAX_SCREENS);
+        return false;
+    }
+
+    // 检查是否已注册
+    for (int i = 0; i < g_mgr.screen_count; i++) {
+        if (g_mgr.screens[i] == screen) {
+            ESP_LOGW(TAG, "Screen '%s' already registered", screen->name);
+            return true;
+        }
+    }
+
+    g_mgr.screens[g_mgr.screen_count++] = screen;
+    ESP_LOGI(TAG, "Registered screen '%s'", screen->name);
+
+    return true;
+}
+
+void screen_manager_unregister(screen_t *screen)
+{
+    if (screen == NULL) {
+        return;
+    }
+
+    // 从数组中移除
+    for (int i = 0; i < g_mgr.screen_count; i++) {
+        if (g_mgr.screens[i] == screen) {
+            // 移动后续元素
+            for (int j = i; j < g_mgr.screen_count - 1; j++) {
+                g_mgr.screens[j] = g_mgr.screens[j + 1];
+            }
+            g_mgr.screen_count--;
+            ESP_LOGI(TAG, "Unregistered screen '%s'", screen->name);
+            return;
+        }
+    }
+
+    ESP_LOGW(TAG, "Screen '%s' not found", screen->name);
+}
+
+bool screen_manager_show(const char *screen_name)
+{
+    screen_t *screen = screen_manager_find(screen_name);
+    if (screen == NULL) {
+        ESP_LOGE(TAG, "Screen '%s' not found", screen_name);
+        return false;
+    }
+
+    return screen_manager_show_screen(screen);
+}
+
+bool screen_manager_show_screen(screen_t *screen)
+{
+    if (screen == NULL) {
+        ESP_LOGE(TAG, "Cannot show NULL screen");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Showing screen '%s'", screen->name);
+
+    // 隐藏当前屏幕
+    if (g_mgr.current_screen != NULL &&
+        g_mgr.current_screen->on_hide != NULL) {
+        g_mgr.current_screen->on_hide(g_mgr.current_screen);
+    }
+
+    // 压入导航栈
+    push_nav_stack(screen);
+
+    // 切换到新屏幕
+    g_mgr.current_screen = screen;
+    screen->is_visible = true;
+    screen->needs_redraw = true;
+
+    // 调用 on_show 回调
+    if (screen->on_show != NULL) {
+        screen->on_show(screen);
+    }
+
+    // 绘制屏幕
+    screen_manager_draw();
+
+    // 刷新显示
+    display_refresh(REFRESH_MODE_FULL);
+
+    return true;
+}
+
+bool screen_manager_back(void)
+{
+    if (g_nav_stack_top <= 0) {
+        ESP_LOGI(TAG, "Already at first screen, cannot go back");
+        return false;
+    }
+
+    // 弹出当前屏幕
+    screen_t *current = pop_nav_stack();
+
+    // 隐藏当前屏幕
+    if (current != NULL && current->on_hide != NULL) {
+        current->on_hide(current);
+        current->is_visible = false;
+    }
+
+    // 获取上一个屏幕
+    screen_t *prev = g_nav_stack[g_nav_stack_top];
+    if (prev == NULL) {
+        ESP_LOGE(TAG, "Previous screen is NULL");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Going back to screen '%s'", prev->name);
+
+    // 切换到上一个屏幕
+    g_mgr.current_screen = prev;
+    prev->is_visible = true;
+    prev->needs_redraw = true;
+
+    // 调用 on_show 回调
+    if (prev->on_show != NULL) {
+        prev->on_show(prev);
+    }
+
+    // 绘制屏幕
+    screen_manager_draw();
+
+    // 刷新显示
+    display_refresh(REFRESH_MODE_FULL);
+
+    return true;
+}
+
+screen_t* screen_manager_get_current(void)
+{
+    return g_mgr.current_screen;
+}
+
+screen_t* screen_manager_find(const char *screen_name)
+{
+    if (screen_name == NULL) {
+        return NULL;
+    }
+
+    for (int i = 0; i < g_mgr.screen_count; i++) {
+        if (g_mgr.screens[i] != NULL &&
+            strcmp(g_mgr.screens[i]->name, screen_name) == 0) {
+            return g_mgr.screens[i];
+        }
+    }
+
+    return NULL;
+}
+
+void screen_manager_request_redraw(void)
+{
+    if (g_mgr.current_screen != NULL) {
+        g_mgr.current_screen->needs_redraw = true;
+    }
+}
+
+bool screen_manager_handle_event(button_t btn, button_event_t event)
+{
+    if (g_mgr.current_screen == NULL) {
+        return false;
+    }
+
+    if (g_mgr.current_screen->on_event != NULL) {
+        g_mgr.current_screen->on_event(g_mgr.current_screen, btn, event);
+        return true;  // 事件已处理
+    }
+
+    return false;  // 事件未处理
+}
+
+void screen_manager_draw(void)
+{
+    if (g_mgr.current_screen == NULL) {
+        return;
+    }
+
+    if (g_mgr.current_screen->needs_redraw &&
+        g_mgr.current_screen->on_draw != NULL) {
+        g_mgr.current_screen->on_draw(g_mgr.current_screen);
+        g_mgr.current_screen->needs_redraw = false;
+    }
+}
+
+const screen_manager_t* screen_manager_get_state(void)
+{
+    return &g_mgr;
 }
 
 screen_context_t* screen_manager_get_context(void)
 {
-    return g_context;
+    return g_mgr.context;
+}
+
+// 兼容旧 API 的包装函数
+
+void screen_manager_show_index(void)
+{
+    screen_manager_show("home");
+}
+
+void screen_manager_show_file_browser(void)
+{
+    screen_manager_show("file_browser");
+}
+
+void screen_manager_show_settings(void)
+{
+    screen_manager_show("settings");
+}
+
+void screen_manager_show_reader(const char *file_path)
+{
+    screen_t *screen = screen_manager_find("reader");
+    if (screen != NULL) {
+        // 保存文件路径到屏幕的用户数据
+        screen->user_data = (void*)file_path;
+        screen_manager_show_screen(screen);
+    }
+}
+
+void screen_manager_show_image_browser(const char *directory)
+{
+    screen_t *screen = screen_manager_find("image_viewer");
+    if (screen != NULL) {
+        // 保存目录路径到屏幕的用户数据
+        screen->user_data = (void*)directory;
+        screen_manager_show_screen(screen);
+    }
+}
+
+bool screen_manager_go_back(void)
+{
+    return screen_manager_back();
 }

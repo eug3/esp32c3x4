@@ -263,7 +263,7 @@ parameter:
     Color : Painted colors
 ******************************************************************************/
 void Paint_Clear(UWORD Color)
-{	
+{
 	if(Paint.Scale == 2) {
 		for (UWORD Y = 0; Y < Paint.HeightByte; Y++) {
 			for (UWORD X = 0; X < Paint.WidthByte; X++ ) {//8 pixel =  1 byte

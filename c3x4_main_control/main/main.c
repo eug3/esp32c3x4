@@ -39,10 +39,16 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_cali.h"
-#include "lvgl_driver.h"  // LVGL驱动适配层
-#include "ui/screen_manager.h"  // 屏幕管理器
-#include "ui/font_manager.h"  // 字体管理器
-#include "version.h"       // 自动生成的版本信息
+#include "ui/display_engine.h"      // 显示引擎
+#include "ui/input_handler.h"       // 输入处理
+#include "ui/font_renderer.h"       // 字体渲染器
+#include "ui/screen_manager.h"      // 屏幕管理器
+#include "ui/home_screen.h"         // 首页屏幕
+#include "ui/file_browser_screen.h" // 文件浏览器
+#include "ui/reader_screen_simple.h"// 阅读器屏幕
+#include "ui/settings_screen_simple.h"// 设置屏幕
+#include "ui/image_viewer_screen.h" // 图片查看器
+#include "version.h"                // 自动生成的版本信息
 
 // ============================================================================
 // Xteink X4 引脚定义 - 参考 examples/xteink-x4-sample
@@ -66,7 +72,7 @@
 #define BTN_VOLUME_DOWN_VAL     3      // Volume Down按钮ADC值
 #define BTN_VOLUME_UP_VAL       2205   // Volume Up按钮ADC值
 
-// 按钮枚举定义在 lvgl_driver.h 中
+// 按钮枚举定义在 input_handler.h 中
 
 // 电源按钮时间定义
 #define POWER_BUTTON_WAKEUP_MS    1000  // 从睡眠唤醒需要按下时间
@@ -178,7 +184,7 @@ static const char* get_button_name(button_t btn) {
 }
 
 // 读取当前按下的按钮 (ADC电阻分压方案) - ESP-IDF 6.1
-// 注意：此函数被lvgl_driver.c调用，所以不能是static
+// 注意：此函数被外部调用，所以不是 static
 button_t get_pressed_button(void) {
     int btn1_adc, btn2_adc;
     int btn1 = 0, btn2 = 0;
@@ -1109,80 +1115,73 @@ void app_main(void)
         ESP_LOGW("MAIN", "File browser and SD-related features will be unavailable");
     }
 
-    // Initialize font manager (after SD card is ready)
-    ESP_LOGI("MAIN", "Initializing font manager...");
-    if (font_manager_init()) {
-        font_manager_load_selection();
-        ESP_LOGI("MAIN", "Font manager initialized, loaded %d font(s)", font_manager_get_font_count());
-    } else {
-        ESP_LOGW("MAIN", "Font manager initialization failed, using default font");
+    // TODO: Font manager needs to be rewritten without LVGL dependency
+    // For now, skip font manager initialization
+    ESP_LOGI("MAIN", "Skipping font manager initialization (needs LVGL-free implementation)");
+
+    // ============================================================================
+    // 手绘 UI GUI 初始化（无 LVGL）
+    // ============================================================================
+    ESP_LOGI("MAIN", "Initializing Hand-drawn UI system...");
+
+    // 1. 初始化显示引擎
+    display_config_t disp_config = {
+        .use_partial_refresh = true,
+        .auto_refresh = false,
+        .default_mode = REFRESH_MODE_PARTIAL
+    };
+    if (!display_engine_init(&disp_config)) {
+        ESP_LOGE("MAIN", "Failed to initialize display engine");
+        return;
     }
 
-    // ============================================================================
-    // LVGL GUI 初始化
-    // ============================================================================
-    ESP_LOGI("MAIN", "Initializing LVGL GUI system...");
+    // 2. 初始化输入处理
+    input_config_t input_config = {
+        .enable_debounce = true,
+        .enable_long_press = true,
+        .enable_repeat = true,
+        .debounce_ms = 50,
+        .long_press_ms = 1000,
+        .repeat_delay_ms = 300,
+        .repeat_interval_ms = 150
+    };
+    if (!input_handler_init(&input_config)) {
+        ESP_LOGE("MAIN", "Failed to initialize input handler");
+        return;
+    }
 
-    // 1. 初始化 LVGL 显示驱动（framebuffer 在 lvgl_driver.c 中静态分配）
-    lv_display_t *disp = lvgl_display_init();
+    // 3. 初始化字体渲染器
+    if (!font_renderer_init()) {
+        ESP_LOGW("MAIN", "Font renderer initialization failed, using default font");
+    }
 
-    // 2. 初始化 LVGL 输入设备（按键）
-    lv_indev_t *indev = lvgl_input_init();
-    (void)indev;
-
-    // 3. 初始化 LVGL 文件系统驱动（支持通过 S:/ 盘符访问 SD 卡）
-    lvgl_fs_init();
-
-    // 4. 创建 LVGL tick 任务（10ms tick）
-    // 降低优先级到 3，避免阻塞 IDLE 任务
-    xTaskCreate(lvgl_tick_task, "lvgl_tick", 2048, NULL, 3, NULL);
-
-    // 5. 初始化屏幕管理器
-    ESP_LOGI("LVGL", "Initializing screen manager...");
+    // 4. 初始化屏幕管理器
+    ESP_LOGI("MAIN", "Initializing screen manager...");
     static screen_context_t screen_ctx;
     screen_ctx.battery_mv = read_battery_voltage_mv();
     screen_ctx.battery_pct = read_battery_percentage();
     screen_ctx.charging = is_charging();
     screen_ctx.version_str = VERSION_FULL;
-    screen_ctx.indev = indev;
     screen_ctx.read_battery_voltage_mv = read_battery_voltage_mv;
     screen_ctx.read_battery_percentage = read_battery_percentage;
     screen_ctx.is_charging = is_charging;
     screen_manager_init(&screen_ctx);
 
-    // 5. 创建首页
-    ESP_LOGI("LVGL", "Creating index screen with system info...");
+    // 5. 注册所有屏幕
+    screen_manager_register(home_screen_get_instance());
+    screen_manager_register(file_browser_screen_get_instance());
+    screen_manager_register(reader_screen_get_instance());
+    screen_manager_register(settings_screen_get_instance());
+    screen_manager_register(image_viewer_screen_get_instance());
+
+    // 6. 显示首页
+    ESP_LOGI("MAIN", "Showing home screen...");
     screen_manager_show_index();
 
-    // 6. 手动刷新模式：在启动 LVGL timer 任务之前，先在当前线程渲染一次。
-    // 重要：使用 lvgl_trigger_render() 而不是直接调用 lv_timer_handler()
-    ESP_LOGI("LVGL", "Rendering UI (manual refresh mode) before starting LVGL timer task...");
-    for (int i = 0; i < 6; i++) {
-        lvgl_trigger_render(disp);  // 使用手动刷新模式
-        vTaskDelay(30 / portTICK_PERIOD_MS);
-    }
-
-    // 7. 刷新EPD显示（异步，非阻塞）
-    ESP_LOGI("LVGL", "Refreshing EPD with welcome screen (async)...");
-    lvgl_display_refresh();
-
-    // 8. 等待EPD刷新完成（异步刷新在后台进行）
-    ESP_LOGI("LVGL", "EPD refresh started in background, continuing initialization...");
-    vTaskDelay(500 / portTICK_PERIOD_MS);  // 短暂等待确保刷新任务已启动
-
-    // 9. 创建 LVGL 定时器任务（手动刷新模式：不自动调用 lv_timer_handler）
-    // 在手动刷新模式下，UI 更新后需要调用 lvgl_trigger_render() 触发渲染
-    // 注意：
-    // - 文件浏览器等界面会触发 LVGL 的 image/alpha 混合绘制路径，栈占用明显增大
-    // - JPEG 解码器 (TJPGD) 需要额外的栈空间进行解码
-    // - ESP32-C3 上 8192 已经不够，需要增加到 16KB
-    // - 优先级设为 1 (仅高于 idle=0)，避免饿死 idle 任务导致看门狗超时
-    xTaskCreate(lvgl_timer_task, "lvgl_timer", 16384, NULL, 1, NULL);
-
-    ESP_LOGI("MAIN", "LVGL GUI initialized successfully! (Manual refresh mode for EPD)");
+    ESP_LOGI("MAIN", "Hand-drawn UI initialized successfully!");
     ESP_LOGI("MAIN", "Use UP/DOWN buttons to navigate, CONFIRM to select");
 
-    ESP_LOGI("MAIN", "System initialized. LVGL is handling UI events.");
+    ESP_LOGI("MAIN", "System initialized. Hand-drawn UI is ready.");
     ESP_LOGI("MAIN", "Main task ending, FreeRTOS tasks continue running...");
 }
 
