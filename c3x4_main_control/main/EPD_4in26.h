@@ -71,4 +71,14 @@ void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, uint32_t fb_stride,
 void EPD_4in26_Display_Part_Stream_Fast(UBYTE *full_framebuffer, uint32_t fb_stride,
                                         UWORD x, UWORD y, UWORD w, UWORD h);
 
+// 波形 LUT 控制函数（新增）
+// 手动读取并返回当前 EPD 温度传感器值（摄氏度）
+int EPD_4in26_GetTemperature(void);
+
+// 手动加载温度补偿的波形 LUT（根据当前温度自动选择）
+void EPD_4in26_Load_Temperature_LUT(void);
+
+// 手动加载快刷波形 LUT
+void EPD_4in26_Load_Fast_LUT(void);
+
 #endif

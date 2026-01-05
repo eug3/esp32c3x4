@@ -8,6 +8,7 @@
 * | Date        :   2024-12-26
 ******************************************************************************/
 #include "DEV_Config.h"
+#include <string.h>
 
 static spi_device_handle_t spi_handle;
 static bool spi_bus_initialized = false;  // 跟踪SPI总线是否已初始化
@@ -40,6 +41,18 @@ void DEV_SPI_Write_nByte(uint8_t *pData, uint32_t Len) {
         .tx_buffer = pData,
     };
     spi_device_transmit(spi_handle, &trans);
+}
+
+UBYTE DEV_SPI_ReadByte(void) {
+    spi_transaction_t trans;
+    memset(&trans, 0, sizeof(trans));
+    trans.length = 8;
+    trans.flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA;
+    trans.tx_data[0] = 0x00;  // Dummy byte to clock in data
+
+    spi_device_transmit(spi_handle, &trans);
+
+    return trans.rx_data[0];
 }
 
 /**

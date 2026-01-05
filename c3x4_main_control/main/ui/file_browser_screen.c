@@ -376,12 +376,13 @@ static void open_selected_file(void)
             if (strcasecmp(ext, ".txt") == 0 || strcasecmp(ext, ".md") == 0) {
                 // 文本文件 - 使用阅读器打开
                 screen_manager_show_reader(full_path);
+            } else if (strcasecmp(ext, ".epub") == 0) {
+                // EPUB 电子书 - 使用阅读器打开
+                screen_manager_show_reader(full_path);
             } else if (strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".png") == 0 ||
                        strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0) {
                 // 图片文件 - 使用图片浏览器打开
-                char dir_path[256];
-                strncpy(dir_path, s_browser_state.current_path, sizeof(dir_path) - 1);
-                screen_manager_show_image_browser(dir_path);
+                screen_manager_show_image_browser(full_path);
             } else {
                 // 其他文件类型 - 尝试用阅读器打开（可能是二进制或文本）
                 ESP_LOGI(TAG, "Opening file with reader (may not be supported): %s", full_path);
@@ -488,11 +489,12 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
                 display_clear_region(region_x, new_y, region_w, region_h, COLOR_WHITE);
                 draw_single_file(new_selection, &s_browser_state.files[file_idx_new], true);
 
-                // 一次性刷新覆盖新旧焦点的并集区域
+                // 一次性刷新覆盖新旧焦点的并集区域，使用标准局刷模式
+                // 集成波形 LUT 以获得更好的显示效果和温度补偿
                 int refresh_y = old_y < new_y ? old_y : new_y;
                 int refresh_bottom = (old_y > new_y ? old_y : new_y) + region_h;
                 int refresh_h = refresh_bottom - refresh_y;
-                display_refresh_region(region_x, refresh_y, region_w, refresh_h, REFRESH_MODE_PARTIAL_FAST);
+                display_refresh_region(region_x, refresh_y, region_w, refresh_h, REFRESH_MODE_PARTIAL);
 
                 ESP_LOGI(TAG, "Focus update complete (partial refresh: y=%d h=%d)", refresh_y, refresh_h);
             }
@@ -531,11 +533,12 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
                 display_clear_region(region_x, new_y, region_w, region_h, COLOR_WHITE);
                 draw_single_file(new_selection, &s_browser_state.files[file_idx_new], true);
 
-                // 一次性刷新覆盖新旧焦点的并集区域
+                // 一次性刷新覆盖新旧焦点的并集区域，使用标准局刷模式
+                // 集成波形 LUT 以获得更好的显示效果和温度补偿
                 int refresh_y = old_y < new_y ? old_y : new_y;
                 int refresh_bottom = (old_y > new_y ? old_y : new_y) + region_h;
                 int refresh_h = refresh_bottom - refresh_y;
-                display_refresh_region(region_x, refresh_y, region_w, refresh_h, REFRESH_MODE_PARTIAL_FAST);
+                display_refresh_region(region_x, refresh_y, region_w, refresh_h, REFRESH_MODE_PARTIAL);
 
                 ESP_LOGI(TAG, "Focus update complete (partial refresh: y=%d h=%d)", refresh_y, refresh_h);
             }

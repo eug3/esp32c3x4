@@ -41,6 +41,21 @@ idf_component_register(SRCS
                        "ui/xt_eink_font.c"
                        "ui/xt_eink_font_impl.c"
 
+                       # JPEG decoder and helper
+                       "lib/tjpgd/tjpgd.c"
+                       "ui/jpeg_helper.c"
+                       "ui/bmp_helper.c"
+                       "ui/png_helper.cpp"
+
+                       # PNG decoder and zlib (for PNG support)
+                       "lib/pngdec/adler32.c"
+                       "lib/pngdec/crc32.c"
+                       "lib/pngdec/infback.c"
+                       "lib/pngdec/inffast.c"
+                       "lib/pngdec/inflate.c"
+                       "lib/pngdec/inftrees.c"
+                       "lib/pngdec/PNGdec.cpp"
+                       "lib/pngdec/zutil.c"
 
                        # EPUB/TXT helpers (used by file browser/reader)
                        "ui/epub_parser.c"
@@ -51,7 +66,12 @@ idf_component_register(SRCS
 
                        ${EPUB_PARSER_SOURCES}
                        PRIV_REQUIRES spi_flash esp_driver_gpio esp_driver_spi driver esp_wifi nvs_flash fatfs littlefs esp_adc esp_timer
-                       INCLUDE_DIRS "." "Fonts" "ui")
+                       INCLUDE_DIRS "." "Fonts" "ui" "lib/tjpgd" "lib/pngdec")
 
 # Disable type-limits warning for GUI_Paint.c
 set_source_files_properties(GUI_Paint.c PROPERTIES COMPILE_FLAGS "-Wno-type-limits")
+
+# Disable warnings for PNGdec zlib files
+set_source_files_properties(lib/pngdec/infback.c PROPERTIES COMPILE_FLAGS "-Wno-implicit-fallthrough")
+set_source_files_properties(lib/pngdec/inflate.c PROPERTIES COMPILE_FLAGS "-Wno-implicit-fallthrough")
+set_source_files_properties(lib/pngdec/zutil.c PROPERTIES COMPILE_FLAGS "-Wno-old-style-definition -Wno-error=old-style-definition")

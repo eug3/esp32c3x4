@@ -345,12 +345,12 @@ void screen_manager_show_reader(const char *file_path)
     }
 }
 
-void screen_manager_show_image_browser(const char *directory)
+void screen_manager_show_image_browser(const char *file_path)
 {
     screen_t *screen = screen_manager_find("image_viewer");
     if (screen != NULL) {
-        // 保存目录路径到屏幕的用户数据
-        screen->user_data = (void*)directory;
+        // 保存完整文件路径到屏幕的用户数据
+        screen->user_data = (void*)file_path;
         screen_manager_show_screen(screen);
     }
 }

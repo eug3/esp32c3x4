@@ -35,6 +35,8 @@
 #include "home_screen.h"
 #include "settings_screen_simple.h"
 #include "file_browser_screen.h"
+#include "image_viewer_screen.h"
+#include "reader_screen_simple.h"
 #include "input_handler.h"
 
 // ============================================================================
@@ -601,9 +603,13 @@ void app_main(void)
     home_screen_init();
     settings_screen_simple_init();
     file_browser_screen_init();
+    image_viewer_screen_init();  // 初始化图片浏览器
+    reader_screen_init();  // 初始化阅读器
     screen_manager_register(home_screen_get_instance());
     screen_manager_register(settings_screen_simple_get_instance());
     screen_manager_register(file_browser_screen_get_instance());
+    screen_manager_register(image_viewer_screen_get_instance());  // 注册图片浏览器
+    screen_manager_register(reader_screen_get_instance());  // 注册阅读器
 
     // 显示主屏幕
     ESP_LOGI("MAIN", "Showing home screen...");

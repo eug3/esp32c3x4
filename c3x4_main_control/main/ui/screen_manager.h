@@ -190,10 +190,10 @@ void screen_manager_show_settings(void);
 void screen_manager_show_reader(const char *file_path);
 
 /**
- * @brief 显示图片浏览器屏幕（兼容旧 API）
- * @param directory 要浏览的图片目录
+ * @brief 显示图片浏览器屏幕
+ * @param file_path 要打开的图片文件完整路径（会自动扫描目录并定位到此文件）
  */
-void screen_manager_show_image_browser(const char *directory);
+void screen_manager_show_image_browser(const char *file_path);
 
 /**
  * @brief 返回上一页（兼容旧 API）

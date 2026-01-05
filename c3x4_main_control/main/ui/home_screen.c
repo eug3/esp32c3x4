@@ -526,8 +526,9 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
         int refresh_y = old_y < new_y ? old_y : new_y;
         int refresh_bottom = (old_y > new_y ? old_y : new_y) + region_h;
         int refresh_h = refresh_bottom - refresh_y;
-        // 焦点切换优先用“快刷局刷”，减少可见的多阶段波形效果（更像动画）。
-        display_refresh_region(region_x, refresh_y, region_w, refresh_h, REFRESH_MODE_PARTIAL_FAST);
+        // 焦点切换使用标准局刷模式，集成波形 LUT 以获得更好的显示效果
+        // 波形 LUT 会根据当前温度自动选择，提供更准确的像素转换
+        display_refresh_region(region_x, refresh_y, region_w, refresh_h, REFRESH_MODE_PARTIAL);
 
         ESP_LOGI(TAG, "Focus update complete (1 partial refresh: y=%d h=%d)", refresh_y, refresh_h);
     }
