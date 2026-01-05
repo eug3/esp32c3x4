@@ -664,6 +664,47 @@ void EPD_4in26_Clear_Fast(void)
 }
 
 /******************************************************************************
+function :	Quick refresh - sends the image buffer and displays
+parameter:	Image - image data buffer
+description:
+	快速全屏刷新，使用 0xC7 刷新序列，比标准全刷更快。
+	同时写入 0x24 和 0x26，为后续局部刷新建立正确的对比基准。
+******************************************************************************/
+void EPD_4in26_Display_Fast(UBYTE *Image)
+{
+	UWORD i;
+	UWORD height = EPD_4in26_HEIGHT;
+	UWORD width = EPD_4in26_WIDTH/8;
+
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: starting...");
+
+	// 重新设置全屏窗口（防止之前的局部刷新改变了窗口范围）
+	EPD_4in26_SetWindows(0, EPD_4in26_HEIGHT-1, EPD_4in26_WIDTH-1, 0);
+	EPD_4in26_SetCursor(0, 0);
+
+	// 温度补偿
+	EPD_4in26_SendCommand(0x1A);
+	EPD_4in26_SendData(0x5A);
+
+	// 写入当前图像缓冲区 (0x24)
+	EPD_4in26_SendCommand(0x24);
+	for(i=0; i<height; i++)
+	{
+        EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
+	}
+
+	// 同时写入上一帧缓冲区 (0x26)
+	EPD_4in26_SendCommand(0x26);
+	for(i=0; i<height; i++)
+	{
+        EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
+	}
+
+	EPD_4in26_TurnOnDisplay_Fast();
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: complete!");
+}
+
+/******************************************************************************
 function :	Sends the image buffer in RAM to e-Paper and displays
 parameter:
 ******************************************************************************/

@@ -25,9 +25,11 @@ static display_config_t s_config = {0};
 static bool s_initialized = false;
 static SemaphoreHandle_t s_mutex = NULL;
 static dirty_region_t s_dirty_region = {0};
+static int s_partial_refresh_count = 0;  // 局刷计数器
 
 // 帧缓冲管理
 #define FRAMEBUFFER_SIZE (sizeof(s_framebuffer))
+#define MAX_PARTIAL_REFRESH_COUNT 5  // 最多连续 5 次局刷，然后强制全刷
 
 /**********************
  *  STATIC PROTOTYPES
@@ -538,6 +540,8 @@ void display_refresh(refresh_mode_t mode)
     switch (mode) {
         case REFRESH_MODE_FULL:
             EPD_4in26_Display(s_framebuffer);
+            s_partial_refresh_count = 0;  // 全刷重置计数器
+            ESP_LOGI(TAG, "Full refresh, reset partial count to 0");
             break;
         case REFRESH_MODE_PARTIAL:
         default:
@@ -563,8 +567,31 @@ void display_refresh(refresh_mode_t mode)
             int phys_x, phys_y, phys_w, phys_h;
             convert_logical_to_physical_region(x, y, width, height, &phys_x, &phys_y, &phys_w, &phys_h);
 
+            // 调试：打印脏区前几字节
+            int phys_x_aligned = phys_x - (phys_x % 8);
+            int phys_x_bytes = phys_x_aligned / 8;
+            int phys_w_bytes = (phys_w + (phys_x % 8) + 7) / 8;
+
+            ESP_LOGI(TAG, "Dirty region data (first 4 rows):");
+            for (int dbg_row = 0; dbg_row < 4 && dbg_row < phys_h; dbg_row++) {
+                UBYTE *row_ptr = s_framebuffer + (phys_y + dbg_row) * 100 + phys_x_bytes;
+                ESP_LOGI(TAG, "  Row %d: %02X %02X %02X %02X",
+                         dbg_row, row_ptr[0], row_ptr[1], row_ptr[2], row_ptr[3]);
+            }
+
             // 标准局刷模式：只写 0x24，依赖 0x26 中的旧数据作为对比基准
             EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
+
+            // 局刷计数器递增
+            s_partial_refresh_count++;
+            ESP_LOGI(TAG, "Partial refresh count: %d/%d", s_partial_refresh_count, MAX_PARTIAL_REFRESH_COUNT);
+
+            // 达到最大次数时强制快刷，清除残影
+            if (s_partial_refresh_count >= MAX_PARTIAL_REFRESH_COUNT) {
+                ESP_LOGI(TAG, "Reached max partial refresh count, forcing fast refresh");
+                EPD_4in26_Display_Fast(s_framebuffer);  // 使用快刷代替全刷
+                s_partial_refresh_count = 0;
+            }
             break;
     }
 
