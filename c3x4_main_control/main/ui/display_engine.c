@@ -29,7 +29,7 @@ static int s_partial_refresh_count = 0;  // 局刷计数器
 
 // 帧缓冲管理
 #define FRAMEBUFFER_SIZE (sizeof(s_framebuffer))
-#define MAX_PARTIAL_REFRESH_COUNT 5  // 最多连续 5 次局刷，然后强制全刷
+#define MAX_PARTIAL_REFRESH_COUNT 1  // 最多连续 5 次局刷，然后强制全刷
 
 /**********************
  *  STATIC PROTOTYPES

@@ -686,6 +686,12 @@ void EPD_4in26_Display_Fast(UBYTE *Image)
 	EPD_4in26_SendCommand(0x1A);
 	EPD_4in26_SendData(0x5A);
 
+		// 同时写入上一帧缓冲区 (0x26)
+	// EPD_4in26_SendCommand(0x26);
+	// for(i=0; i<height; i++)
+	// {
+    //     EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
+	// }
 	// 写入当前图像缓冲区 (0x24)
 	EPD_4in26_SendCommand(0x24);
 	for(i=0; i<height; i++)
@@ -693,12 +699,7 @@ void EPD_4in26_Display_Fast(UBYTE *Image)
         EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
 	}
 
-	// 同时写入上一帧缓冲区 (0x26)
-	EPD_4in26_SendCommand(0x26);
-	for(i=0; i<height; i++)
-	{
-        EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
-	}
+
 
 	EPD_4in26_TurnOnDisplay_Fast();
 	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: complete!");
@@ -874,6 +875,7 @@ static void EPD_4in26_Display_Part_Stream_Impl(UBYTE *full_framebuffer, uint32_t
 	// 7. 触发局部刷新显示（参考 Arduino EPD_Part_Update）
 	// ============================================
 	EPD_4in26_TurnOnDisplay_Part();
+	//EPD_4in26_TurnOnDisplay_Fast();
 }
 
 void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, uint32_t fb_stride,
