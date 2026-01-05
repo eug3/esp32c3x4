@@ -263,6 +263,37 @@ static void EPD_4in26_SendRegion_FromFramebuffer(UBYTE *full_framebuffer,
 									 UWORD y,
 									 UWORD h_actual)
 {
+	// 边界验证：确保framebuffer访问不越界
+	const UWORD fb_width_bytes = EPD_4in26_WIDTH / 8;  // 800/8 = 100字节
+	const UWORD fb_height = EPD_4in26_HEIGHT;          // 480行
+	
+	if (fb_stride != fb_width_bytes) {
+		ESP_LOGE("EPD_FB", "Invalid framebuffer stride: %lu (expected %u)", 
+		         (unsigned long)fb_stride, fb_width_bytes);
+		return;
+	}
+	
+	if (y >= fb_height) {
+		ESP_LOGE("EPD_FB", "Y start position %u exceeds framebuffer height %u", y, fb_height);
+		return;
+	}
+	
+	if (y + h_actual > fb_height) {
+		ESP_LOGW("EPD_FB", "Region height overflow: y=%u + h=%u > %u, clamping",
+		         y, h_actual, fb_height);
+		h_actual = fb_height - y;
+	}
+	
+	if (x_offset_bytes + w_bytes > fb_stride) {
+		ESP_LOGE("EPD_FB", "Width overflow: x_offset=%u + w_bytes=%u > stride=%lu",
+		         x_offset_bytes, w_bytes, (unsigned long)fb_stride);
+		// 限制宽度以防止越界
+		if (x_offset_bytes >= fb_stride) {
+			return;
+		}
+		w_bytes = fb_stride - x_offset_bytes;
+	}
+	
 	// 优先尝试“整块发送”：
 	// - 若窗口是全宽字节（x=0 且 w_bytes==stride），则 framebuffer 中该区域是连续内存，可直接一次性发送。
 	// - 否则，尝试分配临时缓冲，把每行的窗口数据拼成连续内存，再一次性发送。
@@ -582,6 +613,38 @@ parameter:
 ******************************************************************************/
 static void EPD_4in26_SetWindows(UWORD Xstart, UWORD Ystart, UWORD Xend, UWORD Yend)
 {
+    // 边界验证：确保窗口坐标不超过屏幕尺寸
+    if (Xstart >= EPD_4in26_WIDTH) {
+        ESP_LOGE("EPD", "SetWindows: Xstart=%u exceeds width %u", Xstart, EPD_4in26_WIDTH);
+        Xstart = EPD_4in26_WIDTH - 1;
+    }
+    if (Xend >= EPD_4in26_WIDTH) {
+        ESP_LOGE("EPD", "SetWindows: Xend=%u exceeds width %u", Xend, EPD_4in26_WIDTH);
+        Xend = EPD_4in26_WIDTH - 1;
+    }
+    if (Ystart >= EPD_4in26_HEIGHT) {
+        ESP_LOGE("EPD", "SetWindows: Ystart=%u exceeds height %u", Ystart, EPD_4in26_HEIGHT);
+        Ystart = EPD_4in26_HEIGHT - 1;
+    }
+    if (Yend >= EPD_4in26_HEIGHT) {
+        ESP_LOGE("EPD", "SetWindows: Yend=%u exceeds height %u", Yend, EPD_4in26_HEIGHT);
+        Yend = EPD_4in26_HEIGHT - 1;
+    }
+    
+    // 确保起始坐标不大于结束坐标
+    if (Xstart > Xend) {
+        ESP_LOGW("EPD", "SetWindows: Xstart=%u > Xend=%u, swapping", Xstart, Xend);
+        UWORD temp = Xstart;
+        Xstart = Xend;
+        Xend = temp;
+    }
+    if (Ystart > Yend) {
+        ESP_LOGW("EPD", "SetWindows: Ystart=%u > Yend=%u, swapping", Ystart, Yend);
+        UWORD temp = Ystart;
+        Ystart = Yend;
+        Yend = temp;
+    }
+    
     EPD_4in26_SendCommand(0x44); // SET_RAM_X_ADDRESS_START_END_POSITION
     EPD_4in26_SendData(Xstart & 0xFF);
     EPD_4in26_SendData((Xstart>>8) & 0x03);
