@@ -268,8 +268,8 @@ static void EPD_4in26_SendRegion_FromFramebuffer(UBYTE *full_framebuffer,
 	const UWORD fb_height = EPD_4in26_HEIGHT;          // 480行
 	
 	if (fb_stride != fb_width_bytes) {
-		ESP_LOGE("EPD_FB", "Invalid framebuffer stride: %lu (expected %u)", 
-		         (unsigned long)fb_stride, fb_width_bytes);
+		ESP_LOGE("EPD_FB", "Invalid framebuffer stride: %u (expected %u)", 
+		         (unsigned)fb_stride, fb_width_bytes);
 		return;
 	}
 	
@@ -285,8 +285,8 @@ static void EPD_4in26_SendRegion_FromFramebuffer(UBYTE *full_framebuffer,
 	}
 	
 	if (x_offset_bytes + w_bytes > fb_stride) {
-		ESP_LOGE("EPD_FB", "Width overflow: x_offset=%u + w_bytes=%u > stride=%lu",
-		         x_offset_bytes, w_bytes, (unsigned long)fb_stride);
+		ESP_LOGE("EPD_FB", "Width overflow: x_offset=%u + w_bytes=%u > stride=%u",
+		         x_offset_bytes, w_bytes, (unsigned)fb_stride);
 		// 限制宽度以防止越界
 		if (x_offset_bytes >= fb_stride) {
 			return;

@@ -72,27 +72,32 @@ static void unlock_engine(void)
 static void expand_dirty_region(int x, int y, int width, int height)
 {
     // 边界验证：确保输入坐标和尺寸在有效范围内
+    // 步骤1: 处理负坐标并调整尺寸
     if (x < 0) {
         ESP_LOGW(TAG, "expand_dirty_region: x=%d < 0, clamping to 0", x);
-        width += x;  // 调整宽度
+        width += x;  // 调整宽度（x为负，所以是减少宽度）
         x = 0;
     }
     if (y < 0) {
         ESP_LOGW(TAG, "expand_dirty_region: y=%d < 0, clamping to 0", y);
-        height += y;  // 调整高度
+        height += y;  // 调整高度（y为负，所以是减少高度）
         y = 0;
     }
+    
+    // 步骤2: 验证调整后的尺寸是否仍然有效
     if (width <= 0 || height <= 0) {
         ESP_LOGW(TAG, "expand_dirty_region: invalid size w=%d, h=%d, ignoring", width, height);
         return;
     }
+    
+    // 步骤3: 验证起始坐标在屏幕内
     if (x >= SCREEN_WIDTH || y >= SCREEN_HEIGHT) {
         ESP_LOGW(TAG, "expand_dirty_region: x=%d, y=%d exceeds screen %dx%d, ignoring",
                  x, y, SCREEN_WIDTH, SCREEN_HEIGHT);
         return;
     }
     
-    // 限制在屏幕范围内
+    // 步骤4: 限制区域尺寸在屏幕范围内
     if (x + width > SCREEN_WIDTH) {
         int old_width = width;
         width = SCREEN_WIDTH - x;
