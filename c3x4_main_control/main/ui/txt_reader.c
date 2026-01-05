@@ -406,12 +406,33 @@ int txt_reader_get_total_pages(const txt_reader_t *reader, int chars_per_page) {
         return 0;
     }
 
-    // 估算总页数
-    long estimated_chars = reader->position.file_size;
+    // Estimate total pages based on encoding
+    long file_size = reader->position.file_size;
+    long estimated_chars;
+
+    if (reader->encoding == TXT_ENCODING_GB18030) {
+        // GB18030: Most Chinese characters are 2 bytes
+        // Assume 60% Chinese (2 bytes) + 40% ASCII/newlines (1 byte)
+        estimated_chars = file_size * 10 / 16;  // ~0.625 chars per byte
+    } else if (reader->encoding == TXT_ENCODING_UTF8) {
+        // UTF-8: Chinese characters are typically 3 bytes
+        // Assume 70% Chinese (3 bytes) + 30% ASCII/newlines (1 byte)
+        estimated_chars = file_size * 10 / 24;  // ~0.42 chars per byte
+    } else {
+        // ASCII: 1 byte per character
+        estimated_chars = file_size;
+    }
+
+    // Calculate pages
     int pages = (int)((estimated_chars + chars_per_page - 1) / chars_per_page);
 
-    // 考虑到换行和空白，适当增加一些余量
-    pages = (pages * 12) / 10;
+    // Ensure at least 1 page for non-empty files
+    if (pages == 0 && file_size > 0) {
+        pages = 1;
+    }
+
+    ESP_LOGD(TAG, "Estimated pages: %d (file_size=%ld, encoding=%d, chars_per_page=%d)",
+             pages, file_size, reader->encoding, chars_per_page);
 
     return pages;
 }

@@ -40,7 +40,7 @@ static struct {
     .epub_reader = {{0}},  // 嵌套结构体需要双重大括号
     .current_page = 0,
     .total_pages = 0,
-    .chars_per_page = 2000,  // 每页约2000字符
+    .chars_per_page = 600,  // 每页约600字符 (适合480x800屏幕)
     .is_loaded = false,
 };
 
