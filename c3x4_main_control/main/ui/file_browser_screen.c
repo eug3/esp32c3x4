@@ -135,9 +135,9 @@ static bool scan_directory(const char *path)
             bool is_dir = S_ISDIR(st.st_mode);
 
             if (is_dir) {
-                // 目录插入到前面
-                for (int j = dir_count; j > 0; j--) {
-                    s_browser_state.files[j] = s_browser_state.files[j - 1];
+                // 目录插入到前面（使用 memmove 安全移动，避免元素拷贝越界）
+                if (dir_count > 0 && dir_count < temp_count) {
+                    memmove(&s_browser_state.files[1], &s_browser_state.files[0], dir_count * sizeof(file_info_t));
                 }
                 strncpy(s_browser_state.files[0].name, file_names[i], sizeof(s_browser_state.files[0].name) - 1);
                 s_browser_state.files[0].name[sizeof(s_browser_state.files[0].name) - 1] = '\0';
@@ -468,12 +468,20 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
                 // 局部刷新：只重绘受影响的文件项
                 int start_y = 80;
                 int item_height = 50;
-                int region_x = 0;
-                int region_w = SCREEN_WIDTH;
+                int region_x = 20;  // 与文件项左边距一致
+                int region_w = SCREEN_WIDTH - 40;  // 与文件项宽度一致
                 int region_h = item_height;
 
                 int old_y = start_y + old_selection * item_height;
                 int new_y = start_y + new_selection * item_height;
+
+                // 计算并集区域
+                int refresh_y = old_y < new_y ? old_y : new_y;
+                int refresh_bottom = (old_y > new_y ? old_y : new_y) + region_h;
+                int refresh_h = refresh_bottom - refresh_y;
+
+                // 先清除脏区，避免脏区累积
+                display_clear_dirty();
 
                 // 计算文件索引
                 int file_idx_old = s_browser_state.current_page * s_browser_state.files_per_page + old_selection;
@@ -483,18 +491,16 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
                 ESP_LOGI(TAG, "Redrawing old item %d (deselected)", old_selection);
                 display_clear_region(region_x, old_y, region_w, region_h, COLOR_WHITE);
                 draw_single_file(old_selection, &s_browser_state.files[file_idx_old], false);
+                display_clear_dirty();  // 清除本次绘制的脏区
 
                 // 重绘新焦点（设置为选中状态）
                 ESP_LOGI(TAG, "Redrawing new item %d (selected)", new_selection);
                 display_clear_region(region_x, new_y, region_w, region_h, COLOR_WHITE);
                 draw_single_file(new_selection, &s_browser_state.files[file_idx_new], true);
 
-                // 一次性刷新覆盖新旧焦点的并集区域，使用标准局刷模式
-                // 集成波形 LUT 以获得更好的显示效果和温度补偿
-                int refresh_y = old_y < new_y ? old_y : new_y;
-                int refresh_bottom = (old_y > new_y ? old_y : new_y) + region_h;
-                int refresh_h = refresh_bottom - refresh_y;
-                display_refresh_region(region_x, refresh_y, region_w, refresh_h, REFRESH_MODE_PARTIAL);
+                // 标记脏区并刷新
+                display_mark_dirty(region_x, refresh_y, region_w, refresh_h);
+                display_refresh(REFRESH_MODE_PARTIAL);
 
                 ESP_LOGI(TAG, "Focus update complete (partial refresh: y=%d h=%d)", refresh_y, refresh_h);
             }
@@ -512,12 +518,20 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
                 // 局部刷新：只重绘受影响的文件项
                 int start_y = 80;
                 int item_height = 50;
-                int region_x = 0;
-                int region_w = SCREEN_WIDTH;
+                int region_x = 20;  // 与文件项左边距一致
+                int region_w = SCREEN_WIDTH - 40;  // 与文件项宽度一致
                 int region_h = item_height;
 
                 int old_y = start_y + old_selection * item_height;
                 int new_y = start_y + new_selection * item_height;
+
+                // 计算并集区域
+                int refresh_y = old_y < new_y ? old_y : new_y;
+                int refresh_bottom = (old_y > new_y ? old_y : new_y) + region_h;
+                int refresh_h = refresh_bottom - refresh_y;
+
+                // 先清除脏区，避免脏区累积
+                display_clear_dirty();
 
                 // 计算文件索引
                 int file_idx_old = s_browser_state.current_page * s_browser_state.files_per_page + old_selection;
@@ -527,18 +541,16 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
                 ESP_LOGI(TAG, "Redrawing old item %d (deselected)", old_selection);
                 display_clear_region(region_x, old_y, region_w, region_h, COLOR_WHITE);
                 draw_single_file(old_selection, &s_browser_state.files[file_idx_old], false);
+                display_clear_dirty();  // 清除本次绘制的脏区
 
                 // 重绘新焦点（设置为选中状态）
                 ESP_LOGI(TAG, "Redrawing new item %d (selected)", new_selection);
                 display_clear_region(region_x, new_y, region_w, region_h, COLOR_WHITE);
                 draw_single_file(new_selection, &s_browser_state.files[file_idx_new], true);
 
-                // 一次性刷新覆盖新旧焦点的并集区域，使用标准局刷模式
-                // 集成波形 LUT 以获得更好的显示效果和温度补偿
-                int refresh_y = old_y < new_y ? old_y : new_y;
-                int refresh_bottom = (old_y > new_y ? old_y : new_y) + region_h;
-                int refresh_h = refresh_bottom - refresh_y;
-                display_refresh_region(region_x, refresh_y, region_w, refresh_h, REFRESH_MODE_PARTIAL);
+                // 标记脏区并刷新
+                display_mark_dirty(region_x, refresh_y, region_w, refresh_h);
+                display_refresh(REFRESH_MODE_PARTIAL);
 
                 ESP_LOGI(TAG, "Focus update complete (partial refresh: y=%d h=%d)", refresh_y, refresh_h);
             }

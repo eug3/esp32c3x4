@@ -481,54 +481,41 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
         ESP_LOGI(TAG, "Focus changed: %d -> %d", old_selection, new_selection);
         s_menu_state.selected_item = new_selection;
 
-        // 计算菜单项区域（暂时扩大到整个菜单区域以便测试）
+        // 计算菜单项区域
         int menu_start_y = 100;
         int menu_item_height = 60;
-        
-        // 暂时使用更大的刷新区域来测试
+
         int region_x = 0;  // 从屏幕左边缘开始
         int region_w = SCREEN_WIDTH;  // 整个屏幕宽度
         int region_h = menu_item_height;  // 保持菜单项高度
-        
+
         // 旧焦点区域
         int old_y = menu_start_y + old_selection * menu_item_height;
-        
+
         // 新焦点区域
         int new_y = menu_start_y + new_selection * menu_item_height;
-        
-        // 重绘旧焦点（恢复为非选中状态）
-        ESP_LOGI(TAG, "Redrawing old item %d (deselected)", old_selection);
-        ESP_LOGI(TAG, "  Logical region: x=%d, y=%d, w=%d, h=%d", region_x, old_y, region_w, region_h);
-        
-        // 调试：检查framebuffer
-        uint8_t *fb = display_get_framebuffer();
-        ESP_LOGI(TAG, "  FB[1200]=%02X before clear", fb[1200]);
-        
-        // 先清除该区域为白色
-        display_clear_region(region_x, old_y, region_w, region_h, COLOR_WHITE);
-        ESP_LOGI(TAG, "  FB[1200]=%02X after clear", fb[1200]);
-        
-        // 然后绘制菜单项
-        draw_single_menu_item(old_selection, false);
-        ESP_LOGI(TAG, "  FB[1200]=%02X after draw", fb[1200]);
-        
-        // 不要在这里立刻局刷：连续两次局刷会显得像“动画/分步刷新”。
-        
-        // 重绘新焦点（设置为选中状态，颜色翻转）
-        ESP_LOGI(TAG, "Redrawing new item %d (selected, inverted)", new_selection);
-        ESP_LOGI(TAG, "  Logical region: x=%d, y=%d, w=%d, h=%d", region_x, new_y, region_w, region_h);
-        
-        // 先清除该区域为白色
-        display_clear_region(region_x, new_y, region_w, region_h, COLOR_WHITE);
-        // 然后绘制菜单项（黑底白字）
-        draw_single_menu_item(new_selection, true);
-        // 一次性刷新覆盖旧/新焦点的并集区域，减少分步刷新的观感
+
+        // 计算并集区域
         int refresh_y = old_y < new_y ? old_y : new_y;
         int refresh_bottom = (old_y > new_y ? old_y : new_y) + region_h;
         int refresh_h = refresh_bottom - refresh_y;
+
+        // 先清除并集区域的脏区标志，避免脏区累积
+        display_clear_dirty();
+
+        // 清除并重绘旧焦点区域（使用显示引擎API，脏区自动追踪）
+        display_clear_region(region_x, old_y, region_w, region_h, COLOR_WHITE);
+        draw_single_menu_item(old_selection, false);
+
+        // 清除并重绘新焦点区域
+        display_clear_region(region_x, new_y, region_w, region_h, COLOR_WHITE);
+        draw_single_menu_item(new_selection, true);
+
+        // 标记需要刷新的区域
+        display_mark_dirty(region_x, refresh_y, region_w, refresh_h);
+
         // 焦点切换使用标准局刷模式，集成波形 LUT 以获得更好的显示效果
-        // 波形 LUT 会根据当前温度自动选择，提供更准确的像素转换
-        display_refresh_region(region_x, refresh_y, region_w, refresh_h, REFRESH_MODE_PARTIAL);
+        display_refresh(REFRESH_MODE_PARTIAL);
 
         ESP_LOGI(TAG, "Focus update complete (1 partial refresh: y=%d h=%d)", refresh_y, refresh_h);
     }
