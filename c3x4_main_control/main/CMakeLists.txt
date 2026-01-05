@@ -63,6 +63,7 @@ idf_component_register(SRCS
                        "ui/epub_xml.c"
                        "ui/epub_zip.c"
                        "ui/txt_reader.c"
+                       "ui/gb18030_conv.c"
 
                        ${EPUB_PARSER_SOURCES}
                        PRIV_REQUIRES spi_flash esp_driver_gpio esp_driver_spi driver esp_wifi nvs_flash fatfs littlefs esp_adc esp_timer
