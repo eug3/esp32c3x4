@@ -164,13 +164,11 @@ int txt_reader_read_page(txt_reader_t *reader, char *text_buffer, size_t buffer_
         return -1;
     }
 
-    size_t bytes_read = 0;
-    int chars_read = 0;
-    bool in_newline = false;
-
+    size_t bytes_written = 0;
+    int chars_count = 0;  // UTF-8 character count
     text_buffer[0] = '\0';
 
-    while (chars_read < chars_per_page && bytes_read < buffer_size - 1) {
+    while (chars_count < chars_per_page && bytes_written < buffer_size - 4) {
         int c = fgetc(reader->file);
 
         if (c == EOF) {
@@ -179,49 +177,93 @@ int txt_reader_read_page(txt_reader_t *reader, char *text_buffer, size_t buffer_
 
         reader->position.file_position++;
 
-        // 处理换行符
+        // Handle CR (carriage return) - skip it
         if (c == '\r') {
-            continue; // 跳过 CR
+            continue;
         }
 
+        // Handle LF (line feed) - keep it
         if (c == '\n') {
-            text_buffer[bytes_read++] = '\n';
-            text_buffer[bytes_read] = '\0';
-            chars_read++;
-            in_newline = true;
+            text_buffer[bytes_written++] = '\n';
+            text_buffer[bytes_written] = '\0';
+            chars_count++;
             continue;
         }
 
-        // 如果换行后第一个字符是空白符，可能是段落缩进
-        if (in_newline && isspace(c)) {
-            // 保留一个空格作为缩进
-            text_buffer[bytes_read++] = ' ';
-            bytes_read = (bytes_read < buffer_size) ? bytes_read : buffer_size - 1;
-            text_buffer[bytes_read] = '\0';
-            chars_read++;
-            in_newline = false;
+        // UTF-8 character handling
+        if (c < 0x80) {
+            // Single-byte ASCII character
+            text_buffer[bytes_written++] = (char)c;
+            text_buffer[bytes_written] = '\0';
+            chars_count++;
+        } else {
+            // Multi-byte UTF-8 character
+            unsigned char first_byte = (unsigned char)c;
+            int utf8_len = 0;
 
-            // 跳过后续空白符
-            while (isspace(c = fgetc(reader->file)) && c != '\n' && c != '\r') {
-                reader->position.file_position++;
+            // Determine UTF-8 character length
+            if ((first_byte & 0xE0) == 0xC0) {
+                utf8_len = 2;  // 2-byte character
+            } else if ((first_byte & 0xF0) == 0xE0) {
+                utf8_len = 3;  // 3-byte character (most Chinese chars)
+            } else if ((first_byte & 0xF8) == 0xF0) {
+                utf8_len = 4;  // 4-byte character
+            } else {
+                // Invalid UTF-8 start byte, skip it
+                ESP_LOGD(TAG, "Invalid UTF-8 start byte: 0x%02X", first_byte);
+                continue;
             }
-            ungetc(c, reader->file);
-            reader->position.file_position--;
-            continue;
-        }
 
-        in_newline = false;
-        text_buffer[bytes_read++] = (char)c;
-        text_buffer[bytes_read] = '\0';
-        chars_read++;
+            // Check if we have enough space in buffer
+            if (bytes_written + utf8_len >= buffer_size - 1) {
+                // Not enough space, put the byte back and stop
+                ungetc(c, reader->file);
+                reader->position.file_position--;
+                break;
+            }
+
+            // Write first byte
+            text_buffer[bytes_written++] = (char)c;
+
+            // Read and write continuation bytes
+            bool valid_utf8 = true;
+            for (int i = 1; i < utf8_len; i++) {
+                c = fgetc(reader->file);
+                if (c == EOF) {
+                    valid_utf8 = false;
+                    break;
+                }
+
+                unsigned char cont_byte = (unsigned char)c;
+                // Check if it's a valid continuation byte (10xxxxxx)
+                if ((cont_byte & 0xC0) != 0x80) {
+                    // Invalid continuation byte
+                    ESP_LOGD(TAG, "Invalid UTF-8 continuation byte: 0x%02X", cont_byte);
+                    ungetc(c, reader->file);
+                    valid_utf8 = false;
+                    break;
+                }
+
+                reader->position.file_position++;
+                text_buffer[bytes_written++] = (char)c;
+            }
+
+            if (valid_utf8) {
+                text_buffer[bytes_written] = '\0';
+                chars_count++;
+            } else {
+                // Invalid UTF-8 sequence, but keep what we read
+                text_buffer[bytes_written] = '\0';
+            }
+        }
     }
 
     reader->position.page_number++;
 
-    ESP_LOGD(TAG, "Read page %d: %d chars, pos=%ld",
-             reader->position.page_number, chars_read, reader->position.file_position);
+    ESP_LOGD(TAG, "Read page %d: %d chars (%zu bytes), pos=%ld",
+             reader->position.page_number, chars_count, bytes_written, reader->position.file_position);
 
-    return chars_read;
+    return chars_count;
 }
 
 bool txt_reader_goto_page(txt_reader_t *reader, int page_number) {

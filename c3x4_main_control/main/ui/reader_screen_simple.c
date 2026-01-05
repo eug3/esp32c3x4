@@ -9,6 +9,7 @@
 #include "fonts.h"
 #include "txt_reader.h"
 #include "epub_parser.h"
+#include "xt_eink_font_impl.h"
 #include "esp_log.h"
 #include <string.h>
 #include <stdio.h>
@@ -147,7 +148,12 @@ static void display_current_page(void)
     display_clear(COLOR_WHITE);
 
     sFONT *ui_font = display_get_default_ascii_font();
-    int font_height = ui_font->Height + 4;  // 行间距
+    int chinese_font_height = xt_eink_font_get_height();
+    if (chinese_font_height == 0) {
+        chinese_font_height = 25;  // Default fallback
+    }
+    int line_spacing = 4;
+    int font_height = chinese_font_height + line_spacing;
 
     // 显示页码
     char page_info[32];
@@ -172,83 +178,145 @@ static void display_current_page(void)
                                                s_reader_state.chars_per_page);
 
         if (chars_read > 0) {
-            // 简单的文本换行显示
+            // UTF-8 文本换行显示 - 支持中文
             int y = 40;
             int x = 10;
             int max_width = SCREEN_WIDTH - 20;
-            char *text = s_reader_state.current_text;
-            char line[256];
-            int line_pos = 0;
+            uint8_t *framebuffer = display_get_framebuffer();
+            const char *text = s_reader_state.current_text;
+            const char *p = text;
+            char line[512];
+            int line_bytes = 0;
 
-            for (int i = 0; i < chars_read && y < SCREEN_HEIGHT - 40; i++) {
-                char c = text[i];
-
-                if (c == '\n') {
-                    // 换行
-                    line[line_pos] = '\0';
-                    display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
-                    y += font_height;
-                    line_pos = 0;
-                } else if (c >= 32 && c <= 126) {
-                    // 可打印 ASCII 字符
-                    line[line_pos++] = c;
-
-                    // 检查行宽
-                    line[line_pos] = '\0';
-                    if (display_get_text_width_font(line, ui_font) > max_width) {
-                        line_pos--;
-                        line[line_pos] = '\0';
-                        display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
-                        y += font_height;
-                        line_pos = 0;
-                        // 重新添加当前字符
-                        line[line_pos++] = c;
+            while (*p != '\0' && y < SCREEN_HEIGHT - 40) {
+                // 检查是否是换行符
+                if (*p == '\n') {
+                    // 渲染当前行
+                    if (line_bytes > 0) {
+                        line[line_bytes] = '\0';
+                        xt_eink_font_render_text(x, y, line, COLOR_BLACK, 
+                                                framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
                     }
+                    y += font_height;
+                    line_bytes = 0;
+                    p++;
+                    continue;
                 }
+
+                // 获取下一个UTF-8字符
+                uint32_t unicode;
+                int char_bytes = xt_eink_font_utf8_to_utf32(p, &unicode);
+                
+                if (char_bytes <= 0) {
+                    // 无效字符，跳过
+                    p++;
+                    continue;
+                }
+
+                // 临时添加字符到行，检查是否超出宽度
+                char temp_line[512];
+                memcpy(temp_line, line, line_bytes);
+                memcpy(temp_line + line_bytes, p, char_bytes);
+                temp_line[line_bytes + char_bytes] = '\0';
+
+                int line_width = xt_eink_font_get_text_width(temp_line);
+                
+                if (line_width > max_width && line_bytes > 0) {
+                    // 当前行已满，先渲染当前行
+                    line[line_bytes] = '\0';
+                    xt_eink_font_render_text(x, y, line, COLOR_BLACK,
+                                            framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
+                    y += font_height;
+                    line_bytes = 0;
+                    
+                    // 检查是否还有空间
+                    if (y >= SCREEN_HEIGHT - 40) {
+                        break;
+                    }
+                    
+                    // 将当前字符加入新行
+                    memcpy(line, p, char_bytes);
+                    line_bytes = char_bytes;
+                } else {
+                    // 添加字符到当前行
+                    memcpy(line + line_bytes, p, char_bytes);
+                    line_bytes += char_bytes;
+                }
+
+                p += char_bytes;
             }
 
             // 显示最后一行
-            if (line_pos > 0 && y < SCREEN_HEIGHT - 40) {
-                line[line_pos] = '\0';
-                display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
+            if (line_bytes > 0 && y < SCREEN_HEIGHT - 40) {
+                line[line_bytes] = '\0';
+                xt_eink_font_render_text(x, y, line, COLOR_BLACK,
+                                        framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
             }
         }
     } else if (s_reader_state.type == READER_TYPE_EPUB) {
-        // EPUB: 显示当前章节
+        // EPUB: 显示当前章节 - 支持中文
         int y = 40;
         int x = 10;
         int max_width = SCREEN_WIDTH - 20;
-        char *text = s_reader_state.current_text;
-        char line[256];
-        int line_pos = 0;
-        int text_len = strlen(text);
+        uint8_t *framebuffer = display_get_framebuffer();
+        const char *text = s_reader_state.current_text;
+        const char *p = text;
+        char line[512];
+        int line_bytes = 0;
 
-        for (int i = 0; i < text_len && y < SCREEN_HEIGHT - 40; i++) {
-            char c = text[i];
-
-            if (c == '\n') {
-                line[line_pos] = '\0';
-                display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
-                y += font_height;
-                line_pos = 0;
-            } else if (c >= 32 && c <= 126) {
-                line[line_pos++] = c;
-                line[line_pos] = '\0';
-
-                if (display_get_text_width_font(line, ui_font) > max_width) {
-                    line_pos--;
-                    line[line_pos] = '\0';
-                    display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
-                    y += font_height;
-                    line_pos = 0;
-                    line[line_pos++] = c;
+        while (*p != '\0' && y < SCREEN_HEIGHT - 40) {
+            if (*p == '\n') {
+                if (line_bytes > 0) {
+                    line[line_bytes] = '\0';
+                    xt_eink_font_render_text(x, y, line, COLOR_BLACK,
+                                            framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
                 }
+                y += font_height;
+                line_bytes = 0;
+                p++;
+                continue;
             }
+
+            uint32_t unicode;
+            int char_bytes = xt_eink_font_utf8_to_utf32(p, &unicode);
+            
+            if (char_bytes <= 0) {
+                p++;
+                continue;
+            }
+
+            char temp_line[512];
+            memcpy(temp_line, line, line_bytes);
+            memcpy(temp_line + line_bytes, p, char_bytes);
+            temp_line[line_bytes + char_bytes] = '\0';
+
+            int line_width = xt_eink_font_get_text_width(temp_line);
+            
+            if (line_width > max_width && line_bytes > 0) {
+                line[line_bytes] = '\0';
+                xt_eink_font_render_text(x, y, line, COLOR_BLACK,
+                                        framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
+                y += font_height;
+                line_bytes = 0;
+                
+                if (y >= SCREEN_HEIGHT - 40) {
+                    break;
+                }
+                
+                memcpy(line, p, char_bytes);
+                line_bytes = char_bytes;
+            } else {
+                memcpy(line + line_bytes, p, char_bytes);
+                line_bytes += char_bytes;
+            }
+
+            p += char_bytes;
         }
 
-        if (line_pos > 0 && y < SCREEN_HEIGHT - 40) {
-            line[line_pos] = '\0';
-            display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
+        if (line_bytes > 0 && y < SCREEN_HEIGHT - 40) {
+            line[line_bytes] = '\0';
+            xt_eink_font_render_text(x, y, line, COLOR_BLACK,
+                                    framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
         }
     }
 
@@ -335,6 +403,11 @@ static void save_reading_progress(void)
 static void on_show(screen_t *screen)
 {
     ESP_LOGI(TAG, "Reader screen shown");
+
+    // 初始化中文字体系统
+    if (!xt_eink_font_init()) {
+        ESP_LOGW(TAG, "Failed to initialize Chinese font, will use fallback rendering");
+    }
 
     const char *file_path = (const char *)screen->user_data;
     if (file_path == NULL) {
