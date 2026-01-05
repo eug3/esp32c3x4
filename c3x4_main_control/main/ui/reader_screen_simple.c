@@ -213,33 +213,31 @@ static void display_current_page(void)
                     continue;
                 }
 
-                // 临时添加字符到行，检查是否超出宽度
-                char temp_line[512];
-                memcpy(temp_line, line, line_bytes);
-                memcpy(temp_line + line_bytes, p, char_bytes);
-                temp_line[line_bytes + char_bytes] = '\0';
-
-                int line_width = xt_eink_font_get_text_width(temp_line);
+                // 优化：直接在line缓冲区中追加字符，然后检查宽度
+                // 这样只需要一次复制和一次宽度计算
+                memcpy(line + line_bytes, p, char_bytes);
+                line[line_bytes + char_bytes] = '\0';
+                
+                int line_width = xt_eink_font_get_text_width(line);
                 
                 if (line_width > max_width && line_bytes > 0) {
-                    // 当前行已满，先渲染当前行
+                    // 超出宽度，撤销当前字符，渲染当前行
                     line[line_bytes] = '\0';
                     xt_eink_font_render_text(x, y, line, COLOR_BLACK,
                                             framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
                     y += font_height;
-                    line_bytes = 0;
                     
                     // 检查是否还有空间
                     if (y >= SCREEN_HEIGHT - 40) {
                         break;
                     }
                     
-                    // 将当前字符加入新行
+                    // 将当前字符作为新行的开头
                     memcpy(line, p, char_bytes);
                     line_bytes = char_bytes;
+                    line[line_bytes] = '\0';
                 } else {
-                    // 添加字符到当前行
-                    memcpy(line + line_bytes, p, char_bytes);
+                    // 字符已添加到line中，只需更新line_bytes
                     line_bytes += char_bytes;
                 }
 
@@ -285,28 +283,29 @@ static void display_current_page(void)
                 continue;
             }
 
-            char temp_line[512];
-            memcpy(temp_line, line, line_bytes);
-            memcpy(temp_line + line_bytes, p, char_bytes);
-            temp_line[line_bytes + char_bytes] = '\0';
+            // 优化：直接在line缓冲区中追加字符，然后检查宽度
+            memcpy(line + line_bytes, p, char_bytes);
+            line[line_bytes + char_bytes] = '\0';
 
-            int line_width = xt_eink_font_get_text_width(temp_line);
+            int line_width = xt_eink_font_get_text_width(line);
             
             if (line_width > max_width && line_bytes > 0) {
+                // 超出宽度，撤销当前字符，渲染当前行
                 line[line_bytes] = '\0';
                 xt_eink_font_render_text(x, y, line, COLOR_BLACK,
                                         framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
                 y += font_height;
-                line_bytes = 0;
                 
                 if (y >= SCREEN_HEIGHT - 40) {
                     break;
                 }
                 
+                // 将当前字符作为新行的开头
                 memcpy(line, p, char_bytes);
                 line_bytes = char_bytes;
+                line[line_bytes] = '\0';
             } else {
-                memcpy(line + line_bytes, p, char_bytes);
+                // 字符已添加到line中，只需更新line_bytes
                 line_bytes += char_bytes;
             }
 

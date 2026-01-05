@@ -406,18 +406,23 @@ int txt_reader_get_total_pages(const txt_reader_t *reader, int chars_per_page) {
         return 0;
     }
 
+    // Encoding-specific byte-to-character ratio estimates
+    // Based on typical Chinese text files with mixed content
+    #define GB18030_BYTES_PER_CHAR 16   // ~60% Chinese (2 bytes) + 40% ASCII (1 byte) = 1.6 bytes/char
+    #define GB18030_CHARS_MULT     10   // Multiply by 10/16 = 0.625
+    #define UTF8_BYTES_PER_CHAR    24   // ~70% Chinese (3 bytes) + 30% ASCII (1 byte) = 2.4 bytes/char
+    #define UTF8_CHARS_MULT        10   // Multiply by 10/24 = 0.417
+
     // Estimate total pages based on encoding
     long file_size = reader->position.file_size;
     long estimated_chars;
 
     if (reader->encoding == TXT_ENCODING_GB18030) {
         // GB18030: Most Chinese characters are 2 bytes
-        // Assume 60% Chinese (2 bytes) + 40% ASCII/newlines (1 byte)
-        estimated_chars = file_size * 10 / 16;  // ~0.625 chars per byte
+        estimated_chars = file_size * GB18030_CHARS_MULT / GB18030_BYTES_PER_CHAR;
     } else if (reader->encoding == TXT_ENCODING_UTF8) {
         // UTF-8: Chinese characters are typically 3 bytes
-        // Assume 70% Chinese (3 bytes) + 30% ASCII/newlines (1 byte)
-        estimated_chars = file_size * 10 / 24;  // ~0.42 chars per byte
+        estimated_chars = file_size * UTF8_CHARS_MULT / UTF8_BYTES_PER_CHAR;
     } else {
         // ASCII: 1 byte per character
         estimated_chars = file_size;

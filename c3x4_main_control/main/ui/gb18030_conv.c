@@ -86,9 +86,15 @@ static uint32_t gbk_to_unicode(uint8_t gb_high, uint8_t gb_low)
         }
     }
 
-    // Fallback: use a simple offset for any other GBK character
+    // Fallback: clamp to valid CJK range
     ESP_LOGD(TAG, "Using fallback mapping for GBK: 0x%04X", gbk_code);
-    return 0x4E00 + ((gbk_code - 0x8140) % 0x51FF);
+    uint32_t offset = (gbk_code - 0x8140) % 0x51FF;
+    uint32_t unicode = 0x4E00 + offset;
+    // Ensure we stay within CJK Unified Ideographs (U+4E00-U+9FFF)
+    if (unicode > 0x9FFF) {
+        unicode = 0x4E00 + (offset % 0x5200);
+    }
+    return unicode;
 }
 
 /**
@@ -168,7 +174,7 @@ int gb18030_to_utf8(const uint8_t *gb_text, size_t gb_len,
     size_t gb_pos = 0;
     size_t utf8_pos = 0;
 
-    while (gb_pos < gb_len && utf8_pos < utf8_size - 4) {
+    while (gb_pos < gb_len && utf8_pos < utf8_size - 5) {  // Reserve 4 bytes for UTF-8 + 1 for null
         uint8_t c = gb_text[gb_pos];
 
         if (c == 0) {
