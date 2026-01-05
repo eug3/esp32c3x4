@@ -174,6 +174,20 @@ int display_draw_text(int x, int y, const char *text, uint8_t color, uint8_t bg_
  */
 int display_draw_text_font(int x, int y, const char *text, sFONT *font, uint8_t color, uint8_t bg_color);
 
+/**
+ * @brief 获取文本宽度（自定义字体）
+ * @param text 文本
+ * @param font 字体（NULL 则使用内置默认字体 Font12，作为"14号"的近似）
+ * @return 文本宽度（像素）
+ */
+int display_get_text_width_font(const char *text, sFONT *font);
+
+/**
+ * @brief 获取文本高度（自定义字体）
+ * @param font 字体（NULL 则使用内置默认字体 Font12，作为"14号"的近似）
+ * @return 文本高度（像素）
+ */
+int display_get_text_height_font(sFONT *font);
 
 /**
  * @brief 获取当前推荐的英文/ASCII字体（按中文字体高度自动选择）

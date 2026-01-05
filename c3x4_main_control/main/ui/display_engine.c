@@ -563,10 +563,6 @@ void display_refresh(refresh_mode_t mode)
             int phys_x, phys_y, phys_w, phys_h;
             convert_logical_to_physical_region(x, y, width, height, &phys_x, &phys_y, &phys_w, &phys_h);
 
-            // 计算对齐后的字节宽度
-            int phys_x_aligned = phys_x - (phys_x % 8);
-            int phys_w_aligned = phys_w + (phys_x % 8);
-
             // 标准局刷模式：只写 0x24，依赖 0x26 中的旧数据作为对比基准
             EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
             break;
