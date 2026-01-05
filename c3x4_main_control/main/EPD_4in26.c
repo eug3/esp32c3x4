@@ -886,7 +886,7 @@ void EPD_4in26_Display_Base(UBYTE *Image)
 	{
 		EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
 	}
-	EPD_4in26_TurnOnDisplay();	
+	EPD_4in26_TurnOnDisplay();
 }
 
 /******************************************************************************
@@ -1303,7 +1303,7 @@ static void EPD_4in26_Display_Part_Stream_Impl(UBYTE *full_framebuffer, uint32_t
 			ESP_LOGI("EPD_PART", "[DATA] Row %d: %s%s", debug_row, hex_str, w_bytes > 8 ? "..." : "");
 		}
 	}
-	
+
 	EPD_4in26_SendRegion_FromFramebuffer(full_framebuffer, fb_stride, x_offset_bytes, w_bytes, y, h_actual);
 
 	// ============================================
