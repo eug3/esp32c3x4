@@ -573,11 +573,8 @@ void display_refresh(refresh_mode_t mode)
             int phys_x, phys_y, phys_w, phys_h;
             convert_logical_to_physical_region(x, y, width, height, &phys_x, &phys_y, &phys_w, &phys_h);
 
-            if (mode == REFRESH_MODE_PARTIAL_FAST) {
-                EPD_4in26_Display_Part_Stream_Fast(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
-            } else {
-                EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
-            }
+            // 参考 Arduino EPD_Dis_Part，使用 0xFF 刷新模式
+            EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
             break;
     }
 
@@ -620,11 +617,8 @@ void display_refresh_region(int x, int y, int width, int height, refresh_mode_t 
 
         // 使用Stream版本，直接从完整framebuffer读取区域数据
         // framebuffer stride = 800/8 = 100字节/行
-        if (mode == REFRESH_MODE_PARTIAL_FAST) {
-            EPD_4in26_Display_Part_Stream_Fast(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
-        } else {
-            EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
-        }
+        // 参考 Arduino EPD_Dis_Part，使用 0xFF 刷新模式
+        EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
     } else {
         // 全刷和快刷不支持区域，使用全屏刷新
         if (mode == REFRESH_MODE_FULL) {

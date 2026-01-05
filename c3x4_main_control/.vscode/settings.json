@@ -11,5 +11,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=/Users/beijihu/Github/esp32c3x4/c3x4_main_control/build"
-  ]
+  ],
+  "idf.pythonInstallPath": "C:\\Espressif\\tools\\idf-python\\3.11.2\\python.exe"
 }

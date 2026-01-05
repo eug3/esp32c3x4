@@ -49,27 +49,13 @@ void EPD_4in26_4GrayDisplay(UBYTE *Image);
 void EPD_4in26_Sleep(void);
 void EPD_4in26_Wakeup(void);
 
-// GxEPD2 风格的局部刷新（根据 GxEPD2_426_GDEQ0426T82）
-// 使用 0x22+0xFC 进行快刷局部更新
-void EPD_4in26_Display_Partial(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h);
-
-// 局部刷新（非流式版本，重构版）
-// 使用独立的数据缓冲区（仅包含要刷新的区域数据）
-// 坐标对齐和参数验证已移入函数内部，简化调用
-void EPD_4in26_Display_Part(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h);
-
-// 局部刷新（流式版本）
+// 局部刷新（流式版本，参考 Arduino EPD_Dis_Part）
 // 直接从完整framebuffer读取指定区域并发送
 // full_framebuffer: 完整的800x480帧缓冲
 // fb_stride: 每行字节数（800/8=100）
 // x, y, w, h: 物理坐标系下的刷新区域
 void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, uint32_t fb_stride,
                                    UWORD x, UWORD y, UWORD w, UWORD h);
-
-// 快刷局刷（流式版本）
-// 与 EPD_4in26_Display_Part_Stream 相同的数据写入方式，但使用 fast update 序列触发刷新
-void EPD_4in26_Display_Part_Stream_Fast(UBYTE *full_framebuffer, uint32_t fb_stride,
-                                        UWORD x, UWORD y, UWORD w, UWORD h);
 
 // 波形 LUT 控制函数（新增）
 // 手动读取并返回当前 EPD 温度传感器值（摄氏度）

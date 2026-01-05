@@ -365,24 +365,6 @@ static void EPD_4in26_TurnOnDisplay_Part(void)
 	EPD_4in26_ReadBusy();
 }
 
-static void EPD_4in26_TurnOnDisplay_Part_Fast(void)
-{
-	// 快速局部刷新序列：使用快刷波形 LUT
-	// 加载快刷专用的波形 LUT (WS_80_127)
-	EPD_4in26_WriteLUT_Fast();
-
-	// 设置显示更新控制参数
-	EPD_4in26_SendCommand(0x21); // Display Update Control (2 bytes)
-	EPD_4in26_SendData(0x00);
-	EPD_4in26_SendData(0x00);
-
-	// 执行快速局部刷新
-	EPD_4in26_SendCommand(0x22); // Display Update Control
-	EPD_4in26_SendData(0xC7);    // fast update sequence with LUT
-	EPD_4in26_SendCommand(0x20); // Activate Display Update Sequence
-	EPD_4in26_ReadBusy();
-}
-
 static void EPD_4in26_TurnOnDisplay_4GRAY(void)
 {
     EPD_4in26_SendCommand(0x22);
@@ -582,6 +564,8 @@ parameter:
 ******************************************************************************/
 static void EPD_4in26_SetWindows(UWORD Xstart, UWORD Ystart, UWORD Xend, UWORD Yend)
 {
+    ESP_LOGI("EPD_WIN", "SetWindows: X=[%u,%u], Y=[%u,%u]", Xstart, Xend, Ystart, Yend);
+    
     EPD_4in26_SendCommand(0x44); // SET_RAM_X_ADDRESS_START_END_POSITION
     EPD_4in26_SendData(Xstart & 0xFF);
     EPD_4in26_SendData((Xstart>>8) & 0x03);
@@ -601,6 +585,8 @@ parameter:
 ******************************************************************************/
 static void EPD_4in26_SetCursor(UWORD Xstart, UWORD Ystart)
 {
+    ESP_LOGI("EPD_CUR", "SetCursor: X=%u, Y=%u", Xstart, Ystart);
+    
     EPD_4in26_SendCommand(0x4E); // SET_RAM_X_ADDRESS_COUNTER
     EPD_4in26_SendData(Xstart & 0xFF);
     EPD_4in26_SendData((Xstart>>8) & 0x03);
@@ -956,227 +942,6 @@ void EPD_4in26_Display_Fast(UBYTE *Image)
 	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: complete!");
 }
 
-/******************************************************************************
-function :	Partial refresh - fast partial update mode
-parameter:
-******************************************************************************/
-void EPD_4in26_Display_Partial(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h)
-{
-	ESP_LOGI("EPD", "EPD_4in26_Display_Partial: x=%u, y=%u, w=%u, h=%u", x, y, w, h);
-	UWORD i;
-	const UWORD full_width_bytes = EPD_4in26_WIDTH / 8;
-
-	// 参数验证：确保坐标和尺寸在有效范围内
-	if (x >= EPD_4in26_WIDTH || y >= EPD_4in26_HEIGHT) {
-		ESP_LOGE("EPD", "Invalid partial refresh coordinates: x=%u, y=%u (max: %u, %u)",
-		         x, y, EPD_4in26_WIDTH-1, EPD_4in26_HEIGHT-1);
-		return;
-	}
-
-	// 确保宽度和高度不超出边界
-	if (x + w > EPD_4in26_WIDTH) {
-		ESP_LOGW("EPD", "Width overflow: x=%u, w=%u, adjusting to fit", x, w);
-		w = EPD_4in26_WIDTH - x;
-	}
-	if (y + h > EPD_4in26_HEIGHT) {
-		ESP_LOGW("EPD", "Height overflow: y=%u, h=%u, adjusting to fit", y, h);
-		h = EPD_4in26_HEIGHT - y;
-	}
-
-	// 确保 x 是 8 的倍数（字节对齐）
-	if (x % 8 != 0) {
-		ESP_LOGW("EPD", "X coordinate not aligned to byte boundary: x=%u, aligning down", x);
-		x = (x / 8) * 8;
-	}
-
-	// 确保宽度是 8 的倍数
-	if (w % 8 != 0) {
-		ESP_LOGW("EPD", "Width not aligned to byte boundary: w=%u, aligning up", w);
-		w = ((w + 7) / 8) * 8;
-	}
-
-	ESP_LOGI("EPD", "Adjusted partial refresh area: x=%u, y=%u, w=%u, h=%u", x, y, w, h);
-
-	// 计算局刷窗口每行字节数与起始偏移
-	const UWORD x_byte = x / 8;
-	const UWORD window_width_bytes = w / 8;
-
-	// 根据 GxEPD2：Y 坐标需要反转
-	// y = HEIGHT - y - h (reversed partial window)
-	UWORD y_reversed = EPD_4in26_HEIGHT - y - h;
-
-	// 设置 RAM 区域（部分刷新窗口）
-	EPD_4in26_SendCommand(0x11); // set ram entry mode
-	EPD_4in26_SendData(0x01);    // x increase, y decrease : y reversed
-
-	EPD_4in26_SendCommand(0x44);
-	EPD_4in26_SendData(x % 256);
-	EPD_4in26_SendData(x / 256);
-	EPD_4in26_SendData((x + w - 1) % 256);
-	EPD_4in26_SendData((x + w - 1) / 256);
-
-	EPD_4in26_SendCommand(0x45);
-	EPD_4in26_SendData((y_reversed + h - 1) % 256);
-	EPD_4in26_SendData((y_reversed + h - 1) / 256);
-	EPD_4in26_SendData(y_reversed % 256);
-	EPD_4in26_SendData(y_reversed / 256);
-
-	EPD_4in26_SendCommand(0x4e);
-	EPD_4in26_SendData(x % 256);
-	EPD_4in26_SendData(x / 256);
-
-	EPD_4in26_SendCommand(0x4f);
-	EPD_4in26_SendData((y_reversed + h - 1) % 256);
-	EPD_4in26_SendData((y_reversed + h - 1) / 256);
-
-	// 温度补偿
-	EPD_4in26_SendCommand(0x1A);
-	EPD_4in26_SendData(0x5A);
-
-	// 写入数据到 0x24
-	// 由于使用 Y- 模式（Y 递减），需要按反向顺序写入
-	// 帧缓冲行 y 对应 RAM 行 y_reversed + h - 1（窗口顶部）
-	// 帧缓冲行 y + h - 1 对应 RAM 行 y_reversed（窗口底部）
-	EPD_4in26_SendCommand(0x24);
-	for(i = 0; i < h; i++)
-	{
-		// 帧缓冲从 y 递增到 y + h - 1
-		// RAM Y 从 y_reversed + h - 1 递减到 y_reversed
-		EPD_4in26_SendData2((UBYTE *)(Image + (y + i) * full_width_bytes + x_byte), window_width_bytes);
-	}
-
-	// 同步更新上一帧缓冲区(0x26)，否则下一次局刷对比基准会错
-	EPD_4in26_SendCommand(0x4e);
-	EPD_4in26_SendData(x % 256);
-	EPD_4in26_SendData(x / 256);
-
-	EPD_4in26_SendCommand(0x4f);
-	EPD_4in26_SendData((y_reversed + h - 1) % 256);
-	EPD_4in26_SendData((y_reversed + h - 1) / 256);
-
-	EPD_4in26_SendCommand(0x26);
-	for(i = 0; i < h; i++)
-	{
-		EPD_4in26_SendData2((UBYTE *)(Image + (y + i) * full_width_bytes + x_byte), window_width_bytes);
-	}
-
-	// 根据 GxEPD2：局部刷新使用 0xFC
-	EPD_4in26_SendCommand(0x21); // Display Update Control
-	EPD_4in26_SendData(0x00);    // RED normal
-	EPD_4in26_SendData(0x00);    // single chip application
-
-	EPD_4in26_SendCommand(0x22);
-	EPD_4in26_SendData(0xFC);    // partial update mode
-
-	EPD_4in26_SendCommand(0x20);
-	EPD_4in26_ReadBusy();
-	ESP_LOGI("EPD", "EPD_4in26_Display_Partial: complete!");
-}
-
-// 局部刷新显示（非流式版本，使用独立的数据缓冲区）
-// 参考 Arduino EPD_Dis_Part 函数重构
-// 参数：
-//   Image: 指向局部图像数据的指针（仅包含要刷新的区域数据）
-//   x, y: 局部刷新区域的起始坐标（EPD 物理坐标）
-//   w: 局部刷新区域的宽度（像素）
-//   h: 局部刷新区域的高度（像素，对应 Arduino 的 PART_COLUMN）
-void EPD_4in26_Display_Part(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h)
-{
-	UWORD i;
-
-	// ============================================
-	// 1. 参数验证和边界检查
-	// ============================================
-	if (x >= EPD_4in26_WIDTH || y >= EPD_4in26_HEIGHT) {
-		ESP_LOGE("EPD_PART", "[ERROR] Invalid start position: x=%u, y=%u (max=%dx%d)",
-		         x, y, EPD_4in26_WIDTH-1, EPD_4in26_HEIGHT-1);
-		return;
-	}
-
-	if (w == 0 || h == 0) {
-		ESP_LOGW("EPD_PART", "[WARN] Invalid size: w=%u, h=%u", w, h);
-		return;
-	}
-
-	// ============================================
-	// 2. X 坐标按 8 像素对齐（EPD 硬件要求）
-	// 参考 Arduino: x_start=x_start-x_start%8;
-	// ============================================
-	UWORD x_aligned = x - (x % 8);  // 向下对齐到 8 像素边界
-
-	// 关键差异：Arduino 基于已对齐的 x_start 计算 x_end
-	// Arduino: x_end=x_start+PART_LINE-1;
-	UWORD x_end = x_aligned + w - 1;  // 使用 x_aligned 而不是原始 x
-
-	if (x_end >= EPD_4in26_WIDTH) {
-		x_end = EPD_4in26_WIDTH - 1;
-	}
-
-	// 计算实际宽度（对齐后）
-	UWORD w_aligned = x_end - x_aligned + 1;
-
-	// ============================================
-	// 3. Y 坐标边界检查
-	// ============================================
-	UWORD y_end = y + h - 1;
-	if (y_end >= EPD_4in26_HEIGHT) {
-		y_end = EPD_4in26_HEIGHT - 1;
-	}
-	UWORD h_actual = y_end - y + 1;  // 实际高度
-
-	// ============================================
-	// 4. 计算数据参数
-	// ============================================
-	// width: 每行的字节数（对齐后）
-	// 对应 Arduino: PART_LINE/8，但需要向上取整
-	UWORD width_bytes = (w_aligned + 7) / 8;
-	UWORD height_rows = h_actual;  // 行数，对应 Arduino 的 PART_COLUMN
-
-	ESP_LOGI("EPD_PART", "[INFO] Display Part: x=%u->%u, y=%u->%u, w=%u->%u, h=%u",
-	         x, x_aligned, y, y, w, w_aligned, h_actual);
-	ESP_LOGI("EPD_PART", "[INFO] Data size: %u bytes x %u rows = %u bytes",
-	         width_bytes, height_rows, width_bytes * height_rows);
-
-	// ============================================
-	// 5. 硬件复位（参考 Arduino 示例）
-	// ============================================
-	EPD_4in26_Reset();
-	DEV_Delay_ms(10);
-
-	// ============================================
-	// 6. 发送 EPD 局部刷新命令序列（参考 Arduino 示例）
-	// ============================================
-	EPD_4in26_SendCommand(0x18); // use the internal temperature sensor
-	EPD_4in26_SendData(0x80);
-
-	EPD_4in26_SendCommand(0x3C); // BorderWavefrom
-	EPD_4in26_SendData(0x80);
-
-	// 设置刷新窗口（已对齐的坐标）
-	EPD_4in26_SetWindows(x_aligned, y, x_end, y_end);
-
-	// 设置光标到起始位置
-	EPD_4in26_SetCursor(x_aligned, y);
-
-	EPD_4in26_SendCommand(0x24);   // Write Black and White image to RAM
-
-	// ============================================
-	// 6. 发送图像数据（非流式，从独立缓冲区读取）
-	// 对应 Arduino: for(i=0;i<PART_COLUMN*PART_LINE/8;i++)
-	// ============================================
-	for(i = 0; i < height_rows; i++)
-	{
-		// 从 Image 缓冲区逐行发送数据
-		// 注意：Image 应该包含已经对齐好的数据
-		EPD_4in26_SendData2((UBYTE *)(Image + i * width_bytes), width_bytes);
-	}
-
-	// ============================================
-	// 7. 触发局部刷新显示
-	// ============================================
-	EPD_4in26_TurnOnDisplay_Part();
-}
-
 // 优化：流式发送局部刷新（重构版）
 // 直接从完整的 framebuffer 按行发送，避免使用中间缓冲区
 // 坐标对齐和参数验证已移入函数内部，简化调用代码
@@ -1186,8 +951,7 @@ void EPD_4in26_Display_Part(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD h)
 //   x, y: 局部刷新区域的起始坐标（EPD 物理坐标）
 //   w, h: 局部刷新区域的宽度和高度（像素）
 static void EPD_4in26_Display_Part_Stream_Impl(UBYTE *full_framebuffer, uint32_t fb_stride,
-											   UWORD x, UWORD y, UWORD w, UWORD h,
-											   bool fast_update)
+											   UWORD x, UWORD y, UWORD w, UWORD h)
 {
 	if (w == 0 || h == 0) {
 		ESP_LOGW("EPD_PART", "[WARN] Invalid size: w=%u, h=%u", w, h);
@@ -1281,6 +1045,8 @@ static void EPD_4in26_Display_Part_Stream_Impl(UBYTE *full_framebuffer, uint32_t
 	UWORD y_reversed = EPD_4in26_HEIGHT - y - h_actual;
 	UWORD y_end_reversed = y_reversed + h_actual - 1;
 
+	ESP_LOGI("EPD_COORD", "Y-reversal: log_y=%u -> phy_y=[%u,%u]", y, y_reversed, y_end_reversed);
+
 	// 关键点：当前采用 Y 递减模式 (0x11=0x01)
 	// 因此窗口/光标必须用“从大到小”的 Y 顺序：Ystart = y_end_reversed, Yend = y_reversed
 	EPD_4in26_SetWindows(x_aligned, y_end_reversed, x_end, y_reversed);
@@ -1307,25 +1073,15 @@ static void EPD_4in26_Display_Part_Stream_Impl(UBYTE *full_framebuffer, uint32_t
 	EPD_4in26_SendRegion_FromFramebuffer(full_framebuffer, fb_stride, x_offset_bytes, w_bytes, y, h_actual);
 
 	// ============================================
-	// 7. 触发局部刷新显示
+	// 7. 触发局部刷新显示（参考 Arduino EPD_Part_Update）
 	// ============================================
-	if (fast_update) {
-		EPD_4in26_TurnOnDisplay_Part_Fast();
-	} else {
-		EPD_4in26_TurnOnDisplay_Part();
-	}
+	EPD_4in26_TurnOnDisplay_Part();
 }
 
 void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, uint32_t fb_stride,
                                    UWORD x, UWORD y, UWORD w, UWORD h)
 {
-	EPD_4in26_Display_Part_Stream_Impl(full_framebuffer, fb_stride, x, y, w, h, false);
-}
-
-void EPD_4in26_Display_Part_Stream_Fast(UBYTE *full_framebuffer, uint32_t fb_stride,
-                                        UWORD x, UWORD y, UWORD w, UWORD h)
-{
-	EPD_4in26_Display_Part_Stream_Impl(full_framebuffer, fb_stride, x, y, w, h, true);
+	EPD_4in26_Display_Part_Stream_Impl(full_framebuffer, fb_stride, x, y, w, h);
 }
 
 void EPD_4in26_4GrayDisplay(UBYTE *Image)
@@ -1450,19 +1206,6 @@ void EPD_4in26_4GrayDisplay_Part(UBYTE *Image, UWORD x, UWORD y, UWORD w, UWORD 
 			const UBYTE in0 = Image[idx];
 			const UBYTE in1 = Image[idx + 1];
 			const UBYTE out = EPD_4in26_pack8_2bpp_to_1bpp_plane(in0, in1, false);
-			EPD_4in26_SendData(out);
-		}
-	}
-
-	// Plane 0x26
-	EPD_4in26_SendCommand(0x26);
-	for (UWORD row = 0; row < l; row++) {
-		const uint32_t base = (uint32_t)(y + row) * (uint32_t)in_stride + (uint32_t)in_x_byte;
-		for (UWORD col = 0; col < out_w_bytes; col++) {
-			const uint32_t idx = base + (uint32_t)col * 2;
-			const UBYTE in0 = Image[idx];
-			const UBYTE in1 = Image[idx + 1];
-			const UBYTE out = EPD_4in26_pack8_2bpp_to_1bpp_plane(in0, in1, true);
 			EPD_4in26_SendData(out);
 		}
 	}

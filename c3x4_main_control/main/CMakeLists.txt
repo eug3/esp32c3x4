@@ -41,7 +41,7 @@ idf_component_register(SRCS
                        "ui/xt_eink_font.c"
                        "ui/xt_eink_font_impl.c"
 
-                       # JPEG decoder and helper
+                       # Image helpers (JPEG/BMP/PNG support)
                        "lib/tjpgd/tjpgd.c"
                        "ui/jpeg_helper.c"
                        "ui/bmp_helper.c"

@@ -25,8 +25,8 @@ static const char *TAG = "EPUB_PARSER";
 // 最大章节数
 #define MAX_CHAPTERS 200
 
-// EPUB MIME 类型
-static const char *EPUB_MIME_TYPES[] = {
+// EPUB MIME 类型 (保留供将来使用)
+static const char *EPUB_MIME_TYPES[] __attribute__((unused)) = {
     "application/epub+zip",
     "application/oebps-package+xml",
     "application/xhtml+xml",
