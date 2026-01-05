@@ -541,7 +541,9 @@ void display_refresh(refresh_mode_t mode)
             EPD_4in26_Display(s_framebuffer);
             break;
         case REFRESH_MODE_FAST:
-            EPD_4in26_Display_Fast(s_framebuffer);
+            // 快刷模式：保存当前帧（作为下一帧的旧帧），然后刷新
+            // 注意：这里没有脏区概念，全屏刷新
+            EPD_4in26_Display(s_framebuffer);
             break;
         case REFRESH_MODE_4GRAY:
             refresh_4gray_mode(false);  // 标准四阶灰度
@@ -564,6 +566,7 @@ void display_refresh(refresh_mode_t mode)
             int y = s_dirty_region.y;
             int width = s_dirty_region.width;
             int height = s_dirty_region.height;
+            ESP_LOGD(TAG, "dirty_region raw: x=%d y=%d w=%d h=%d", x, y, width, height);
             if (x < 0) x = 0;
             if (y < 0) y = 0;
             if (x + width > SCREEN_WIDTH) width = SCREEN_WIDTH - x;
@@ -573,8 +576,34 @@ void display_refresh(refresh_mode_t mode)
             int phys_x, phys_y, phys_w, phys_h;
             convert_logical_to_physical_region(x, y, width, height, &phys_x, &phys_y, &phys_w, &phys_h);
 
-            // 参考 Arduino EPD_Dis_Part，使用 0xFF 刷新模式
-            EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
+            // 计算对齐后的字节宽度
+            int phys_x_aligned = phys_x - (phys_x % 8);
+            int phys_w_aligned = phys_w + (phys_x % 8);
+            int phys_w_bytes = (phys_w_aligned + 7) / 8;
+
+            // 先提取脏区旧内容（用于0x26）
+            // 注意：这里使用动态分配的小缓冲区，只存储脏区数据
+            uint8_t *dirty_old = (uint8_t *)malloc(phys_w_bytes * phys_h);
+            if (dirty_old == NULL) {
+                ESP_LOGE(TAG, "Failed to allocate dirty buffer, fall back to full refresh");
+                EPD_4in26_Display(s_framebuffer);
+                break;
+            }
+            for (int row = 0; row < phys_h; row++) {
+                uint8_t *src = s_framebuffer + (phys_y + row) * 100 + phys_x_aligned / 8;
+                uint8_t *dst = dirty_old + row * phys_w_bytes;
+                memcpy(dst, src, phys_w_bytes);
+            }
+
+            // 局刷快刷：先发旧帧到0x26，再发新帧到0x24
+            if (mode == REFRESH_MODE_PARTIAL_FAST) {
+                EPD_4in26_Display_Fast_Part(s_framebuffer, 100, dirty_old, phys_x, phys_y, phys_w, phys_h);
+            } else {
+                // 标准局刷模式
+                EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
+            }
+
+            free(dirty_old);
             break;
     }
 
@@ -615,16 +644,41 @@ void display_refresh_region(int x, int y, int width, int height, refresh_mode_t 
         ESP_LOGI(TAG, "Physical region: x=%d, y=%d, w=%d, h=%d",
                  phys_x, phys_y, phys_w, phys_h);
 
-        // 使用Stream版本，直接从完整framebuffer读取区域数据
-        // framebuffer stride = 800/8 = 100字节/行
-        // 参考 Arduino EPD_Dis_Part，使用 0xFF 刷新模式
-        EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
+        // 计算对齐后的字节宽度
+        int phys_x_aligned = phys_x - (phys_x % 8);
+        int phys_w_aligned = phys_w + (phys_x % 8);
+        int phys_w_bytes = (phys_w_aligned + 7) / 8;
+
+        // 先提取脏区旧内容（用于0x26）
+        uint8_t *dirty_old = (uint8_t *)malloc(phys_w_bytes * phys_h);
+        if (dirty_old == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate dirty buffer, fall back to full refresh");
+            EPD_4in26_Display(s_framebuffer);
+            clear_dirty_internal();
+            unlock_engine();
+            return;
+        }
+        for (int row = 0; row < phys_h; row++) {
+            uint8_t *src = s_framebuffer + (phys_y + row) * 100 + phys_x_aligned / 8;
+            uint8_t *dst = dirty_old + row * phys_w_bytes;
+            memcpy(dst, src, phys_w_bytes);
+        }
+
+        // 局刷快刷：先发旧帧到0x26，再发新帧到0x24
+        if (mode == REFRESH_MODE_PARTIAL_FAST) {
+            EPD_4in26_Display_Fast_Part(s_framebuffer, 100, dirty_old, phys_x, phys_y, phys_w, phys_h);
+        } else {
+            // 标准局刷模式
+            EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
+        }
+
+        free(dirty_old);
     } else {
         // 全刷和快刷不支持区域，使用全屏刷新
         if (mode == REFRESH_MODE_FULL) {
             EPD_4in26_Display(s_framebuffer);
         } else {
-            EPD_4in26_Display_Fast(s_framebuffer);
+            EPD_4in26_Display(s_framebuffer);
         }
     }
 
@@ -643,6 +697,8 @@ void display_mark_dirty(int x, int y, int width, int height)
     if (y < 0) y = 0;
     if (x + width > SCREEN_WIDTH) width = SCREEN_WIDTH - x;
     if (y + height > SCREEN_HEIGHT) height = SCREEN_HEIGHT - y;
+
+    ESP_LOGD(TAG, "mark_dirty: x=%d y=%d w=%d h=%d", x, y, width, height);
 
     lock_engine();
     expand_dirty_region(x, y, width, height);
@@ -942,11 +998,7 @@ static void refresh_4gray_mode(bool fast_mode)
     if (gray_buffer == NULL) {
         ESP_LOGE(TAG, "Failed to allocate 4-gray buffer (%zu bytes), falling back to 1bpp", gray_buffer_size);
         // 内存不足，回退到 1bpp 刷新
-        if (fast_mode) {
-            EPD_4in26_Display_Fast(s_framebuffer);
-        } else {
-            EPD_4in26_Display(s_framebuffer);
-        }
+        EPD_4in26_Display(s_framebuffer);
         return;
     }
 

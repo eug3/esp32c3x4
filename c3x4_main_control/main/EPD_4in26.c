@@ -870,13 +870,14 @@ void EPD_4in26_Display_Base(UBYTE *Image)
 
 /******************************************************************************
 function :	Full refresh - fast update mode
-parameter:	Image - Image data buffer (monochrome, 1 bit per pixel)
+parameter:	OldImage - Previous frame data buffer (for RAM 0x26)
+            NewImage - Current frame data buffer (for RAM 0x24)
 description:
 	使用快刷模式对4.26英寸墨水屏进行全屏刷新。
-	该模式通过0xC7刷新序列实现快速更新，适用于需要快速响应的场景。
-	刷新过程中会自动写入两个RAM缓冲区(0x24和0x26)以确保显示正确。
+	该模式通过0xD7刷新序列实现快速更新，适用于需要快速响应的场景。
+	刷新时先写入旧帧到0x26，再写入新帧到0x24。
 ******************************************************************************/
-void EPD_4in26_Display_Fast(UBYTE *Image)
+void EPD_4in26_Display_Fast(UBYTE *OldImage, UBYTE *NewImage)
 {
 	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: starting...");
 	UWORD i;
@@ -890,8 +891,8 @@ void EPD_4in26_Display_Fast(UBYTE *Image)
 	EPD_4in26_SetCursor(0, 0);
 
 	// 打印前4字节用于调试验证数据格式
-	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: first 4 bytes of image: 0x%02X 0x%02X 0x%02X 0x%02X",
-	         Image[0], Image[1], Image[2], Image[3]);
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: NewImage first 4 bytes: 0x%02X 0x%02X 0x%02X 0x%02X",
+	         NewImage[0], NewImage[1], NewImage[2], NewImage[3]);
 
 	// 步骤1：温度补偿
 	// 墨水屏刷新效果受温度影响，设置合适的温度补偿值可优化显示质量
@@ -899,23 +900,22 @@ void EPD_4in26_Display_Fast(UBYTE *Image)
 	EPD_4in26_SendCommand(0x1A); // Write to temperature register
 	EPD_4in26_SendData(0x5A);    // 25°C 补偿值
 
-	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: writing to 0x24...");
-	// 步骤2：写入当前帧图像数据到 RAM 0x24
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: writing old frame to 0x26...");
+	// 步骤2：写入旧帧图像数据到 RAM 0x26
+	// 0x26 存储的是上一帧图像数据，局部刷新时需要与 0x24 对比来确定像素变化
+	EPD_4in26_SendCommand(0x26);   //write RAM for previous frame
+	for(i=0; i<height; i++)
+	{
+		EPD_4in26_SendData2((UBYTE *)(OldImage+i*width), width);
+	}
+
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: writing new frame to 0x24...");
+	// 步骤3：写入当前帧图像数据到 RAM 0x24
 	// 0x24 是墨水屏的主图像RAM地址，存储当前要显示的图像
 	EPD_4in26_SendCommand(0x24);   //write RAM for black(0)/white (1)
 	for(i=0; i<height; i++)
 	{
-		EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
-	}
-
-	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: 0x24 written, writing to 0x26...");
-	// 步骤3：同步写入上一帧 RAM 0x26
-	// 0x26 存储的是上一帧图像数据，局部刷新时需要与 0x24 对比来确定像素变化
-	// 即使使用快刷，也需要同步 0x26 以确保后续局部刷新操作正确
-	EPD_4in26_SendCommand(0x26);   //write RAM for previous frame
-	for(i=0; i<height; i++)
-	{
-		EPD_4in26_SendData2((UBYTE *)(Image+i*width), width);
+		EPD_4in26_SendData2((UBYTE *)(NewImage+i*width), width);
 	}
 	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: both RAMs written, triggering refresh...");
 
@@ -1069,6 +1069,97 @@ void EPD_4in26_Display_Part_Stream(UBYTE *full_framebuffer, uint32_t fb_stride,
                                    UWORD x, UWORD y, UWORD w, UWORD h)
 {
 	EPD_4in26_Display_Part_Stream_Impl(full_framebuffer, fb_stride, x, y, w, h);
+}
+
+/******************************************************************************
+function :	Partial refresh - fast update mode
+parameter:	full_framebuffer - 完整帧缓冲
+            fb_stride - 每行字节数
+            dirty_data - 脏区合并前的内容（旧帧）
+            x, y, w, h - 物理坐标系下的刷新区域
+description:
+	局刷快刷模式：先发旧帧脏区内容到0x26，再发新帧脏区内容到0x24。
+	使用0xD7快刷模式实现局部快速刷新。
+******************************************************************************/
+void EPD_4in26_Display_Fast_Part(UBYTE *full_framebuffer, uint32_t fb_stride,
+                                  UBYTE *dirty_data, UWORD x, UWORD y, UWORD w, UBYTE h)
+{
+	if (w == 0 || h == 0) {
+		ESP_LOGW("EPD_PART", "[WARN] Invalid size: w=%u, h=%u", w, h);
+		return;
+	}
+
+	// 参数验证
+	if (x >= EPD_4in26_WIDTH || y >= EPD_4in26_HEIGHT) {
+		ESP_LOGE("EPD_PART", "[ERROR] Invalid start position: x=%u, y=%u", x, y);
+		return;
+	}
+
+	// X坐标按8像素对齐
+	UWORD x_aligned = x - (x % 8);
+	UWORD x_end = x_aligned + w - 1;
+	if (x_end >= EPD_4in26_WIDTH) {
+		x_end = EPD_4in26_WIDTH - 1;
+	}
+	UWORD w_aligned = x_end - x_aligned + 1;
+
+	// Y坐标边界
+	UWORD y_end = y + h - 1;
+	if (y_end >= EPD_4in26_HEIGHT) {
+		y_end = EPD_4in26_HEIGHT - 1;
+	}
+	UWORD h_actual = y_end - y + 1;
+
+	// 字节偏移
+	UWORD x_offset_bytes = x_aligned / 8;
+	UWORD w_bytes = (w_aligned + 7) / 8;
+
+	ESP_LOGI("EPD_PART", "[FAST] Partial fast refresh: x=%u->%u, y=%u, w=%u->%u, h=%u",
+	         x, x_aligned, y, w, w_aligned, h_actual);
+
+	// 温度补偿
+	EPD_4in26_SendCommand(0x1A);
+	EPD_4in26_SendData(0x5A);
+
+	// 设置Y反向
+	EPD_4in26_SendCommand(0x11);
+	EPD_4in26_SendData(0x01);
+
+	UWORD y_reversed = EPD_4in26_HEIGHT - y - h_actual;
+	UWORD y_end_reversed = y_reversed + h_actual - 1;
+
+	// 设置窗口
+	EPD_4in26_SetWindows(x_aligned, y_end_reversed, x_end, y_reversed);
+	EPD_4in26_SetCursor(x_aligned, y_end_reversed);
+
+	// 步骤1：写入旧帧脏区内容到 RAM 0x26
+	ESP_LOGI("EPD_PART", "[FAST] Writing old frame to 0x26...");
+	EPD_4in26_SendCommand(0x26);   //write RAM for previous frame
+	for (UWORD i = 0; i < h_actual; i++) {
+		UBYTE *row_ptr = dirty_data + i * w_bytes;
+		EPD_4in26_SendData2(row_ptr, w_bytes);
+	}
+
+	// 步骤2：写入新帧脏区内容到 RAM 0x24
+	ESP_LOGI("EPD_PART", "[FAST] Writing new frame to 0x24...");
+	EPD_4in26_SendCommand(0x24);   //write RAM for black/white
+	for (UWORD i = 0; i < h_actual; i++) {
+		UBYTE *row_ptr = full_framebuffer + (y + i) * fb_stride + x_offset_bytes;
+		EPD_4in26_SendData2(row_ptr, w_bytes);
+	}
+
+	// 快刷模式刷新
+	EPD_4in26_SendCommand(0x21);
+	EPD_4in26_SendData(0x40);
+	EPD_4in26_SendData(0x00);
+
+	EPD_4in26_SendCommand(0x22);
+	EPD_4in26_SendData(0xD7);    // fast full update mode
+
+	EPD_4in26_SendCommand(0x20);
+	ESP_LOGI("EPD_PART", "[FAST] Waiting for BUSY...");
+	EPD_4in26_ReadBusy();
+	ESP_LOGI("EPD_PART", "[FAST] Partial fast refresh complete!");
 }
 
 void EPD_4in26_4GrayDisplay(UBYTE *Image)

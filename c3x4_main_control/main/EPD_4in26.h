@@ -44,7 +44,16 @@ void EPD_4in26_Clear(void);
 void EPD_4in26_Clear_Fast(void);
 void EPD_4in26_Display(UBYTE *Image);
 void EPD_4in26_Display_Base(UBYTE *Image);
-void EPD_4in26_Display_Fast(UBYTE *Image);
+void EPD_4in26_Display_Fast(UBYTE *OldImage, UBYTE *NewImage);
+
+// 局刷快刷模式：先发旧帧脏区内容到0x26，再发新帧脏区内容到0x24
+// full_framebuffer: 完整帧缓冲
+// fb_stride: 每行字节数 (800/8=100)
+// dirty_data: 脏区合并前的内容（旧帧）
+// x, y, w, h: 物理坐标系下的刷新区域
+void EPD_4in26_Display_Fast_Part(UBYTE *full_framebuffer, uint32_t fb_stride,
+                                  UBYTE *dirty_data, UWORD x, UWORD y, UWORD w, UBYTE h);
+
 void EPD_4in26_4GrayDisplay(UBYTE *Image);
 void EPD_4in26_Sleep(void);
 void EPD_4in26_Wakeup(void);
