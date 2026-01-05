@@ -347,21 +347,14 @@ static void EPD_4in26_TurnOnDisplay_Fast(void)
 
 static void EPD_4in26_TurnOnDisplay_Part(void)
 {
-	// 局部刷新序列：集成波形 LUT 以获得更好的显示效果
-	// 根据当前温度自动选择合适的波形 LUT
-
-	// 1. 先加载温度补偿的波形 LUT
+	// 参考 Arduino EPD_Part_Update
+	// 1. 加载温度补偿的波形 LUT
 	EPD_4in26_WriteLUT_TemperatureCompensated();
 
-	// 2. 设置显示更新控制参数
-	EPD_4in26_SendCommand(0x21); // Display Update Control (2 bytes)
-	EPD_4in26_SendData(0x00);
-	EPD_4in26_SendData(0x00);
-
-	// 3. 执行局部刷新（使用波形 LUT 模式）
+	// 2. 执行局部刷新
 	EPD_4in26_SendCommand(0x22); // Display Update Control
-	EPD_4in26_SendData(0xFF);    // partial update mode with LUT
-	EPD_4in26_SendCommand(0x20); // Activate Display Update Sequence
+	EPD_4in26_SendData(0xFF);    // partial update mode
+	EPD_4in26_SendCommand(0x20); // Master Activation
 	EPD_4in26_ReadBusy();
 }
 
@@ -1018,13 +1011,7 @@ static void EPD_4in26_Display_Part_Stream_Impl(UBYTE *full_framebuffer, uint32_t
 #endif
 
 	// ============================================
-	// 5. 硬件复位（参考 Arduino 示例）
-	// ============================================
-	EPD_4in26_Reset();
-	DEV_Delay_ms(10);
-
-	// ============================================
-	// 6. 发送 EPD 局部刷新命令序列（参考 Arduino 示例）
+	// 5. 发送 EPD 局部刷新命令序列（参考 Arduino 示例）
 	// ============================================
 
 	EPD_4in26_SendCommand(0x18); // use the internal temperature sensor
