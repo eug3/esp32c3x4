@@ -16,6 +16,9 @@
 
 static const char *TAG = "READER_SCREEN";
 
+// Line buffer size for text rendering
+#define MAX_LINE_BUFFER_SIZE 512
+
 static screen_t g_reader_screen = {0};
 
 // 阅读器状态
@@ -185,7 +188,7 @@ static void display_current_page(void)
             uint8_t *framebuffer = display_get_framebuffer();
             const char *text = s_reader_state.current_text;
             const char *p = text;
-            char line[512];
+            char line[MAX_LINE_BUFFER_SIZE];
             int line_bytes = 0;
 
             while (*p != '\0' && y < SCREEN_HEIGHT - 40) {
@@ -259,7 +262,7 @@ static void display_current_page(void)
         uint8_t *framebuffer = display_get_framebuffer();
         const char *text = s_reader_state.current_text;
         const char *p = text;
-        char line[512];
+        char line[MAX_LINE_BUFFER_SIZE];
         int line_bytes = 0;
 
         while (*p != '\0' && y < SCREEN_HEIGHT - 40) {

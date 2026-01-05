@@ -87,6 +87,9 @@ static uint32_t gbk_to_unicode(uint8_t gb_high, uint8_t gb_low)
     }
 
     // Fallback: clamp to valid CJK range
+    // CJK Unified Ideographs range: U+4E00 to U+9FFF (20,992 characters)
+    // 0x51FF = 20,991 (last offset before wrapping)
+    // 0x5200 = 20,992 (total characters in range)
     ESP_LOGD(TAG, "Using fallback mapping for GBK: 0x%04X", gbk_code);
     uint32_t offset = (gbk_code - 0x8140) % 0x51FF;
     uint32_t unicode = 0x4E00 + offset;
