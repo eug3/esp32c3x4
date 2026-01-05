@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(idf.py build:*)",
+      "Bash(/mnt/c/esp/esp-idf/install.bat)",
+      "Bash(/mnt/c/esp/esp-idf/export.bat)"
     ]
   }
 }

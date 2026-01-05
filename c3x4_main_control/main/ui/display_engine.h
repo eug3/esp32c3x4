@@ -28,10 +28,7 @@
 // 刷新模式
 typedef enum {
     REFRESH_MODE_FULL,           // 全刷（最高清晰度，2s）
-    REFRESH_MODE_FAST,           // 快刷（较快，1.5s）
-    REFRESH_MODE_PARTIAL,        // 局刷（最快，0.3s，可能留残影）
-    REFRESH_MODE_4GRAY,          // 四阶灰度全刷（高质量灰度显示）
-    REFRESH_MODE_4GRAY_FAST      // 四阶灰度快刷（快速灰度显示）
+    REFRESH_MODE_PARTIAL         // 局刷（最快，0.3s，可能留残影）
 } refresh_mode_t;
 
 // 颜色定义（与 GUI_Paint 兼容）
@@ -142,23 +139,6 @@ void display_clear_dirty(void);
  */
 void display_draw_pixel(int x, int y, uint8_t color);
 
-/**
- * @brief 绘制水平线
- * @param x 起始 X
- * @param y Y 坐标
- * @param width 宽度
- * @param color 颜色
- */
-void display_draw_hline(int x, int y, int width, uint8_t color);
-
-/**
- * @brief 绘制垂直线
- * @param x X 坐标
- * @param y 起始 Y
- * @param height 高度
- * @param color 颜色
- */
-void display_draw_vline(int x, int y, int height, uint8_t color);
 
 /**
  * @brief 绘制矩形
@@ -194,47 +174,6 @@ int display_draw_text(int x, int y, const char *text, uint8_t color, uint8_t bg_
  */
 int display_draw_text_font(int x, int y, const char *text, sFONT *font, uint8_t color, uint8_t bg_color);
 
-/**
- * @brief 绘制文本（中文）
- * @param x 起始 X
- * @param y 起始 Y
- * @param text 文本（UTF-8）
- * @param font_size 字体大小（14/16/18/20/24/28）
- * @param color 前景色
- * @param bg_color 背景色
- * @return 文本宽度
- */
-int display_draw_text_cn(int x, int y, const char *text, int font_size, uint8_t color, uint8_t bg_color);
-
-/**
- * @brief 获取文本宽度
- * @param text 文本
- * @param font_size 字体大小（中文有效）
- * @return 文本宽度（像素）
- */
-int display_get_text_width(const char *text, int font_size);
-
-/**
- * @brief 获取 ASCII 文本宽度（自定义字体）
- * @param text 文本
- * @param font 字体（NULL 则使用内置默认字体 Font12，作为“14号”的近似）
- * @return 文本宽度（像素）
- */
-int display_get_text_width_font(const char *text, sFONT *font);
-
-/**
- * @brief 获取文本高度
- * @param font_size 字体大小
- * @return 文本高度（像素）
- */
-int display_get_text_height(int font_size);
-
-/**
- * @brief 获取 ASCII 文本高度（自定义字体）
- * @param font 字体（NULL 则使用内置默认字体 Font12，作为“14号”的近似）
- * @return 文本高度（像素）
- */
-int display_get_text_height_font(sFONT *font);
 
 /**
  * @brief 获取当前推荐的英文/ASCII字体（按中文字体高度自动选择）
@@ -245,25 +184,9 @@ int display_get_text_height_font(sFONT *font);
 sFONT* display_get_default_ascii_font(void);
 
 /**
- * @brief 绘制图像（1bpp 位图）
- * @param x 起始 X
- * @param y 起始 Y
- * @param width 宽度
- * @param height 高度
- * @param bitmap 位图数据
- * @param invert 是否反转颜色
- */
-void display_draw_bitmap(int x, int y, int width, int height, const uint8_t *bitmap, bool invert);
-
-/**
  * @brief 获取帧缓冲指针（直接访问）
  * @return 帧缓冲指针
  */
 uint8_t* display_get_framebuffer(void);
-
-/**
- * @brief 等待 EPD 刷新完成
- */
-void display_wait_refresh_complete(void);
 
 #endif // DISPLAY_ENGINE_H

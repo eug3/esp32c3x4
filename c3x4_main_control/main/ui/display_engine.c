@@ -39,7 +39,6 @@ static void expand_dirty_region(int x, int y, int width, int height);
 static void clear_dirty_internal(void);  // 内部版本，调用者必须持有锁
 static void convert_logical_to_physical_region(int lx, int ly, int lw, int lh,
                                                 int *px, int *py, int *pw, int *ph);
-static void refresh_4gray_mode(bool fast_mode);  // 四阶灰度刷新（快刷模式）
 
 static bool text_has_non_ascii(const char *text);
 static int measure_text_width_utf8(const char *text, sFONT *ascii_font);
@@ -540,17 +539,6 @@ void display_refresh(refresh_mode_t mode)
         case REFRESH_MODE_FULL:
             EPD_4in26_Display(s_framebuffer);
             break;
-        case REFRESH_MODE_FAST:
-            // 快刷模式：保存当前帧（作为下一帧的旧帧），然后刷新
-            // 注意：这里没有脏区概念，全屏刷新
-            EPD_4in26_Display(s_framebuffer);
-            break;
-        case REFRESH_MODE_4GRAY:
-            refresh_4gray_mode(false);  // 标准四阶灰度
-            break;
-        case REFRESH_MODE_4GRAY_FAST:
-            refresh_4gray_mode(true);   // 快速四阶灰度（当前实现相同）
-            break;
         case REFRESH_MODE_PARTIAL:
         default:
             // 最简单且一致的策略：局刷只刷新"当前脏区"(逻辑坐标 480x800)
@@ -603,14 +591,6 @@ void display_refresh_region(int x, int y, int width, int height, refresh_mode_t 
     ESP_LOGI(TAG, "Refreshing region (logical): x=%d, y=%d, w=%d, h=%d (mode=%d)",
              x, y, width, height, mode);
 
-    // 四阶灰度模式使用全屏刷新
-    if (mode == REFRESH_MODE_4GRAY || mode == REFRESH_MODE_4GRAY_FAST) {
-        refresh_4gray_mode(mode == REFRESH_MODE_4GRAY_FAST);
-        clear_dirty_internal();
-        unlock_engine();
-        return;
-    }
-
     // 只有部分刷新支持区域刷新
     if (mode == REFRESH_MODE_PARTIAL) {
         // 将逻辑坐标转换为物理坐标（ROTATE_270）
@@ -624,12 +604,8 @@ void display_refresh_region(int x, int y, int width, int height, refresh_mode_t 
         // 标准局刷模式：只写 0x24，依赖 0x26 中的旧数据作为对比基准
         EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
     } else {
-        // 全刷和快刷不支持区域，使用全屏刷新
-        if (mode == REFRESH_MODE_FULL) {
-            EPD_4in26_Display(s_framebuffer);
-        } else {
-            EPD_4in26_Display(s_framebuffer);
-        }
+        // 全刷不支持区域，使用全屏刷新
+        EPD_4in26_Display(s_framebuffer);
     }
 
     clear_dirty_internal();  // 使用内部版本，避免嵌套锁
@@ -686,52 +662,6 @@ void display_draw_pixel(int x, int y, uint8_t color)
     Paint_SetPixel(x, y, bw_color);
     if (s_config.use_partial_refresh) {
         expand_dirty_region(x, y, 1, 1);
-    }
-    unlock_engine();
-}
-
-void display_draw_hline(int x, int y, int width, uint8_t color)
-{
-    if (y < 0 || y >= SCREEN_HEIGHT) {
-        return;
-    }
-    if (x < 0) {
-        width += x;
-        x = 0;
-    }
-    if (x + width > SCREEN_WIDTH) {
-        width = SCREEN_WIDTH - x;
-    }
-
-    lock_engine();
-    for (int i = 0; i < width; i++) {
-        Paint_SetPixel(x + i, y, color);
-    }
-    if (s_config.use_partial_refresh) {
-        expand_dirty_region(x, y, width, 1);
-    }
-    unlock_engine();
-}
-
-void display_draw_vline(int x, int y, int height, uint8_t color)
-{
-    if (x < 0 || x >= SCREEN_WIDTH) {
-        return;
-    }
-    if (y < 0) {
-        height += y;
-        y = 0;
-    }
-    if (y + height > SCREEN_HEIGHT) {
-        height = SCREEN_HEIGHT - y;
-    }
-
-    lock_engine();
-    for (int i = 0; i < height; i++) {
-        Paint_SetPixel(x, y + i, color);
-    }
-    if (s_config.use_partial_refresh) {
-        expand_dirty_region(x, y, 1, height);
     }
     unlock_engine();
 }
@@ -817,57 +747,6 @@ int display_draw_text_font(int x, int y, const char *text, sFONT *font, uint8_t 
     return width;
 }
 
-int display_draw_text_cn(int x, int y, const char *text, int font_size, uint8_t color, uint8_t bg_color)
-{
-    if (text == NULL || *text == '\0') {
-        return 0;
-    }
-
-    lock_engine();
-
-    // 确保字体已初始化
-    static bool xt_font_initialized = false;
-    if (!xt_font_initialized) {
-        xt_eink_font_init();
-        xt_font_initialized = true;
-    }
-
-    (void)font_size;
-
-    // 获取文本宽度和高度
-    int text_width = xt_eink_font_get_text_width(text);
-    int text_height = xt_eink_font_get_height();
-
-    // 绘制背景（如果需要）
-    if (bg_color != COLOR_WHITE) {
-        display_clear_region(x, y, text_width, text_height, bg_color);
-    }
-
-    // 渲染中文文本到帧缓冲
-    // 注意：color 参数是前景色，0=黑，1=白
-    uint8_t render_color = (color == COLOR_BLACK) ? 0 : 1;
-    int actual_width = xt_eink_font_render_text(x, y, text, render_color,
-                                                s_framebuffer, 800, 480);
-
-    if (s_config.use_partial_refresh) {
-        expand_dirty_region(x, y, actual_width, text_height);
-    }
-
-    unlock_engine();
-
-    return actual_width;
-}
-
-int display_get_text_width(const char *text, int font_size)
-{
-    if (text == NULL) {
-        return 0;
-    }
-
-    (void)font_size;
-    return display_get_text_width_font(text, NULL);
-}
-
 int display_get_text_width_font(const char *text, sFONT *font)
 {
     if (text == NULL) {
@@ -885,12 +764,6 @@ int display_get_text_width_font(const char *text, sFONT *font)
     return (int)strlen(text) * get_ascii_advance_width(font);
 }
 
-int display_get_text_height(int font_size)
-{
-    (void)font_size;
-    return display_get_text_height_font(NULL);
-}
-
 int display_get_text_height_font(sFONT *font)
 {
     if (font == NULL) {
@@ -905,114 +778,7 @@ int display_get_text_height_font(sFONT *font)
     return h;
 }
 
-void display_draw_bitmap(int x, int y, int width, int height, const uint8_t *bitmap, bool invert)
-{
-    if (bitmap == NULL) {
-        return;
-    }
-
-    lock_engine();
-
-    // TODO: 实现位图绘制
-    // GUI_Paint 的 Paint_DrawBitMap 需要特定格式
-
-    if (s_config.use_partial_refresh) {
-        expand_dirty_region(x, y, width, height);
-    }
-    unlock_engine();
-}
-
 uint8_t* display_get_framebuffer(void)
 {
     return s_framebuffer;
-}
-
-void display_wait_refresh_complete(void)
-{
-    // EPD_4in26_ReadBusy() 会被 EPD 函数内部调用
-    // 这里可以添加额外的等待逻辑
-    vTaskDelay(pdMS_TO_TICKS(10));
-}
-
-/******************************************************************************
-function :	四阶灰度刷新实现
-parameter:	fast_mode - true 使用快刷模式，false 使用标准模式
-******************************************************************************/
-static void refresh_4gray_mode(bool fast_mode)
-{
-    // 分配 2bpp 缓冲区用于四阶灰度显示
-    // 800x480 像素 x 2 bits/pixel = 192000 字节 = 187.5 KB
-    const size_t gray_buffer_size = (800 * 480) / 4;  // 2bpp
-    uint8_t *gray_buffer = (uint8_t *)heap_caps_malloc(gray_buffer_size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-
-    if (gray_buffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate 4-gray buffer (%zu bytes), falling back to 1bpp", gray_buffer_size);
-        // 内存不足，回退到 1bpp 刷新
-        EPD_4in26_Display(s_framebuffer);
-        return;
-    }
-
-    ESP_LOGI(TAG, "Allocated 4-gray buffer: %zu bytes", gray_buffer_size);
-
-    // 清零灰度缓冲区（全部设为白色 0xC0）
-    memset(gray_buffer, 0xC0, gray_buffer_size);
-
-    // 转换 1bpp 帧缓冲到 4 阶灰度缓冲
-    // 策略：使用抖动算法将黑白图像转换为4阶灰度
-    // 为了简单高效，这里使用简单的阈值+抖动
-
-    for (int y = 0; y < 480; y++) {
-        for (int x = 0; x < 800; x++) {
-            // 从 1bpp 帧缓冲读取像素（物理坐标）
-            const uint32_t byte_idx = y * 100 + (x / 8);
-            const uint8_t bit_mask = 0x80 >> (x % 8);
-            const bool is_black = (s_framebuffer[byte_idx] & bit_mask) == 0;
-
-            // 简单的阈值抖动：基于位置的伪随机抖动
-            // 使用 (x + y) 的低2位作为抖动模式
-            const int dither = ((x >> 2) + (y >> 2)) & 0x3;
-
-            uint8_t gray_value;
-            if (is_black) {
-                // 黑色像素：根据抖动值选择不同的灰度
-                // 这会让黑色区域有纹理感，减少生硬感
-                switch (dither) {
-                    case 0: gray_value = 0x00; break;  // 最黑
-                    case 1: gray_value = 0x00; break;
-                    case 2: gray_value = 0x40; break;  // 深灰
-                    case 3: gray_value = 0x00; break;
-                    default: gray_value = 0x00; break;
-                }
-            } else {
-                // 白色像素：保持纯白或浅灰
-                switch (dither) {
-                    case 0: gray_value = 0xC0; break;  // 最白
-                    case 1: gray_value = 0xC0; break;
-                    case 2: gray_value = 0x80; break;  // 浅灰
-                    case 3: gray_value = 0xC0; break;
-                    default: gray_value = 0xC0; break;
-                }
-            }
-
-            // 写入 2bpp 灰度缓冲
-            // 每个像素 2 bits，4 像素/字节
-            const uint32_t gray_byte_idx = y * 200 + (x / 4);
-            const uint8_t gray_shift = 6 - ((x % 4) * 2);
-
-            // 清除该像素的旧值并设置新值
-            gray_buffer[gray_byte_idx] &= ~(0xC0 >> gray_shift);
-            gray_buffer[gray_byte_idx] |= (gray_value & 0xC0) >> gray_shift;
-        }
-    }
-
-    ESP_LOGI(TAG, "4-gray conversion complete, displaying...");
-
-    // 切换到四阶灰度模式并刷新
-    EPD_4in26_Init_4GRAY();
-    EPD_4in26_4GrayDisplay(gray_buffer);
-
-    // 释放临时缓冲区
-    heap_caps_free(gray_buffer);
-
-    ESP_LOGI(TAG, "4-gray refresh complete");
 }
