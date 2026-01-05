@@ -900,13 +900,13 @@ void EPD_4in26_Display_Fast(UBYTE *OldImage, UBYTE *NewImage)
 	EPD_4in26_SendCommand(0x1A); // Write to temperature register
 	EPD_4in26_SendData(0x5A);    // 25°C 补偿值
 
-	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: writing old frame to 0x26...");
-	// 步骤2：写入旧帧图像数据到 RAM 0x26
-	// 0x26 存储的是上一帧图像数据，局部刷新时需要与 0x24 对比来确定像素变化
+	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: writing new frame to 0x26...");
+	// 步骤2：写入当前帧图像数据到 RAM 0x26
+	// 0x26 和 0x24 都写入最新数据，确保局部刷新时对比基准正确
 	EPD_4in26_SendCommand(0x26);   //write RAM for previous frame
 	for(i=0; i<height; i++)
 	{
-		EPD_4in26_SendData2((UBYTE *)(OldImage+i*width), width);
+		EPD_4in26_SendData2((UBYTE *)(NewImage+i*width), width);
 	}
 
 	ESP_LOGI("EPD", "EPD_4in26_Display_Fast: writing new frame to 0x24...");

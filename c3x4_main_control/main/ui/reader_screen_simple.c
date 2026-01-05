@@ -414,14 +414,14 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
             // 下一页
             next_page();
             display_current_page();
-            display_refresh(REFRESH_MODE_PARTIAL_FAST);
+            display_refresh(REFRESH_MODE_PARTIAL);
             break;
 
         case BTN_LEFT:
             // 上一页
             prev_page();
             display_current_page();
-            display_refresh(REFRESH_MODE_PARTIAL_FAST);
+            display_refresh(REFRESH_MODE_PARTIAL);
             break;
 
         case BTN_BACK:

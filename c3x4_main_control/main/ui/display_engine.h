@@ -30,7 +30,6 @@ typedef enum {
     REFRESH_MODE_FULL,           // 全刷（最高清晰度，2s）
     REFRESH_MODE_FAST,           // 快刷（较快，1.5s）
     REFRESH_MODE_PARTIAL,        // 局刷（最快，0.3s，可能留残影）
-    REFRESH_MODE_PARTIAL_FAST,   // 快刷局刷（更快/更黑或更闪，依屏幕波形而定）
     REFRESH_MODE_4GRAY,          // 四阶灰度全刷（高质量灰度显示）
     REFRESH_MODE_4GRAY_FAST      // 四阶灰度快刷（快速灰度显示）
 } refresh_mode_t;
