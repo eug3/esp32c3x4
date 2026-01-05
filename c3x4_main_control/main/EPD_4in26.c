@@ -359,12 +359,10 @@ static void EPD_4in26_TurnOnDisplay_Part(void)
 	EPD_4in26_SendData(0x00);
 
 	// 3. 执行局部刷新（使用波形 LUT 模式）
-	for (int pass = 0; pass < 2; pass++) {
-		EPD_4in26_SendCommand(0x22); // Display Update Control
-		EPD_4in26_SendData(0xFF);    // partial update mode with LUT
-		EPD_4in26_SendCommand(0x20); // Activate Display Update Sequence
-		EPD_4in26_ReadBusy();
-	}
+	EPD_4in26_SendCommand(0x22); // Display Update Control
+	EPD_4in26_SendData(0xFF);    // partial update mode with LUT
+	EPD_4in26_SendCommand(0x20); // Activate Display Update Sequence
+	EPD_4in26_ReadBusy();
 }
 
 static void EPD_4in26_TurnOnDisplay_Part_Fast(void)
@@ -1306,11 +1304,6 @@ static void EPD_4in26_Display_Part_Stream_Impl(UBYTE *full_framebuffer, uint32_t
 		}
 	}
 	
-	EPD_4in26_SendRegion_FromFramebuffer(full_framebuffer, fb_stride, x_offset_bytes, w_bytes, y, h_actual);
-
-	// 同步更新上一帧缓冲区 (0x26)，否则下一次局刷对比基准会错，表现为“位置/内容不稳定”
-	EPD_4in26_SetCursor(x_aligned, y_end_reversed);
-	EPD_4in26_SendCommand(0x26);
 	EPD_4in26_SendRegion_FromFramebuffer(full_framebuffer, fb_stride, x_offset_bytes, w_bytes, y, h_actual);
 
 	// ============================================

@@ -62,48 +62,65 @@ static size_t jpeg_input_func(JDEC *jdec, uint8_t *buff, size_t ndata)
 }
 
 /**
- * @brief JPEG 像素绘制回调函数
+ * @brief JPEG 像素绘制回调函数（优化版本）
  */
 static int jpeg_output_func(JDEC *jdec, void *bitmap, JRECT *rect)
 {
     jpeg_helper_t *context = (jpeg_helper_t *)jdec->device;
     uint8_t *rgb = (uint8_t *)bitmap;
 
-    // 喂狗延迟 (每行都喂狗)
+    // 喂狗延迟优化：每 16 行才喂狗一次（而不是每行）
     if (rect->top != context->last_y) {
-        context->last_y = rect->top;
-        vTaskDelay(1);  // 让出 CPU 时间，防止看门狗触发
+        if ((rect->top & 0xF) == 0) {  // 每 16 行检查一次
+            context->last_y = rect->top;
+            vTaskDelay(1);  // 让出 CPU 时间，防止看门狗触发
+        }
     }
 
-    // 逐像素绘制
-    for (int y = rect->top; y <= rect->bottom; y++) {
-        for (int x = rect->left; x <= rect->right; x++) {
+    // 获取 framebuffer 直接访问（避免锁开销）
+    extern uint8_t* display_get_framebuffer(void);
+    uint8_t *fb = display_get_framebuffer();
+
+    // 优化：批量处理像素，减少函数调用开销
+    const int rect_width = rect->right - rect->left + 1;
+    const int rect_height = rect->bottom - rect->top + 1;
+
+    for (int y = 0; y < rect_height; y++) {
+        const int src_y = rect->top + y;
+        const int dest_y = context->dest_y + (int)(src_y * context->y_scale);
+
+        for (int x = 0; x < rect_width; x++) {
+            const int src_x = rect->left + x;
+
             // 读取 RGB 像素
             uint8_t r = *rgb++;
             uint8_t g = *rgb++;
             uint8_t b = *rgb++;
 
-            // 转换为灰度 (标准公式: Gray = (R*38 + G*75 + B*15) >> 7)
-            uint8_t gray = (r * 38 + g * 75 + b * 15) >> 7;
+            // 快速灰度转换 (优化公式: Gray = (R*77 + G*150 + B*29) >> 8)
+            uint8_t gray = (r * 77 + g * 150 + b * 29) >> 8;
 
-            // 计算目标坐标 (应用缩放)
-            int dest_x = context->dest_x + (int)(x * context->x_scale);
-            int dest_y = context->dest_y + (int)(y * context->y_scale);
+            // 阈值转换为黑白
+            uint8_t bw = (gray < 128) ? 0 : 1;
 
-            // 绘制像素 (考虑缩放)
-            if (context->x_scale >= 1.0f && context->y_scale >= 1.0f) {
-                // 放大: 简单地绘制多个像素
-                int scale_x = (int)context->x_scale;
-                int scale_y = (int)context->y_scale;
+            // 计算目标坐标
+            const int dest_x = context->dest_x + (int)(src_x * context->x_scale);
 
-                for (int sy = 0; sy < scale_y; sy++) {
-                    for (int sx = 0; sx < scale_x; sx++) {
-                        display_draw_pixel(dest_x + sx, dest_y + sy, gray);
-                    }
+            // 直接写入 framebuffer（物理坐标，800x480，ROTATE_270）
+            // 逻辑坐标 (dest_x, dest_y) -> 物理坐标需要转换
+            // ROTATE_270: logical(x,y) -> physical(479-y, x)
+            const int phys_x = 479 - dest_y;
+            const int phys_y = dest_x;
+
+            if (phys_x >= 0 && phys_x < 800 && phys_y >= 0 && phys_y < 480) {
+                const uint32_t byte_idx = phys_y * 100 + (phys_x / 8);
+                const uint8_t bit_mask = 0x80 >> (phys_x % 8);
+
+                if (bw == 0) {
+                    fb[byte_idx] &= ~bit_mask;  // 黑色
+                } else {
+                    fb[byte_idx] |= bit_mask;   // 白色
                 }
-            } else {
-                // 缩小或不缩放: 直接绘制
-                display_draw_pixel(dest_x, dest_y, gray);
             }
         }
     }
