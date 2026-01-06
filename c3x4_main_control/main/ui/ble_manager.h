@@ -19,6 +19,10 @@ typedef struct {
     int8_t rssi;                // 信号强度
     char name[32];              // 设备名称
     uint16_t name_len;          // 名称长度
+
+    // If present in advertisement (AD type 0x06/0x07), first 128-bit service UUID (little-endian).
+    bool has_service_uuid128;
+    uint8_t service_uuid128_le[16];
 } ble_device_info_t;
 
 /**
@@ -85,6 +89,12 @@ bool ble_manager_stop_scan(void);
  * @return true 成功，false 失败
  */
 bool ble_manager_connect(const uint8_t *addr);
+
+/**
+ * @brief Set target 128-bit service UUID (little-endian) discovered from advertisement.
+ * Must be called before ble_manager_connect() for dynamic UUID exchange.
+ */
+void ble_manager_set_target_service_uuid128_le(const uint8_t uuid_le[16]);
 
 /**
  * @brief 断开蓝牙连接

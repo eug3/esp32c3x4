@@ -143,9 +143,15 @@ static void ble_device_found_callback(const ble_device_info_t *device)
              device->addr[3], device->addr[4], device->addr[5],
              device->rssi);
 
+    // 动态 UUID 交换：只连接“明确广播了服务 UUID”的设备，避免误连。
+    if (!device->has_service_uuid128) {
+        return;
+    }
+
     // 自动连接到强信号设备
     if (device->rssi > -70) {
         ESP_LOGI(TAG, "Attempting to connect to: %s", device->name);
+        ble_manager_set_target_service_uuid128_le(device->service_uuid128_le);
         ble_reader_screen_connect_device(device->addr);
     }
 }

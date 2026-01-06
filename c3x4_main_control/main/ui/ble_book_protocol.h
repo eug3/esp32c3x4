@@ -26,11 +26,17 @@ typedef enum {
     BLE_PKT_TYPE_ERROR = 0xFF,       // 错误包
 } ble_pkt_type_t;
 
+// Ensure on-air packet layout is stable across compilers/languages.
+// ESP32 (GCC) default struct alignment would otherwise insert padding.
+#ifndef BLE_PACKED
+#define BLE_PACKED __attribute__((packed))
+#endif
+
 /**
  * @brief 请求包格式
  * 客户端发送：请求从指定 book_id 开始的 N 页数据
  */
-typedef struct {
+typedef struct BLE_PACKED {
     uint8_t type;           // BLE_PKT_TYPE_REQUEST
     uint16_t book_id;       // 书籍ID
     uint16_t start_page;    // 起始页码
@@ -44,7 +50,7 @@ typedef struct {
 /**
  * @brief 数据包头（响应包的头部）
  */
-typedef struct {
+typedef struct BLE_PACKED {
     uint8_t type;           // BLE_PKT_TYPE_DATA
     uint16_t book_id;       // 书籍ID
     uint16_t page_num;      // 页码
@@ -57,20 +63,24 @@ typedef struct {
  * 由于单个包大小限制，48KB数据会分多个小包传输
  * 每个小包的最大大小约为 247 字节（BLE ATT MTU）
  */
-typedef struct {
+// Chunk layout (packed):
+// header (11) + offset (4) + chunk_size (2) + data (<= 227) = <= 244 bytes
+// which fits common ATT payload size when MTU=247.
+#define BLE_DATA_CHUNK_DATA_SIZE 227
+
+typedef struct BLE_PACKED {
     ble_data_pkt_header_t header;   // 头部（8字节）
     uint32_t offset;                // 数据在页中的偏移（4字节）
     uint16_t chunk_size;            // 本次传输的数据大小（2字节）
-    uint8_t data[231];              // 实际数据（247 - 8 - 4 - 2 = 233字节）
+    uint8_t data[BLE_DATA_CHUNK_DATA_SIZE];
 } ble_data_pkt_chunk_t;
 
 #define BLE_DATA_CHUNK_SIZE (sizeof(ble_data_pkt_chunk_t))
-#define BLE_DATA_CHUNK_DATA_SIZE 231  // 单个包的最大数据大小
 
 /**
  * @brief 结束包（无更多数据）
  */
-typedef struct {
+typedef struct BLE_PACKED {
     uint8_t type;           // BLE_PKT_TYPE_END
     uint16_t book_id;       // 书籍ID
     uint16_t last_page;     // 最后一页页码

@@ -15,6 +15,9 @@
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
+#include "host/ble_gattc.h"
+#include "os/os_mbuf.h"
+#include "host/ble_uuid.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include <string.h>
@@ -28,6 +31,17 @@ static struct {
     bool connected;
     uint8_t connected_addr[6];
     uint16_t connected_handle;
+
+    // Dynamic UUID exchange: selected service UUID from advertisement (little-endian bytes).
+    bool target_uuid_valid;
+    ble_uuid128_t target_uuid;
+
+    // Discovered IO characteristic (WRITE+NOTIFY) handles.
+    bool gatt_ready;
+    uint16_t svc_start_handle;
+    uint16_t svc_end_handle;
+    uint16_t io_val_handle;
+    uint16_t io_cccd_handle;
     
     // 回调函数
     ble_on_device_found_cb device_found_cb;
@@ -40,7 +54,148 @@ static struct {
     .device_found_cb = NULL,
     .connect_cb = NULL,
     .data_received_cb = NULL,
+    .target_uuid_valid = false,
+    .gatt_ready = false,
+    .svc_start_handle = 0,
+    .svc_end_handle = 0,
+    .io_val_handle = 0,
+    .io_cccd_handle = 0,
 };
+
+static void reset_gatt_state(void)
+{
+    s_ble_state.gatt_ready = false;
+    s_ble_state.svc_start_handle = 0;
+    s_ble_state.svc_end_handle = 0;
+    s_ble_state.io_val_handle = 0;
+    s_ble_state.io_cccd_handle = 0;
+}
+
+static void parse_adv_for_uuid128(const uint8_t *data, uint8_t data_len, ble_device_info_t *out)
+{
+    if (!out) return;
+    out->has_service_uuid128 = false;
+    memset(out->service_uuid128_le, 0, sizeof(out->service_uuid128_le));
+    if (!data || data_len == 0) return;
+
+    uint8_t i = 0;
+    while (i < data_len) {
+        uint8_t len = data[i];
+        if (len == 0) break;
+        if (i + len + 1 > data_len) break;
+        uint8_t type = data[i + 1];
+        const uint8_t *payload = &data[i + 2];
+        uint8_t payload_len = len - 1;
+
+        // 0x06: Incomplete List of 128-bit Service Class UUIDs
+        // 0x07: Complete List of 128-bit Service Class UUIDs
+        if ((type == 0x06 || type == 0x07) && payload_len >= 16) {
+            memcpy(out->service_uuid128_le, payload, 16);
+            out->has_service_uuid128 = true;
+            return;
+        }
+
+        i += len + 1;
+    }
+}
+
+static int gatt_disc_svc_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
+                            const struct ble_gatt_svc *service, void *arg);
+static int gatt_disc_chr_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
+                            const struct ble_gatt_chr *chr, void *arg);
+static int gatt_disc_dsc_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
+                            uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc, void *arg);
+
+static void maybe_enable_notify(uint16_t conn_handle)
+{
+    if (!s_ble_state.io_cccd_handle || !s_ble_state.io_val_handle) {
+        return;
+    }
+
+    // CCCD: 0x0001 enable notifications
+    uint8_t cccd_val[2] = {0x01, 0x00};
+    int rc = ble_gattc_write_flat(conn_handle, s_ble_state.io_cccd_handle, cccd_val, sizeof(cccd_val), NULL, NULL);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Failed to write CCCD rc=%d", rc);
+        return;
+    }
+
+    s_ble_state.gatt_ready = true;
+    ESP_LOGI(TAG, "GATT ready: io_val_handle=%u cccd_handle=%u", s_ble_state.io_val_handle, s_ble_state.io_cccd_handle);
+}
+
+static int gatt_disc_dsc_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
+                            uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc, void *arg)
+{
+    (void)arg;
+    if (error && error->status != 0) {
+        if (error->status == BLE_HS_EDONE) {
+            maybe_enable_notify(conn_handle);
+        }
+        return 0;
+    }
+
+    if (dsc) {
+        // CCCD UUID 0x2902
+        const ble_uuid16_t cccd = BLE_UUID16_INIT(0x2902);
+        if (ble_uuid_cmp(&dsc->uuid.u, &cccd.u) == 0) {
+            s_ble_state.io_cccd_handle = dsc->handle;
+        }
+    }
+    return 0;
+}
+
+static int gatt_disc_chr_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
+                            const struct ble_gatt_chr *chr, void *arg)
+{
+    (void)arg;
+    if (error && error->status != 0) {
+        if (error->status == BLE_HS_EDONE) {
+            // Start descriptor discovery for the chosen characteristic
+            if (s_ble_state.io_val_handle && s_ble_state.svc_end_handle) {
+                int rc = ble_gattc_disc_all_dscs(conn_handle, s_ble_state.io_val_handle, s_ble_state.svc_end_handle, gatt_disc_dsc_cb, NULL);
+                ESP_LOGI(TAG, "Disc dscs rc=%d", rc);
+            }
+        }
+        return 0;
+    }
+
+    if (chr) {
+        // Need a characteristic that can WRITE and NOTIFY.
+        bool can_write = (chr->properties & (BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP)) != 0;
+        bool can_notify = (chr->properties & (BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_INDICATE)) != 0;
+        if (can_write && can_notify && s_ble_state.io_val_handle == 0) {
+            s_ble_state.io_val_handle = chr->val_handle;
+            ESP_LOGI(TAG, "Selected IO characteristic val_handle=%u props=0x%02x", chr->val_handle, chr->properties);
+        }
+    }
+
+    return 0;
+}
+
+static int gatt_disc_svc_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
+                            const struct ble_gatt_svc *service, void *arg)
+{
+    (void)arg;
+    if (error && error->status != 0) {
+        if (error->status == BLE_HS_EDONE) {
+            if (s_ble_state.svc_start_handle && s_ble_state.svc_end_handle) {
+                int rc = ble_gattc_disc_all_chrs(conn_handle, s_ble_state.svc_start_handle, s_ble_state.svc_end_handle, gatt_disc_chr_cb, NULL);
+                ESP_LOGI(TAG, "Disc chrs rc=%d", rc);
+            } else {
+                ESP_LOGW(TAG, "Target service not found on peer");
+            }
+        }
+        return 0;
+    }
+
+    if (service) {
+        s_ble_state.svc_start_handle = service->start_handle;
+        s_ble_state.svc_end_handle = service->end_handle;
+        ESP_LOGI(TAG, "Found target service: start=%u end=%u", service->start_handle, service->end_handle);
+    }
+    return 0;
+}
 
 /**********************
  *  STATIC FUNCTIONS
@@ -84,6 +239,9 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
                     
                     i += len + 1;
                 }
+
+                // Parse first advertised 128-bit service UUID (for dynamic UUID exchange).
+                parse_adv_for_uuid128(event->disc.data, event->disc.data_len, &device_info);
                 
                 s_ble_state.device_found_cb(&device_info);
             }
@@ -95,6 +253,15 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
             s_ble_state.connected = true;
             s_ble_state.connected_handle = event->connect.conn_handle;
             memcpy(s_ble_state.connected_addr, event->connect.peer_id_addr.val, 6);
+            reset_gatt_state();
+
+            // Start GATT discovery for the dynamically exchanged service UUID.
+            if (s_ble_state.target_uuid_valid) {
+                int rc = ble_gattc_disc_svc_by_uuid(s_ble_state.connected_handle, &s_ble_state.target_uuid.u, gatt_disc_svc_cb, NULL);
+                ESP_LOGI(TAG, "Disc svc by uuid rc=%d", rc);
+            } else {
+                ESP_LOGW(TAG, "No target service UUID set; will not start GATT discovery");
+            }
             
             if (s_ble_state.connect_cb != NULL) {
                 s_ble_state.connect_cb(true);
@@ -107,9 +274,27 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
             s_ble_state.connected = false;
             s_ble_state.connected_handle = 0;
             memset(s_ble_state.connected_addr, 0, 6);
+            reset_gatt_state();
             
             if (s_ble_state.connect_cb != NULL) {
                 s_ble_state.connect_cb(false);
+            }
+            break;
+
+        case BLE_GAP_EVENT_NOTIFY_RX:
+            // Receive notification/indication from peer
+            if (s_ble_state.data_received_cb != NULL && event->notify_rx.om != NULL) {
+                uint16_t om_len = OS_MBUF_PKTLEN(event->notify_rx.om);
+                if (om_len > 0) {
+                    uint8_t *buf = (uint8_t *)malloc(om_len);
+                    if (buf != NULL) {
+                        int copied = os_mbuf_copydata(event->notify_rx.om, 0, om_len, buf);
+                        if (copied == 0) {
+                            s_ble_state.data_received_cb(buf, om_len);
+                        }
+                        free(buf);
+                    }
+                }
             }
             break;
             
@@ -298,6 +483,10 @@ bool ble_manager_connect(const uint8_t *addr)
     
     ESP_LOGI(TAG, "Connecting to device: %02x:%02x:%02x:%02x:%02x:%02x",
              addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+
+    if (!s_ble_state.target_uuid_valid) {
+        ESP_LOGW(TAG, "Target service UUID not set; connection may be useless");
+    }
     
     // 停止扫描
     if (s_ble_state.scanning) {
@@ -318,6 +507,19 @@ bool ble_manager_connect(const uint8_t *addr)
     
     ESP_LOGI(TAG, "Connection initiated");
     return true;
+}
+
+void ble_manager_set_target_service_uuid128_le(const uint8_t uuid_le[16])
+{
+    if (uuid_le == NULL) {
+        s_ble_state.target_uuid_valid = false;
+        return;
+    }
+    s_ble_state.target_uuid.u.type = BLE_UUID_TYPE_128;
+    memcpy(s_ble_state.target_uuid.value, uuid_le, 16);
+    s_ble_state.target_uuid_valid = true;
+    ESP_LOGI(TAG, "Target service UUID set (LE): %02x%02x%02x%02x...",
+             uuid_le[0], uuid_le[1], uuid_le[2], uuid_le[3]);
 }
 
 bool ble_manager_disconnect(void)
@@ -349,10 +551,19 @@ int ble_manager_send_data(const uint8_t *data, uint16_t length)
         return -1;
     }
     
-    // TODO: 实现通过GATT特性发送数据
-    // 这需要根据目标设备的GATT特性进行配置
-    
-    ESP_LOGI(TAG, "Data sent: %u bytes", length);
+    if (!s_ble_state.gatt_ready || s_ble_state.io_val_handle == 0) {
+        ESP_LOGW(TAG, "GATT not ready; drop send len=%u", length);
+        return -1;
+    }
+
+    // Write request to IO characteristic.
+    int rc = ble_gattc_write_flat(s_ble_state.connected_handle, s_ble_state.io_val_handle, data, length, NULL, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gattc_write_flat failed rc=%d", rc);
+        return -1;
+    }
+
+    ESP_LOGD(TAG, "Data write queued: %u bytes", length);
     return length;
 }
 
