@@ -14,13 +14,35 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include <string.h>
+#include <inttypes.h>
 #include <ctype.h>
 
 static const char *TAG = "EPUB_PARSER";
 
 // NVS 命名空间
 #define NVS_NAMESPACE "reader_pos"
-#define NVS_KEY_PREFIX "epub_"
+// 注意：ESP-IDF NVS key 最长 15 字符，且建议只用 [0-9A-Za-z_]
+#define NVS_KEY_PREFIX "ep_"
+
+static uint32_t fnv1a32_str(const char *s)
+{
+    const uint32_t FNV_OFFSET = 2166136261u;
+    const uint32_t FNV_PRIME = 16777619u;
+    uint32_t h = FNV_OFFSET;
+    if (s == NULL) {
+        return h;
+    }
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        h ^= (uint32_t)(*p);
+        h *= FNV_PRIME;
+    }
+    return h;
+}
+
+static uint32_t make_epub_hash(const char *epub_path)
+{
+    return fnv1a32_str(epub_path);
+}
 
 // 最大章节数
 #define MAX_CHAPTERS 200
@@ -407,25 +429,17 @@ bool epub_parser_save_position(const epub_reader_t *reader) {
         filename++;  // 跳过 '/'
     }
 
-    char key[64];
-    char base_key[32];  // 存储基础键名
-
-    // 创建基础键名（截断文件名到 20 字符）
-    snprintf(base_key, sizeof(base_key), "%.20s", filename);
-    // 替换文件名中的特殊字符为下划线
-    for (char *p = base_key; *p; p++) {
-        if (*p == ' ' || *p == '.' || *p == '-' || *p == '/') {
-            *p = '_';
-        }
-    }
+    // 生成短 key：ep_XXXXXXXX_ch / ep_XXXXXXXX_pg （总长度 14）
+    uint32_t h = make_epub_hash(reader->epub_path);
+    char key[16];
 
     // 保存章节
-    snprintf(key, sizeof(key), "%s%s_ch", NVS_KEY_PREFIX, base_key);
-    err = nvs_set_i32(nvs_handle, key, reader->position.current_chapter);
+    (void)snprintf(key, sizeof(key), "ep_%08" PRIx32 "_ch", h);
+    err = nvs_set_i32(nvs_handle, key, (int32_t)reader->position.current_chapter);
 
     if (err == ESP_OK) {
-        snprintf(key, sizeof(key), "%s%s_pg", NVS_KEY_PREFIX, base_key);
-        err = nvs_set_i32(nvs_handle, key, reader->position.page_number);
+        (void)snprintf(key, sizeof(key), "ep_%08" PRIx32 "_pg", h);
+        err = nvs_set_i32(nvs_handle, key, (int32_t)reader->position.page_number);
     }
 
     if (err == ESP_OK) {
@@ -465,25 +479,15 @@ bool epub_parser_load_position(epub_reader_t *reader) {
         filename++;  // 跳过 '/'
     }
 
-    char key[64];
-    char base_key[32];  // 存储基础键名
-
-    // 创建基础键名（截断文件名到 20 字符）
-    snprintf(base_key, sizeof(base_key), "%.20s", filename);
-    // 替换文件名中的特殊字符为下划线
-    for (char *p = base_key; *p; p++) {
-        if (*p == ' ' || *p == '.' || *p == '-' || *p == '/') {
-            *p = '_';
-        }
-    }
-
-    snprintf(key, sizeof(key), "%s%s_ch", NVS_KEY_PREFIX, base_key);
+    uint32_t h = make_epub_hash(reader->epub_path);
+    char key[16];
+    (void)snprintf(key, sizeof(key), "ep_%08" PRIx32 "_ch", h);
 
     int32_t saved_chapter = 0;
     err = nvs_get_i32(nvs_handle, key, &saved_chapter);
 
     if (err == ESP_OK) {
-        snprintf(key, sizeof(key), "%s%s_pg", NVS_KEY_PREFIX, base_key);
+        (void)snprintf(key, sizeof(key), "ep_%08" PRIx32 "_pg", h);
         int32_t saved_page = 0;
         err = nvs_get_i32(nvs_handle, key, &saved_page);
 

@@ -11,8 +11,10 @@
 #include "epub_parser.h"
 #include "xt_eink_font_impl.h"
 #include "esp_log.h"
+#include "gb18030_conv.h"
 #include <string.h>
 #include <stdio.h>
+#include <sys/stat.h>
 
 static const char *TAG = "READER_SCREEN";
 
@@ -23,6 +25,14 @@ static const char *TAG = "READER_SCREEN";
 #define CACHE_WINDOW_BEFORE 2   // 当前页之前缓存页数
 #define CACHE_WINDOW_AFTER  5   // 当前页之后缓存页数
 #define MAX_CACHE_PAGES     10  // 最大缓存页数（避免占满 Flash）
+
+// TXT 滑动缓存（按“字/字符”计数）
+// 需求：缓存 4000 字；当光标移动到 3000 之后，重建缓存并让光标回到 1000 左右。
+#define TXT_CACHE_CHARS 4000
+#define TXT_CACHE_RECACHE_THRESHOLD 3000
+#define TXT_CACHE_CURSOR_RESET 1000
+
+#define TXT_CACHE_HISTORY_DEPTH 16
 
 static screen_t g_reader_screen = {0};
 
@@ -43,6 +53,23 @@ static struct {
     int total_pages;
     int chars_per_page;
     bool is_loaded;
+
+    // TXT 缓存状态（flash-backed）
+    struct {
+        bool ready;
+        char cache_path[128];
+        FILE *fp;
+        // 每个字符对应的“源文件 byte offset”（字符开始位置）
+        int32_t src_pos[TXT_CACHE_CHARS + 1];
+        // 每个字符在缓存文件内的 byte offset（前缀和）
+        uint32_t cache_off[TXT_CACHE_CHARS + 1];
+        uint16_t cached_chars;
+        uint16_t cursor; // 当前页起始字符（在缓存内）
+        int last_page_consumed_chars; // 最近一次渲染占用的字符数
+
+        int32_t history_src_pos[TXT_CACHE_HISTORY_DEPTH];
+        int history_len;
+    } txt_cache;
 } s_reader_state = {
     .type = READER_TYPE_NONE,
     .epub_reader = {{0}},  // 嵌套结构体需要双重大括号
@@ -52,31 +79,393 @@ static struct {
     .is_loaded = false,
 };
 
+static uint32_t fnv1a32_str_local(const char *s)
+{
+    const uint32_t FNV_OFFSET = 2166136261u;
+    const uint32_t FNV_PRIME = 16777619u;
+    uint32_t h = FNV_OFFSET;
+    if (s == NULL) {
+        return h;
+    }
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        h ^= (uint32_t)(*p);
+        h *= FNV_PRIME;
+    }
+    return h;
+}
+
+static void ensure_littlefs_cache_dir(void)
+{
+    // 目录不存在就创建；忽略已存在错误
+    (void)mkdir("/littlefs", 0755);
+    (void)mkdir("/littlefs/txt_cache", 0755);
+}
+
+static void txt_cache_close(void)
+{
+    if (s_reader_state.txt_cache.fp != NULL) {
+        fclose(s_reader_state.txt_cache.fp);
+        s_reader_state.txt_cache.fp = NULL;
+    }
+    s_reader_state.txt_cache.ready = false;
+    s_reader_state.txt_cache.cached_chars = 0;
+    s_reader_state.txt_cache.cursor = 0;
+    s_reader_state.txt_cache.last_page_consumed_chars = 0;
+}
+
+static int read_next_char_utf8(txt_reader_t *reader, char out_utf8[4], uint8_t *out_utf8_len, int32_t *out_src_start)
+{
+    if (reader == NULL || !reader->is_open || out_utf8 == NULL || out_utf8_len == NULL || out_src_start == NULL) {
+        return 0;
+    }
+
+    while (1) {
+        int32_t start_pos = (int32_t)reader->position.file_position;
+        int c = fgetc(reader->file);
+        if (c == EOF) {
+            return 0;
+        }
+        reader->position.file_position++;
+
+        // 跳过 CR
+        if (c == '\r') {
+            continue;
+        }
+
+        *out_src_start = start_pos;
+
+        // 换行
+        if (c == '\n') {
+            out_utf8[0] = (char)'\n';
+            *out_utf8_len = 1;
+            return 1;
+        }
+
+        // GB18030/GBK：读取 1 或 2 字节并转 UTF-8
+        if (reader->encoding == TXT_ENCODING_GB18030) {
+            uint8_t raw[2];
+            size_t raw_len = 0;
+            raw[raw_len++] = (uint8_t)c;
+
+            if (raw[0] >= 0x81 && raw[0] <= 0xFE) {
+                int c2 = fgetc(reader->file);
+                if (c2 == EOF) {
+                    // 文件结束，退化为 '?'
+                    out_utf8[0] = '?';
+                    *out_utf8_len = 1;
+                    return 1;
+                }
+                uint8_t b2 = (uint8_t)c2;
+
+                // 校验第二字节
+                if (b2 >= 0x40 && b2 <= 0xFE && b2 != 0x7F) {
+                    raw[raw_len++] = b2;
+                    reader->position.file_position++;
+                } else {
+                    // 无效 second byte：放回
+                    ungetc(c2, reader->file);
+                }
+            }
+
+            char tmp_out[8];
+            int n = gb18030_to_utf8(raw, raw_len, tmp_out, sizeof(tmp_out));
+            if (n <= 0) {
+                out_utf8[0] = '?';
+                *out_utf8_len = 1;
+                return 1;
+            }
+
+            // 期望单个字符输出长度 <= 4
+            if (n > 4) {
+                out_utf8[0] = '?';
+                *out_utf8_len = 1;
+                return 1;
+            }
+
+            memcpy(out_utf8, tmp_out, (size_t)n);
+            *out_utf8_len = (uint8_t)n;
+            return 1;
+        }
+
+        // UTF-8/ASCII
+        if (c < 0x80) {
+            out_utf8[0] = (char)c;
+            *out_utf8_len = 1;
+            return 1;
+        }
+
+        unsigned char first = (unsigned char)c;
+        int utf8_len = 0;
+        if ((first & 0xE0) == 0xC0) {
+            utf8_len = 2;
+        } else if ((first & 0xF0) == 0xE0) {
+            utf8_len = 3;
+        } else if ((first & 0xF8) == 0xF0) {
+            utf8_len = 4;
+        } else {
+            out_utf8[0] = '?';
+            *out_utf8_len = 1;
+            return 1;
+        }
+
+        out_utf8[0] = (char)c;
+        int got = 1;
+        for (int i = 1; i < utf8_len; i++) {
+            int nb = fgetc(reader->file);
+            if (nb == EOF) {
+                // EOF：退化为 '?'
+                out_utf8[0] = '?';
+                *out_utf8_len = 1;
+                return 1;
+            }
+            unsigned char cont = (unsigned char)nb;
+            if ((cont & 0xC0) != 0x80) {
+                // 非 continuation，放回
+                ungetc(nb, reader->file);
+                out_utf8[0] = '?';
+                *out_utf8_len = 1;
+                return 1;
+            }
+            out_utf8[got++] = (char)nb;
+            reader->position.file_position++;
+        }
+
+        *out_utf8_len = (uint8_t)got;
+        return 1;
+    }
+}
+
+static bool txt_cache_build_at(int32_t start_src_pos, uint16_t cursor_reset)
+{
+    if (!s_reader_state.is_loaded || s_reader_state.type != READER_TYPE_TXT) {
+        return false;
+    }
+
+    ensure_littlefs_cache_dir();
+
+    // 生成缓存路径（按文件路径 hash）
+    uint32_t h = fnv1a32_str_local(s_reader_state.file_path);
+    snprintf(s_reader_state.txt_cache.cache_path, sizeof(s_reader_state.txt_cache.cache_path),
+             "/littlefs/txt_cache/txt_%08x.bin", (unsigned)h);
+
+    // 关闭旧缓存句柄
+    txt_cache_close();
+
+    // 定位到缓存起点
+    if (!txt_reader_seek(&s_reader_state.txt_reader, (long)start_src_pos)) {
+        ESP_LOGW(TAG, "txt_cache seek failed: %ld", (long)start_src_pos);
+        return false;
+    }
+
+    FILE *fp = fopen(s_reader_state.txt_cache.cache_path, "wb+");
+    if (fp == NULL) {
+        ESP_LOGE(TAG, "Failed to open txt cache file: %s", s_reader_state.txt_cache.cache_path);
+        return false;
+    }
+
+    s_reader_state.txt_cache.fp = fp;
+    s_reader_state.txt_cache.cache_off[0] = 0;
+    s_reader_state.txt_cache.cached_chars = 0;
+
+    uint32_t off = 0;
+    for (uint16_t i = 0; i < TXT_CACHE_CHARS; i++) {
+        char utf8[4];
+        uint8_t ulen = 0;
+        int32_t src_start = 0;
+        int ok = read_next_char_utf8(&s_reader_state.txt_reader, utf8, &ulen, &src_start);
+        if (ok == 0) {
+            break;
+        }
+
+        s_reader_state.txt_cache.src_pos[i] = src_start;
+        s_reader_state.txt_cache.cache_off[i] = off;
+
+        size_t wn = fwrite(utf8, 1, (size_t)ulen, fp);
+        if (wn != (size_t)ulen) {
+            ESP_LOGE(TAG, "Write txt cache failed");
+            fclose(fp);
+            s_reader_state.txt_cache.fp = NULL;
+            remove(s_reader_state.txt_cache.cache_path);
+            return false;
+        }
+
+        off += (uint32_t)ulen;
+        s_reader_state.txt_cache.cached_chars++;
+    }
+
+    // 结尾哨兵：src_pos[cached_chars] 记录“下一字符开始”的文件位置
+    s_reader_state.txt_cache.src_pos[s_reader_state.txt_cache.cached_chars] = (int32_t)s_reader_state.txt_reader.position.file_position;
+    s_reader_state.txt_cache.cache_off[s_reader_state.txt_cache.cached_chars] = off;
+    fflush(fp);
+
+    if (cursor_reset > s_reader_state.txt_cache.cached_chars) {
+        cursor_reset = s_reader_state.txt_cache.cached_chars;
+    }
+    s_reader_state.txt_cache.cursor = cursor_reset;
+    s_reader_state.txt_cache.last_page_consumed_chars = 0;
+    s_reader_state.txt_cache.ready = true;
+
+    // 保持 txt_reader 的 file_position 对齐到当前 cursor（保存进度用）
+    (void)txt_reader_seek(&s_reader_state.txt_reader, (long)s_reader_state.txt_cache.src_pos[s_reader_state.txt_cache.cursor]);
+
+    ESP_LOGD(TAG, "TXT cache built: chars=%u start=%ld cursor=%u path=%s",
+             (unsigned)s_reader_state.txt_cache.cached_chars,
+             (long)start_src_pos,
+             (unsigned)s_reader_state.txt_cache.cursor,
+             s_reader_state.txt_cache.cache_path);
+    return true;
+}
+
+static bool txt_cache_ensure_ready(void)
+{
+    if (s_reader_state.txt_cache.ready && s_reader_state.txt_cache.fp != NULL) {
+        return true;
+    }
+    int32_t pos = (int32_t)s_reader_state.txt_reader.position.file_position;
+    return txt_cache_build_at(pos, 0);
+}
+
+static int txt_cache_get_chinese_font_width_cached(void)
+{
+    static int cached_width = 0;
+    if (cached_width > 0) {
+        return cached_width;
+    }
+
+    int w = 19;  // Default fallback
+    xt_eink_glyph_t glyph;
+    if (xt_eink_font_get_glyph(0x4E2D, &glyph) && glyph.width > 0) {
+        w = glyph.width;
+    }
+
+    cached_width = w;
+    return cached_width;
+}
+
+static inline int txt_cache_fast_char_width(const char *ch, uint32_t len, int ascii_w, int cjk_w)
+{
+    if (len == 1) {
+        unsigned char c = (unsigned char)ch[0];
+        if (c < 0x80) {
+            if (c == '\t') {
+                return ascii_w * 4;
+            }
+            return ascii_w;
+        }
+    }
+
+    (void)ch;
+    return (cjk_w > 0) ? cjk_w : ascii_w;
+}
+
+static int txt_cache_format_current_page(char *out, size_t out_size, int target_lines, int *out_consumed_chars)
+{
+    if (out_consumed_chars) {
+        *out_consumed_chars = 0;
+    }
+
+    if (!txt_cache_ensure_ready() || out == NULL || out_size < 2) {
+        return -1;
+    }
+
+    sFONT *ui_font = display_get_default_ascii_font();
+    int max_width = SCREEN_WIDTH - 20;
+    int ascii_w = (ui_font != NULL && ui_font->Width > 0) ? (int)ui_font->Width : 8;
+    int cjk_w = txt_cache_get_chinese_font_width_cached();
+
+    uint16_t cur = s_reader_state.txt_cache.cursor;
+    if (cur >= s_reader_state.txt_cache.cached_chars) {
+        out[0] = '\0';
+        return 0;
+    }
+
+    // 定位到 cache 文件的起点
+    uint32_t start_off = s_reader_state.txt_cache.cache_off[cur];
+    (void)fseek(s_reader_state.txt_cache.fp, (long)start_off, SEEK_SET);
+
+    size_t written = 0;
+    int lines = 0;
+    int line_w = 0;
+    int consumed = 0;
+
+    while (lines < target_lines && cur + (uint16_t)consumed < s_reader_state.txt_cache.cached_chars && written < out_size - 5) {
+        uint16_t idx = (uint16_t)(cur + consumed);
+        uint32_t off0 = s_reader_state.txt_cache.cache_off[idx];
+        uint32_t off1 = s_reader_state.txt_cache.cache_off[idx + 1];
+        uint32_t len = off1 - off0;
+
+        if (len == 0 || len > 4) {
+            // 防御：异常数据直接跳过
+            consumed++;
+            continue;
+        }
+
+        char ch[5] = {0};
+        size_t rn = fread(ch, 1, (size_t)len, s_reader_state.txt_cache.fp);
+        if (rn != (size_t)len) {
+            break;
+        }
+        ch[len] = '\0';
+
+        // 源文本换行
+        if (len == 1 && ch[0] == '\n') {
+            if (written < out_size - 2) {
+                out[written++] = '\n';
+                out[written] = '\0';
+            }
+            lines++;
+            line_w = 0;
+            consumed++;
+            continue;
+        }
+
+        int cw = txt_cache_fast_char_width(ch, len, ascii_w, cjk_w);
+        if (line_w + cw > max_width && line_w > 0) {
+            // 需要换行，但不消耗当前字符
+            if (written < out_size - 2) {
+                out[written++] = '\n';
+                out[written] = '\0';
+            }
+            lines++;
+            line_w = 0;
+            // 回退文件读指针：让下一轮重新读这个字符
+            (void)fseek(s_reader_state.txt_cache.fp, -(long)len, SEEK_CUR);
+            if (lines >= target_lines) {
+                break;
+            }
+            continue;
+        }
+
+        if (written + len >= out_size - 1) {
+            // 空间不足：回退并结束
+            (void)fseek(s_reader_state.txt_cache.fp, -(long)len, SEEK_CUR);
+            break;
+        }
+
+        memcpy(out + written, ch, len);
+        written += len;
+        out[written] = '\0';
+        line_w += cw;
+        consumed++;
+    }
+
+    if (out_consumed_chars) {
+        *out_consumed_chars = consumed;
+    }
+    return (int)written;
+}
+
 /**********************
  *  STATIC PROTOTYPES
  **********************/
 
 static bool load_txt_file(const char *file_path);
 static bool load_epub_file(const char *file_path);
+static int calculate_chars_per_page(void);
 static void display_current_page(void);
-static void get_cache_path(char *cache_path, size_t size, int page_num);
-static void get_cache_meta_path(char *meta_path, size_t size, int page_num);
-static void refresh_cache_window(void);
-static void clear_old_cache(int window_start, int window_end);
-static bool is_page_cached(int page_num);
 static void next_page(void);
 static void prev_page(void);
 static void save_reading_progress(void);
-
-typedef struct __attribute__((packed)) {
-    uint32_t magic;             // 'CPOS'
-    int32_t page_num;           // 0-based
-    int32_t raw_offset_end;     // ftell() after reading this page
-    int32_t logical_pos_end;    // reader->position.file_position after reading
-    int32_t page_number_end;    // reader->position.page_number after reading
-} page_cache_meta_t;
-
-#define PAGE_CACHE_META_MAGIC 0x534F5043u  // 'C''P''O''S'
 
 /**********************
  *  STATIC FUNCTIONS
@@ -103,6 +492,13 @@ static bool load_txt_file(const char *file_path)
 
     // 加载上次阅读位置
     txt_reader_load_position(&s_reader_state.txt_reader);
+
+    // 初始化 TXT 滑动缓存（以当前 file_position 为起点）
+    s_reader_state.txt_cache.history_len = 0;
+    (void)txt_cache_build_at((int32_t)s_reader_state.txt_reader.position.file_position, 0);
+
+    // 动态计算每页字符数
+    s_reader_state.chars_per_page = calculate_chars_per_page();
 
     // 计算总页数
     s_reader_state.total_pages = txt_reader_get_total_pages(&s_reader_state.txt_reader,
@@ -160,52 +556,35 @@ static bool load_epub_file(const char *file_path)
 }
 
 /**
- * @brief 生成缓存文件路径（基于文件名+页码，避免不同文件缓存冲突）
+ * @brief 计算屏幕能容纳的字符数（基于实际字体和屏幕尺寸）
  */
-static void get_cache_path(char *cache_path, size_t size, int page_num)
+static int calculate_chars_per_page(void)
 {
-    // 从完整路径提取文件名（不含扩展名）
-    const char *filename = strrchr(s_reader_state.file_path, '/');
-    if (filename) {
-        filename++;  // 跳过 '/'
-    } else {
-        filename = s_reader_state.file_path;
-    }
-    
-    // 复制文件名并移除扩展名
-    char basename[64];
-    strncpy(basename, filename, sizeof(basename) - 1);
-    basename[sizeof(basename) - 1] = '\0';
-    
-    char *dot = strrchr(basename, '.');
-    if (dot) {
-        *dot = '\0';
-    }
-    
-    // 生成缓存路径：/littlefs/cache/{文件名}_page_{页码}.txt
-    snprintf(cache_path, size, "/littlefs/cache/%s_p%d.txt", basename, page_num);
-}
-
-static void get_cache_meta_path(char *meta_path, size_t size, int page_num)
-{
-    // 与 get_cache_path 保持同样的 basename 规则
-    const char *filename = strrchr(s_reader_state.file_path, '/');
-    if (filename) {
-        filename++;
-    } else {
-        filename = s_reader_state.file_path;
+    int chinese_font_height = xt_eink_font_get_height();
+    if (chinese_font_height == 0) {
+        chinese_font_height = 25;  // Default fallback
     }
 
-    char basename[64];
-    strncpy(basename, filename, sizeof(basename) - 1);
-    basename[sizeof(basename) - 1] = '\0';
-
-    char *dot = strrchr(basename, '.');
-    if (dot) {
-        *dot = '\0';
+    int chinese_font_width = 19;  // Default fallback
+    xt_eink_glyph_t glyph;
+    if (xt_eink_font_get_glyph(0x4E2D, &glyph) && glyph.width > 0) {
+        chinese_font_width = glyph.width;
     }
 
-    snprintf(meta_path, size, "/littlefs/cache/%s_p%d.meta", basename, page_num);
+    int line_spacing = 4;
+    int font_height = chinese_font_height + line_spacing;
+
+    int usable_height = SCREEN_HEIGHT - 40 - 40;
+    int lines_per_page = usable_height / font_height;
+
+    int max_width = SCREEN_WIDTH - 20;
+    int chars_per_line = max_width / chinese_font_width;
+    int total_chars = lines_per_page * chars_per_line;
+
+    ESP_LOGI(TAG, "Calculated chars_per_page: %d (lines=%d, chars_per_line=%d, font_width=%d, font_height=%d)",
+             total_chars, lines_per_page, chars_per_line, chinese_font_width, font_height);
+
+    return total_chars;
 }
 
 /**
@@ -213,10 +592,6 @@ static void get_cache_meta_path(char *meta_path, size_t size, int page_num)
  */
 static void display_current_page(void)
 {
-    if (!s_reader_state.is_loaded) {
-        return;
-    }
-
     // 清除屏幕（确保旧内容不残留）
     display_clear(COLOR_WHITE);
 
@@ -244,179 +619,59 @@ static void display_current_page(void)
 
     // 显示文本内容
     if (s_reader_state.type == READER_TYPE_TXT) {
-        int chars_read = 0;
-        
-        // 优化：优先从 Flash 缓存读取（比 SD 卡快得多）
-        char cache_path[128];
-        get_cache_path(cache_path, sizeof(cache_path), s_reader_state.current_page);
-        
-        FILE *cache_file = fopen(cache_path, "r");
-        if (cache_file != NULL) {
-            // 缓存命中：从 Flash 读取
-            chars_read = fread(s_reader_state.current_text, 1, sizeof(s_reader_state.current_text) - 1, cache_file);
-            fclose(cache_file);
-            s_reader_state.current_text[chars_read] = '\0';
-            ESP_LOGI(TAG, "Cache hit: loaded page %d from Flash (%d chars)", s_reader_state.current_page, chars_read);
+        int target_lines = (SCREEN_HEIGHT - 80) / (xt_eink_font_get_height() + 4);
+        int consumed_chars = 0;
+        int bytes_written = txt_cache_format_current_page(s_reader_state.current_text,
+                                                          sizeof(s_reader_state.current_text),
+                                                          target_lines,
+                                                          &consumed_chars);
 
-            // 关键：同步 txt_reader 的文件指针/状态到“本页结束”
-            // 否则下一次 cache miss 会从旧位置继续读，导致断页/重复。
-            char meta_path[128];
-            get_cache_meta_path(meta_path, sizeof(meta_path), s_reader_state.current_page);
-            FILE *meta = fopen(meta_path, "rb");
-            if (meta != NULL) {
-                page_cache_meta_t m;
-                size_t n = fread(&m, 1, sizeof(m), meta);
-                fclose(meta);
-
-                if (n == sizeof(m) && m.magic == PAGE_CACHE_META_MAGIC && m.page_num == s_reader_state.current_page) {
-                    if (s_reader_state.txt_reader.file != NULL) {
-                        fseek(s_reader_state.txt_reader.file, (long)m.raw_offset_end, SEEK_SET);
-                    }
-                    s_reader_state.txt_reader.position.file_position = (long)m.logical_pos_end;
-                    s_reader_state.txt_reader.position.page_number = (int)m.page_number_end;
-                }
-            }
+        if (bytes_written < 0) {
+            s_reader_state.current_text[0] = '\0';
+            s_reader_state.txt_cache.last_page_consumed_chars = 0;
         } else {
-            // 缓存未命中：从 SD 卡读取（首次或缓存失效）
-            // 先确保 txt_reader 指向“目标页起点”，避免文件指针/页码不同步造成断页。
-            txt_reader_goto_page(&s_reader_state.txt_reader,
-                                 s_reader_state.current_page + 1,
-                                 s_reader_state.chars_per_page);
-
-            chars_read = txt_reader_read_page(&s_reader_state.txt_reader,
-                                               s_reader_state.current_text,
-                                               sizeof(s_reader_state.current_text),
-                                               s_reader_state.chars_per_page);
-            
-            // 确保 NUL 结尾
-            if (chars_read > 0) {
-                size_t max_idx = sizeof(s_reader_state.current_text) - 1;
-                size_t idx = (size_t)chars_read;
-                if (idx > max_idx) idx = max_idx;
-                s_reader_state.current_text[idx] = '\0';
-            } else {
-                s_reader_state.current_text[0] = '\0';
-            }
-            ESP_LOGI(TAG, "Cache miss: loaded page %d from SD card (%d chars)", s_reader_state.current_page, chars_read);
-
-            // 写入缓存（内容 + meta），让后续 cache hit 可以同步 txt_reader 状态
-            if (chars_read > 0) {
-                FILE *new_cache = fopen(cache_path, "w");
-                if (new_cache != NULL) {
-                    size_t written = fwrite(s_reader_state.current_text, 1, (size_t)chars_read, new_cache);
-                    fclose(new_cache);
-                    if (written != (size_t)chars_read) {
-                        remove(cache_path);
-                    }
-                }
-
-                char meta_path[128];
-                get_cache_meta_path(meta_path, sizeof(meta_path), s_reader_state.current_page);
-                FILE *meta = fopen(meta_path, "wb");
-                if (meta != NULL) {
-                    page_cache_meta_t m = {
-                        .magic = PAGE_CACHE_META_MAGIC,
-                        .page_num = s_reader_state.current_page,
-                        .raw_offset_end = (int32_t)ftell(s_reader_state.txt_reader.file),
-                        .logical_pos_end = (int32_t)s_reader_state.txt_reader.position.file_position,
-                        .page_number_end = (int32_t)s_reader_state.txt_reader.position.page_number,
-                    };
-                    size_t wn = fwrite(&m, 1, sizeof(m), meta);
-                    fclose(meta);
-                    if (wn != sizeof(m)) {
-                        remove(meta_path);
-                    }
-                }
-            }
+            s_reader_state.current_text[sizeof(s_reader_state.current_text) - 1] = '\0';
+            s_reader_state.txt_cache.last_page_consumed_chars = consumed_chars;
         }
 
-        ESP_LOGI(TAG, "txt_reader_read_page: chars_read=%d, text[0]=0x%02X text[1]=0x%02X text[2]=0x%02X text[3]=0x%02X",
-                 chars_read,
-                 (unsigned char)s_reader_state.current_text[0],
-                 (unsigned char)s_reader_state.current_text[1],
-                 (unsigned char)s_reader_state.current_text[2],
-                 (unsigned char)s_reader_state.current_text[3]);
+        ESP_LOGD(TAG, "TXT page render: cache_cursor=%u consumed=%d bytes=%d",
+                 (unsigned)s_reader_state.txt_cache.cursor,
+                 consumed_chars,
+                 bytes_written);
 
-        if (chars_read > 0) {
-            // UTF-8 文本换行显示 - 支持中文
+        if (s_reader_state.current_text[0] != '\0') {
+            // current_text 已经按宽度插入了换行，这里直接逐行绘制即可
             int y = 40;
             int x = 10;
-            int max_width = SCREEN_WIDTH - 20;
-            const char *text = s_reader_state.current_text;
-            const char *p = text;
+            const char *p = s_reader_state.current_text;
             char line[MAX_LINE_BUFFER_SIZE];
-            int line_bytes = 0;
 
             while (*p != '\0' && y < SCREEN_HEIGHT - 40) {
-                // 检查是否是换行符
-                if (*p == '\n') {
-                    // 渲染当前行
-                    if (line_bytes > 0) {
-                        line[line_bytes] = '\0';
-                        display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
-                    }
-                    y += font_height;
-                    line_bytes = 0;
-                    p++;
-                    continue;
+                const char *nl = strchr(p, '\n');
+                size_t len = nl ? (size_t)(nl - p) : strlen(p);
+                if (len >= sizeof(line)) {
+                    len = sizeof(line) - 1;
                 }
 
-                // 获取下一个UTF-8字符
-                uint32_t unicode;
-                int char_bytes = xt_eink_font_utf8_to_utf32(p, &unicode);
-                
-                if (char_bytes <= 0) {
-                    // 无效字符，跳过
-                    p++;
-                    continue;
-                }
-
-                // 优化：直接在line缓冲区中追加字符，然后检查宽度
-                // 这样只需要一次复制和一次宽度计算
-                memcpy(line + line_bytes, p, char_bytes);
-                line[line_bytes + char_bytes] = '\0';
-                
-                int line_width = display_get_text_width_font(line, ui_font);
-                
-                if (line_width > max_width && line_bytes > 0) {
-                    // 超出宽度，撤销当前字符，渲染当前行
-                    line[line_bytes] = '\0';
+                if (len > 0) {
+                    memcpy(line, p, len);
+                    line[len] = '\0';
                     display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
-                    y += font_height;
-                    
-                    // 检查是否还有空间
-                    if (y >= SCREEN_HEIGHT - 40) {
-                        break;
-                    }
-                    
-                    // 将当前字符作为新行的开头
-                    memcpy(line, p, char_bytes);
-                    line_bytes = char_bytes;
-                    line[line_bytes] = '\0';
-                } else {
-                    // 字符已添加到line中，只需更新line_bytes
-                    line_bytes += char_bytes;
                 }
 
-                p += char_bytes;
-            }
-
-            // 显示最后一行
-            if (line_bytes > 0 && y < SCREEN_HEIGHT - 40) {
-                line[line_bytes] = '\0';
-                display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
+                y += font_height;
+                if (!nl) {
+                    break;
+                }
+                p = nl + 1;
             }
         }
-        
-        // 优化：刷新缓存窗口（预载前后多页，不阻塞当前显示）
-        refresh_cache_window();
     } else if (s_reader_state.type == READER_TYPE_EPUB) {
-        // EPUB: 显示当前章节 - 支持中文
+        // EPUB: 显示当前章节 - 支持中文（此处仍做简单自动换行）
         int y = 40;
         int x = 10;
         int max_width = SCREEN_WIDTH - 20;
-        const char *text = s_reader_state.current_text;
-        const char *p = text;
+        const char *p = s_reader_state.current_text;
         char line[MAX_LINE_BUFFER_SIZE];
         int line_bytes = 0;
 
@@ -434,34 +689,38 @@ static void display_current_page(void)
 
             uint32_t unicode;
             int char_bytes = xt_eink_font_utf8_to_utf32(p, &unicode);
-            
             if (char_bytes <= 0) {
                 p++;
                 continue;
             }
 
-            // 优化：直接在line缓冲区中追加字符，然后检查宽度
+            if (line_bytes + char_bytes >= (int)sizeof(line) - 1) {
+                line[line_bytes] = '\0';
+                display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
+                y += font_height;
+                line_bytes = 0;
+                if (y >= SCREEN_HEIGHT - 40) {
+                    break;
+                }
+                continue;
+            }
+
             memcpy(line + line_bytes, p, char_bytes);
             line[line_bytes + char_bytes] = '\0';
 
             int line_width = display_get_text_width_font(line, ui_font);
-            
             if (line_width > max_width && line_bytes > 0) {
-                // 超出宽度，撤销当前字符，渲染当前行
+                // 超出宽度：先画当前行，再把字符作为下一行开头
                 line[line_bytes] = '\0';
                 display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
                 y += font_height;
-                
                 if (y >= SCREEN_HEIGHT - 40) {
                     break;
                 }
-                
-                // 将当前字符作为新行的开头
                 memcpy(line, p, char_bytes);
                 line_bytes = char_bytes;
                 line[line_bytes] = '\0';
             } else {
-                // 字符已添加到line中，只需更新line_bytes
                 line_bytes += char_bytes;
             }
 
@@ -490,10 +749,49 @@ static void next_page(void)
     }
 
     if (s_reader_state.type == READER_TYPE_TXT) {
+        if (!txt_cache_ensure_ready()) {
+            return;
+        }
+
+        // 记录当前页起点（用于上一页）
+        if (s_reader_state.txt_cache.history_len < TXT_CACHE_HISTORY_DEPTH) {
+            int32_t cur_src = s_reader_state.txt_cache.src_pos[s_reader_state.txt_cache.cursor];
+            s_reader_state.txt_cache.history_src_pos[s_reader_state.txt_cache.history_len++] = cur_src;
+        }
+
+        int step = s_reader_state.txt_cache.last_page_consumed_chars;
+        if (step <= 0) {
+            step = 1;
+        }
+
+        uint16_t new_cursor = (uint16_t)(s_reader_state.txt_cache.cursor + step);
+
+        // 如果已到缓存尾部：从“缓存结尾的源文件位置”继续建新缓存
+        if (new_cursor >= s_reader_state.txt_cache.cached_chars) {
+            int32_t next_src = s_reader_state.txt_cache.src_pos[s_reader_state.txt_cache.cached_chars];
+            (void)txt_cache_build_at(next_src, 0);
+            new_cursor = 0;
+        }
+
+        s_reader_state.txt_cache.cursor = new_cursor;
+
+        // 达到阈值后重建缓存，让 cursor 回到 1000 左右
+        if (s_reader_state.txt_cache.cursor > TXT_CACHE_RECACHE_THRESHOLD &&
+            s_reader_state.txt_cache.cursor >= TXT_CACHE_CURSOR_RESET) {
+            uint16_t anchor = (uint16_t)(s_reader_state.txt_cache.cursor - TXT_CACHE_CURSOR_RESET);
+            int32_t new_start = s_reader_state.txt_cache.src_pos[anchor];
+            (void)txt_cache_build_at(new_start, TXT_CACHE_CURSOR_RESET);
+        } else {
+            // 同步 txt_reader 位置（保存进度用）
+            (void)txt_reader_seek(&s_reader_state.txt_reader, (long)s_reader_state.txt_cache.src_pos[s_reader_state.txt_cache.cursor]);
+        }
+
         if (s_reader_state.current_page + 1 < s_reader_state.total_pages) {
             s_reader_state.current_page++;
         }
-        ESP_LOGI(TAG, "Next page: %d/%d", s_reader_state.current_page + 1, s_reader_state.total_pages);
+        ESP_LOGI(TAG, "Next page: %d/%d (cursor=%u)",
+                 s_reader_state.current_page + 1, s_reader_state.total_pages,
+                 (unsigned)s_reader_state.txt_cache.cursor);
     } else if (s_reader_state.type == READER_TYPE_EPUB) {
         // EPUB: 切换到下一章
         if (s_reader_state.current_page < s_reader_state.total_pages) {
@@ -520,8 +818,12 @@ static void prev_page(void)
     }
 
     if (s_reader_state.type == READER_TYPE_TXT) {
-        if (s_reader_state.current_page > 0) {
-            s_reader_state.current_page--;
+        if (s_reader_state.txt_cache.history_len > 0) {
+            int32_t pos = s_reader_state.txt_cache.history_src_pos[--s_reader_state.txt_cache.history_len];
+            (void)txt_cache_build_at(pos, 0);
+            if (s_reader_state.current_page > 0) {
+                s_reader_state.current_page--;
+            }
         }
     } else if (s_reader_state.type == READER_TYPE_EPUB) {
         // EPUB: 切换到上一章
@@ -546,168 +848,12 @@ static void prev_page(void)
 static void save_reading_progress(void)
 {
     if (s_reader_state.is_loaded && s_reader_state.type == READER_TYPE_TXT) {
+        // 确保保存的是“当前页起点”的源文件位置
+        if (s_reader_state.txt_cache.ready) {
+            (void)txt_reader_seek(&s_reader_state.txt_reader, (long)s_reader_state.txt_cache.src_pos[s_reader_state.txt_cache.cursor]);
+        }
         txt_reader_save_position(&s_reader_state.txt_reader);
         ESP_LOGI(TAG, "Reading progress saved");
-    }
-}
-
-/**
- * @brief 检查页面是否已缓存
- */
-static bool is_page_cached(int page_num)
-{
-    char cache_path[128];
-    get_cache_path(cache_path, sizeof(cache_path), page_num);
-    
-    FILE *check = fopen(cache_path, "r");
-    if (check != NULL) {
-        fclose(check);
-        return true;
-    }
-    return false;
-}
-
-/**
- * @brief 刷新缓存窗口（预载当前页前后多页）
- */
-static void refresh_cache_window(void)
-{
-    if (!s_reader_state.is_loaded || s_reader_state.type != READER_TYPE_TXT) {
-        return;
-    }
-
-    // 计算窗口范围（页码从0开始）
-    int window_start = s_reader_state.current_page - CACHE_WINDOW_BEFORE;
-    int window_end = s_reader_state.current_page + CACHE_WINDOW_AFTER;
-    
-    // 边界检查
-    if (window_start < 0) window_start = 0;
-    if (window_end >= s_reader_state.total_pages) window_end = s_reader_state.total_pages - 1;
-    
-    ESP_LOGI(TAG, "Refreshing cache window: pages %d-%d (current=%d)", 
-             window_start + 1, window_end + 1, s_reader_state.current_page + 1);
-    
-    // 保存当前文件状态（注意：ftell 与 reader->position.file_position 可能不一致，例如 UTF-8 BOM 场景）
-    long original_raw_pos = ftell(s_reader_state.txt_reader.file);
-    txt_position_t original_position = s_reader_state.txt_reader.position;
-    
-    int cached_count = 0;
-    int new_cached = 0;
-    
-    // 遍历窗口，预载缺失页面
-    for (int page = window_start; page <= window_end; page++) {
-        // 跳过已缓存页面
-        if (is_page_cached(page)) {
-            cached_count++;
-            continue;
-        }
-        
-        // 限制最大缓存页数
-        if (new_cached >= MAX_CACHE_PAGES) {
-            ESP_LOGW(TAG, "Reached max cache pages limit (%d), stopping preload", MAX_CACHE_PAGES);
-            break;
-        }
-        
-        // 跳转到目标页（txt_reader_goto_page 使用 1-based 页码；必须使用一致的 chars_per_page）
-        if (!txt_reader_goto_page(&s_reader_state.txt_reader, page + 1, s_reader_state.chars_per_page)) {
-            ESP_LOGW(TAG, "Failed to goto page %d", page + 1);
-            continue;
-        }
-        
-        // 读取页面内容（避免在小栈任务里放大数组）
-        char *temp_buffer = (char *)malloc(4096);
-        if (temp_buffer == NULL) {
-            ESP_LOGE(TAG, "malloc failed for preload buffer");
-            break;
-        }
-
-        int chars_read = txt_reader_read_page(&s_reader_state.txt_reader,
-                                               temp_buffer,
-                                               4096,
-                                               s_reader_state.chars_per_page);
-        
-        if (chars_read > 0) {
-            // 写入缓存
-            char cache_path[128];
-            get_cache_path(cache_path, sizeof(cache_path), page);
-            
-            FILE *cache_file = fopen(cache_path, "w");
-            if (cache_file != NULL) {
-                size_t written = fwrite(temp_buffer, 1, (size_t)chars_read, cache_file);
-                fclose(cache_file);
-                
-                if (written == (size_t)chars_read) {
-                    new_cached++;
-                    ESP_LOGI(TAG, "Cached page %d (%d chars)", page + 1, chars_read);
-
-                    // 写入 meta：记录“本页结束”的文件偏移/状态，供 cache hit 同步 txt_reader
-                    char meta_path[128];
-                    get_cache_meta_path(meta_path, sizeof(meta_path), page);
-                    FILE *meta = fopen(meta_path, "wb");
-                    if (meta != NULL) {
-                        page_cache_meta_t m = {
-                            .magic = PAGE_CACHE_META_MAGIC,
-                            .page_num = page,
-                            .raw_offset_end = (int32_t)ftell(s_reader_state.txt_reader.file),
-                            .logical_pos_end = (int32_t)s_reader_state.txt_reader.position.file_position,
-                            .page_number_end = (int32_t)s_reader_state.txt_reader.position.page_number,
-                        };
-                        size_t wn = fwrite(&m, 1, sizeof(m), meta);
-                        fclose(meta);
-                        if (wn != sizeof(m)) {
-                            remove(meta_path);
-                        }
-                    }
-                } else {
-                    remove(cache_path);
-                }
-            }
-        }
-
-        free(temp_buffer);
-    }
-    
-    // 恢复文件状态
-    fseek(s_reader_state.txt_reader.file, original_raw_pos, SEEK_SET);
-    s_reader_state.txt_reader.position = original_position;
-    
-    ESP_LOGI(TAG, "Cache window refresh complete: %d already cached, %d newly cached", 
-             cached_count, new_cached);
-    
-    // 清理窗口外的旧缓存
-    clear_old_cache(window_start, window_end);
-}
-
-/**
- * @brief 清理窗口外的旧缓存文件
- */
-static void clear_old_cache(int window_start, int window_end)
-{
-    // 简单策略：只清理明显超出窗口的缓存（避免扫描整个目录）
-    // 清理当前页前 10 页之外的缓存
-    int clear_before = s_reader_state.current_page - 10;
-    if (clear_before > 0 && clear_before < window_start) {
-        for (int page = clear_before; page < window_start; page++) {
-            char cache_path[128];
-            get_cache_path(cache_path, sizeof(cache_path), page);
-            
-            if (remove(cache_path) == 0) {
-                ESP_LOGI(TAG, "Removed old cache: page %d", page);
-            }
-        }
-    }
-    
-    // 清理当前页后 10 页之外的缓存
-    int clear_after = s_reader_state.current_page + 10;
-    if (clear_after < s_reader_state.total_pages && clear_after > window_end) {
-        for (int page = window_end + 1; page <= clear_after; page++) {
-            char cache_path[128];
-            get_cache_path(cache_path, sizeof(cache_path), page);
-            
-            if (remove(cache_path) == 0) {
-                ESP_LOGI(TAG, "Removed old cache: page %d", page + 1);
-            }
-        }
     }
 }
 
@@ -776,6 +922,7 @@ static void on_hide(screen_t *screen)
 
     // 清理资源
     if (s_reader_state.type == READER_TYPE_TXT) {
+        txt_cache_close();
         txt_reader_cleanup(&s_reader_state.txt_reader);
     } else if (s_reader_state.type == READER_TYPE_EPUB) {
         epub_parser_close(&s_reader_state.epub_reader);

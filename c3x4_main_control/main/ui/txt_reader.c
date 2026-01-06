@@ -10,12 +10,43 @@
 #include "nvs.h"
 #include <string.h>
 #include <ctype.h>
+#include <inttypes.h>
 
 static const char *TAG = "TXT_READER";
 
 // NVS 命名空间
 #define NVS_NAMESPACE "reader_pos"
+// 注意：ESP-IDF NVS key 最长 15 字符，且建议只用 [0-9A-Za-z_]
 #define NVS_KEY_PREFIX "txt_"
+
+static uint32_t fnv1a32_str(const char *s)
+{
+    // 32-bit FNV-1a
+    const uint32_t FNV_OFFSET = 2166136261u;
+    const uint32_t FNV_PRIME = 16777619u;
+    uint32_t h = FNV_OFFSET;
+    if (s == NULL) {
+        return h;
+    }
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        h ^= (uint32_t)(*p);
+        h *= FNV_PRIME;
+    }
+    return h;
+}
+
+static void make_nvs_key_for_txt_path(const char *file_path, char *out_key, size_t out_key_size)
+{
+    if (out_key == NULL || out_key_size == 0) {
+        return;
+    }
+
+    // 用全路径 hash，避免同名不同目录冲突；key 长度控制在 <= 15
+    uint32_t h = fnv1a32_str(file_path);
+    // e.g. "txt_89abcdef" (12 chars)
+    (void)snprintf(out_key, out_key_size, "%s%08" PRIx32, NVS_KEY_PREFIX, h);
+    out_key[out_key_size - 1] = '\0';
+}
 
 // 读取缓冲区大小
 #define READ_BUFFER_SIZE 4096
@@ -614,22 +645,14 @@ bool txt_reader_save_position(const txt_reader_t *reader) {
         return false;
     }
 
-    // 使用文件名（不含路径）作为 key，避免键过长
     const char *filename = strrchr(reader->file_path, '/');
-    if (filename == NULL) {
-        filename = reader->file_path;
-    } else {
-        filename++;  // 跳过 '/'
-    }
+    filename = (filename != NULL) ? (filename + 1) : reader->file_path;
 
-    char key[64];
-    int key_len = snprintf(key, sizeof(key), "%s%.50s", NVS_KEY_PREFIX, filename);
-    if (key_len >= (int)sizeof(key)) {
-        key[sizeof(key) - 1] = '\0';
-    }
+    char key[16];
+    make_nvs_key_for_txt_path(reader->file_path, key, sizeof(key));
 
-    // 保存位置
-    err = nvs_set_i32(nvs_handle, key, reader->position.file_position);
+    // 保存位置（byte offset）
+    err = nvs_set_i32(nvs_handle, key, (int32_t)reader->position.file_position);
     if (err == ESP_OK) {
         err = nvs_commit(nvs_handle);
     }
@@ -637,7 +660,7 @@ bool txt_reader_save_position(const txt_reader_t *reader) {
     nvs_close(nvs_handle);
 
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Saved position for %s: %ld", filename, reader->position.file_position);
+        ESP_LOGI(TAG, "Saved position for %s: %ld (key=%s)", filename, reader->position.file_position, key);
         return true;
     }
 
@@ -657,27 +680,19 @@ bool txt_reader_load_position(txt_reader_t *reader) {
         return false;
     }
 
-    // 使用文件名（不含路径）作为 key，与 save_position 保持一致
     const char *filename = strrchr(reader->file_path, '/');
-    if (filename == NULL) {
-        filename = reader->file_path;
-    } else {
-        filename++;  // 跳过 '/'
-    }
+    filename = (filename != NULL) ? (filename + 1) : reader->file_path;
 
-    char key[64];
-    int key_len = snprintf(key, sizeof(key), "%s%.50s", NVS_KEY_PREFIX, filename);
-    if (key_len >= (int)sizeof(key)) {
-        key[sizeof(key) - 1] = '\0';
-    }
+    char key[16];
+    make_nvs_key_for_txt_path(reader->file_path, key, sizeof(key));
 
     int32_t saved_pos = 0;
     err = nvs_get_i32(nvs_handle, key, &saved_pos);
     nvs_close(nvs_handle);
 
-    if (err == ESP_OK && saved_pos > 0) {
-        txt_reader_seek(reader, saved_pos);
-        ESP_LOGI(TAG, "Loaded position for %s: %ld", filename, saved_pos);
+    if (err == ESP_OK && saved_pos >= 0) {
+        (void)txt_reader_seek(reader, (long)saved_pos);
+        ESP_LOGI(TAG, "Loaded position for %s: %ld (key=%s)", filename, (long)saved_pos, key);
         return true;
     }
 
