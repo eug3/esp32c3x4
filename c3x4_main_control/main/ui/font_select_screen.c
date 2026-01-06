@@ -67,10 +67,15 @@ static void load_font_options(void)
 
         // 构造显示名称：名称 + 尺寸
         if (font->width > 0 && font->height > 0) {
-            snprintf(opt->name, sizeof(opt->name), "%.50s (%dx%d)",
-                     font->name, font->width, font->height);
+            int written = snprintf(opt->name, sizeof(opt->name), "%s", font->name);
+            size_t used = (written < 0) ? 0 : (written >= (int)sizeof(opt->name) ? sizeof(opt->name) - 1 : (size_t)written);
+            size_t remaining = sizeof(opt->name) - used;
+
+            if (remaining > 0) {
+                snprintf(opt->name + used, remaining, " (%dx%d)", font->width, font->height);
+            }
         } else {
-            snprintf(opt->name, sizeof(opt->name), "%.60s", font->name);
+            snprintf(opt->name, sizeof(opt->name), "%s", font->name);
         }
 
         opt->is_default = false;
@@ -97,7 +102,6 @@ static void load_font_options(void)
 
 static void draw_font_item(int index, bool is_selected)
 {
-    sFONT *font = display_get_default_ascii_font();
     int item_height = 50;
     int start_y = 80;
     int item_y = start_y + index * item_height;
@@ -108,11 +112,11 @@ static void draw_font_item(int index, bool is_selected)
     if (is_selected) {
         display_draw_rect(menu_x - 10, item_y - 5, menu_width + 20, item_height - 10,
                          COLOR_BLACK, true);
-        display_draw_text_font(menu_x, item_y + 10, s_options[index].name, font, COLOR_WHITE, COLOR_BLACK);
+        display_draw_text_menu(menu_x, item_y + 10, s_options[index].name, COLOR_WHITE, COLOR_BLACK);
     } else {
         display_draw_rect(menu_x - 10, item_y - 5, menu_width + 20, item_height - 10,
                          COLOR_BLACK, false);
-        display_draw_text_font(menu_x, item_y + 10, s_options[index].name, font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(menu_x, item_y + 10, s_options[index].name, COLOR_BLACK, COLOR_WHITE);
     }
 }
 
@@ -148,8 +152,6 @@ static void save_font_to_nvs(const char *path)
 
 static void show_restart_dialog(void)
 {
-    sFONT *font = display_get_default_ascii_font();
-
     // 绘制确认对话框
     int dialog_w = 300;
     int dialog_h = 120;
@@ -161,13 +163,13 @@ static void show_restart_dialog(void)
     display_draw_rect(dialog_x, dialog_y, dialog_w, dialog_h, COLOR_BLACK, true);
 
     // 标题
-    display_draw_text_font(dialog_x + 20, dialog_y + 20, "提示", font, COLOR_WHITE, COLOR_BLACK);
+    display_draw_text_menu(dialog_x + 20, dialog_y + 20, "提示", COLOR_WHITE, COLOR_BLACK);
 
     // 消息
-    display_draw_text_font(dialog_x + 20, dialog_y + 50, "重启后生效", font, COLOR_WHITE, COLOR_BLACK);
+    display_draw_text_menu(dialog_x + 20, dialog_y + 50, "重启后生效", COLOR_WHITE, COLOR_BLACK);
 
     // 选项
-    display_draw_text_font(dialog_x + 20, dialog_y + 85, "确认: 重启  返回: 取消", font, COLOR_WHITE, COLOR_BLACK);
+    display_draw_text_menu(dialog_x + 20, dialog_y + 85, "确认: 重启  返回: 取消", COLOR_WHITE, COLOR_BLACK);
 
     display_refresh(REFRESH_MODE_PARTIAL);
 }
@@ -175,7 +177,7 @@ static void show_restart_dialog(void)
 static void __attribute__((unused)) restart_device(void)
 {
     ESP_LOGI(TAG, "Restarting device...");
-    display_draw_text_font(100, 300, "正在重启...", display_get_default_ascii_font(),
+    display_draw_text_menu(100, 300, "正在重启...",
                           COLOR_BLACK, COLOR_WHITE);
     display_refresh(REFRESH_MODE_FULL);
 
@@ -203,13 +205,11 @@ static void on_draw(screen_t *screen)
         return;
     }
 
-    sFONT *font = display_get_default_ascii_font();
-
     // 清屏
     display_clear(COLOR_WHITE);
 
     // 标题
-    display_draw_text_font(20, 20, "选择字体", font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_menu(20, 20, "选择字体", COLOR_BLACK, COLOR_WHITE);
 
     // 当前字体提示
     const char *current = xt_eink_font_get_current_path();
@@ -219,9 +219,9 @@ static void on_draw(screen_t *screen)
         if (strlen(hint) > 20) {
             snprintf(hint, sizeof(hint), "当前: ...%s", strrchr(current, '/') ? strrchr(current, '/') + 1 + strlen(current) - 20 : current + strlen(current) - 20);
         }
-        display_draw_text_font(20, 45, hint, font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, 45, hint, COLOR_BLACK, COLOR_WHITE);
     } else {
-        display_draw_text_font(20, 45, "当前: 系统默认", font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, 45, "当前: 系统默认", COLOR_BLACK, COLOR_WHITE);
     }
 
     // 绘制字体列表
@@ -235,8 +235,8 @@ static void on_draw(screen_t *screen)
     }
 
     // 底部提示
-    display_draw_text_font(20, SCREEN_HEIGHT - 60, "上下: 选择  确认: 确认  返回: 返回",
-                           font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_menu(20, SCREEN_HEIGHT - 60, "上下: 选择  确认: 确认  返回: 返回",
+                           COLOR_BLACK, COLOR_WHITE);
 
     // 如果选项太多，显示滚动提示
     if (s_option_count > 6) {
@@ -244,9 +244,9 @@ static void on_draw(screen_t *screen)
         int total_pages = (s_option_count + 5) / 6;
         int current_page = s_state.display_offset / 6 + 1;
         snprintf(scroll_hint, sizeof(scroll_hint), "%d/%d", current_page, total_pages);
-        int hint_width = display_get_text_width_font(scroll_hint, font);
-        display_draw_text_font(SCREEN_WIDTH - hint_width - 20, SCREEN_HEIGHT - 60,
-                               scroll_hint, font, COLOR_BLACK, COLOR_WHITE);
+        int hint_width = display_get_text_width_menu(scroll_hint);
+        display_draw_text_menu(SCREEN_WIDTH - hint_width - 20, SCREEN_HEIGHT - 60,
+                               scroll_hint, COLOR_BLACK, COLOR_WHITE);
     }
 }
 

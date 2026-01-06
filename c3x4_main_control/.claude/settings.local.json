@@ -9,7 +9,15 @@
       "Bash(echo:*)",
       "Bash(~/.zshrc)",
       "Bash(direnv allow)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(ls:*)",
+      "Bash(python tools/generate_level1_table.py:*)",
+      "Bash(python3:*)",
+      "Bash(where:*)",
+      "Bash(py:*)",
+      "Bash(ninja)",
+      "Bash(cmake --build:*)",
+      "Bash(idf.py size:*)"
     ]
   }
 }

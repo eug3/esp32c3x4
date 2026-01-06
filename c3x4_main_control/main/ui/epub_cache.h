@@ -101,6 +101,15 @@ bool epub_cache_precache_chapter(const char *epub_path,
                                   const void *data,
                                   size_t data_size);
 
+/**
+ * @brief 获取缓存项对应的实际文件路径（LittleFS 上）
+ * @param key 缓存键
+ * @param out_path 输出路径缓冲区
+ * @param out_size 缓冲区大小
+ * @return true 成功，false 失败
+ */
+bool epub_cache_get_file_path(const epub_cache_key_t *key, char *out_path, size_t out_size);
+
 #ifdef __cplusplus
 }
 #endif

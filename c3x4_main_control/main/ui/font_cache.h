@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +31,16 @@ extern "C" {
  * @return true 成功, false 失败
  */
 bool font_cache_init(const char *sd_font_path);
+
+/**
+ * @brief 当前是否启用了字体缓存（已成功 init 并打开 LittleFS 缓存文件）
+ */
+bool font_cache_is_enabled(void);
+
+/**
+ * @brief 当前缓存对应的 glyph_size（字形字节数）；未启用时返回 0
+ */
+size_t font_cache_get_active_glyph_size(void);
 
 /**
  * @brief 获取字形数据（分级缓存读取）

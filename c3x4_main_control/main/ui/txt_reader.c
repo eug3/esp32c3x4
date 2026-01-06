@@ -64,7 +64,8 @@ static bool is_utf8_bom(FILE *file) {
 }
 
 // UTF-8 合法性校验（严格校验，包含 overlong/surrogate 范围）
-static bool is_valid_utf8_buffer(const unsigned char *buf, size_t len) {
+static bool __attribute__((unused))
+is_valid_utf8_buffer(const unsigned char *buf, size_t len) {
     size_t i = 0;
     while (i < len) {
         unsigned char c = buf[i];

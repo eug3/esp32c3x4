@@ -8,17 +8,14 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
 
 static const char *TAG = "FONT_CACHE";
 
-// 字体参数（当前工程默认使用 19×25 字体）
-// 注意：xt_eink_font 侧可以推断其他尺寸，但 font_cache 目前仍按固定字节数缓存。
-#define FONT_WIDTH 19
-#define FONT_HEIGHT 25
-#define FONT_WIDTH_BYTES ((FONT_WIDTH + 7) / 8)  // 3 字节
-#define GLYPH_SIZE (FONT_WIDTH_BYTES * FONT_HEIGHT)  // 75 字节
+// 说明：缓存按“当前用户字体”的 glyph_size 生成/读取。
+// 默认/菜单字体按需求不使用缓存（由上层不调用 font_cache_init() 来保证）。
 
 // 缓存路径
 #define CACHE_DIR "/littlefs/fonts"
@@ -31,8 +28,12 @@ static const char *TAG = "FONT_CACHE";
 // 通过生成的头文件提供 FONT_CACHE_LEVEL1_TABLE_COUNT 与 g_font_cache_level1_table[]
 #include "font_cache_level1_table.h"
 
-#define CACHE_FILE_RANGE "/littlefs/fonts/range_u0000_u0bb7.bin"
-#define CACHE_FILE_TABLE "/littlefs/fonts/level1_table.bin"
+// 旧版本缓存文件名（兼容清理用）
+#define LEGACY_CACHE_FILE_RANGE "range_u0000_u0bb7.bin"
+#define LEGACY_CACHE_FILE_TABLE "level1_table.bin"
+
+// 新版本：用户字体缓存文件名前缀
+#define USER_CACHE_PREFIX "ucache_"
 
 // 统计信息
 static uint32_t s_cache_hits = 0;
@@ -44,6 +45,8 @@ static FILE *s_sd_font_file = NULL;
 static char s_sd_font_path[128] = {0};
 // LittleFS 缓存文件句柄
 static FILE *s_cache_file = NULL;
+static char s_cache_path_buf[160] = {0};
+static size_t s_glyph_size = 0;
 
 typedef enum {
     FONT_CACHE_MODE_RANGE = 0,
@@ -66,6 +69,86 @@ typedef struct __attribute__((packed)) {
     uint32_t count;
     uint32_t flags;
 } font_cache_file_header_t;
+
+static uint32_t fnv1a_32(const char *s)
+{
+    uint32_t h = 2166136261u;
+    if (s == NULL) {
+        return h;
+    }
+    for (const unsigned char *p = (const unsigned char *)s; *p != '\0'; p++) {
+        h ^= (uint32_t)(*p);
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static bool ends_with(const char *s, const char *suffix)
+{
+    if (s == NULL || suffix == NULL) {
+        return false;
+    }
+    size_t sl = strlen(s);
+    size_t su = strlen(suffix);
+    if (sl < su) {
+        return false;
+    }
+    return memcmp(s + (sl - su), suffix, su) == 0;
+}
+
+static bool starts_with(const char *s, const char *prefix)
+{
+    if (s == NULL || prefix == NULL) {
+        return false;
+    }
+    size_t pl = strlen(prefix);
+    return memcmp(s, prefix, pl) == 0;
+}
+
+static void purge_old_font_cache_files(const char *keep_filename)
+{
+    DIR *dir = opendir(CACHE_DIR);
+    if (dir == NULL) {
+        return;
+    }
+
+    struct dirent *ent = NULL;
+    while ((ent = readdir(dir)) != NULL) {
+        const char *name = ent->d_name;
+        if (name == NULL || name[0] == '\0') {
+            continue;
+        }
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+            continue;
+        }
+
+        if (keep_filename != NULL && strcmp(name, keep_filename) == 0) {
+            continue;
+        }
+
+        // 仅清理字体缓存相关文件
+        bool should_delete = false;
+        if (strcmp(name, LEGACY_CACHE_FILE_RANGE) == 0 || strcmp(name, LEGACY_CACHE_FILE_TABLE) == 0) {
+            should_delete = true;
+        } else if (starts_with(name, USER_CACHE_PREFIX) && ends_with(name, ".bin")) {
+            should_delete = true;
+        }
+
+        if (!should_delete) {
+            continue;
+        }
+
+        char fullpath[200];
+        int n = snprintf(fullpath, sizeof(fullpath), "%s/%s", CACHE_DIR, name);
+        if (n <= 0 || (size_t)n >= sizeof(fullpath)) {
+            continue;
+        }
+
+        remove(fullpath);
+    }
+
+    closedir(dir);
+}
 
 static bool ensure_cache_dir(void)
 {
@@ -127,7 +210,7 @@ static bool read_from_cache(uint32_t unicode, uint8_t *buffer)
     if (!read_cache_header(s_cache_file, &hdr)) {
         return false;
     }
-    if (hdr.glyph_size != GLYPH_SIZE) {
+    if (s_glyph_size == 0 || hdr.glyph_size != (uint16_t)s_glyph_size) {
         return false;
     }
 
@@ -164,12 +247,12 @@ static bool read_from_cache(uint32_t unicode, uint8_t *buffer)
     }
 
     uint32_t data_base = (uint32_t)sizeof(font_cache_file_header_t) + table_bytes;
-    uint32_t offset = data_base + index * GLYPH_SIZE;
+    uint32_t offset = data_base + index * (uint32_t)s_glyph_size;
     if (fseek(s_cache_file, (long)offset, SEEK_SET) != 0) {
         return false;
     }
-    size_t read_bytes = fread(buffer, 1, GLYPH_SIZE, s_cache_file);
-    return read_bytes == GLYPH_SIZE;
+    size_t read_bytes = fread(buffer, 1, s_glyph_size, s_cache_file);
+    return read_bytes == s_glyph_size;
 }
 
 /**
@@ -185,14 +268,18 @@ static bool read_from_sd(uint32_t unicode, uint8_t *buffer) {
         return false;
     }
 
+    if (s_glyph_size == 0) {
+        return false;
+    }
+
     // 定位并读取字形
-    long offset = (long)unicode * GLYPH_SIZE;
+    long offset = (long)unicode * (long)s_glyph_size;
     if (fseek(s_sd_font_file, offset, SEEK_SET) != 0) {
         return false;
     }
 
-    size_t read_bytes = fread(buffer, 1, GLYPH_SIZE, s_sd_font_file);
-    return read_bytes == GLYPH_SIZE;
+    size_t read_bytes = fread(buffer, 1, s_glyph_size, s_sd_font_file);
+    return read_bytes == s_glyph_size;
 }
 
 static bool generate_cache(const char *sd_font_path)
@@ -214,9 +301,12 @@ static bool generate_cache(const char *sd_font_path)
     fseek(src, 0, SEEK_END);
     long file_size = ftell(src);
     fseek(src, 0, SEEK_SET);
-    long expected_size = 0x10000L * GLYPH_SIZE;
-    if (file_size != expected_size) {
-        ESP_LOGW(TAG, "Font file size mismatch: got %ld, expected %ld", file_size, expected_size);
+    long expected_size = 0;
+    if (s_glyph_size > 0) {
+        expected_size = 0x10000L * (long)s_glyph_size;
+        if (file_size != expected_size) {
+            ESP_LOGW(TAG, "Font file size mismatch: got %ld, expected %ld", file_size, expected_size);
+        }
     }
 
     const uint32_t count = (s_mode == FONT_CACHE_MODE_TABLE) ? (uint32_t)FONT_CACHE_LEVEL1_TABLE_COUNT
@@ -233,7 +323,7 @@ static bool generate_cache(const char *sd_font_path)
     font_cache_file_header_t hdr = {
         .magic = FONT_CACHE_MAGIC,
         .version = FONT_CACHE_VERSION,
-        .glyph_size = GLYPH_SIZE,
+        .glyph_size = (uint16_t)s_glyph_size,
         .count = count,
         .flags = flags,
     };
@@ -262,9 +352,24 @@ static bool generate_cache(const char *sd_font_path)
         }
     }
 
-    uint8_t glyph_buffer[GLYPH_SIZE];
-    uint8_t zero_buffer[GLYPH_SIZE];
-    memset(zero_buffer, 0, sizeof(zero_buffer));
+    if (s_glyph_size == 0) {
+        ESP_LOGE(TAG, "Invalid glyph_size=0");
+        fclose(src);
+        fclose(dst);
+        return false;
+    }
+
+    uint8_t *glyph_buffer = (uint8_t *)malloc(s_glyph_size);
+    uint8_t *zero_buffer = (uint8_t *)malloc(s_glyph_size);
+    if (glyph_buffer == NULL || zero_buffer == NULL) {
+        ESP_LOGE(TAG, "OOM allocating glyph buffers (%u bytes)", (unsigned)s_glyph_size);
+        if (glyph_buffer) free(glyph_buffer);
+        if (zero_buffer) free(zero_buffer);
+        fclose(src);
+        fclose(dst);
+        return false;
+    }
+    memset(zero_buffer, 0, s_glyph_size);
     uint32_t written = 0;
     uint32_t bad = 0;
 
@@ -278,9 +383,9 @@ static bool generate_cache(const char *sd_font_path)
 
         bool ok = false;
         if (unicode < 0x10000u) {
-            long offset = (long)unicode * GLYPH_SIZE;
+            long offset = (long)unicode * (long)s_glyph_size;
             if (fseek(src, offset, SEEK_SET) == 0) {
-                if (fread(glyph_buffer, 1, GLYPH_SIZE, src) == GLYPH_SIZE) {
+                if (fread(glyph_buffer, 1, s_glyph_size, src) == s_glyph_size) {
                     ok = true;
                 }
             }
@@ -290,17 +395,20 @@ static bool generate_cache(const char *sd_font_path)
         if (!ok) {
             bad++;
         }
-        if (fwrite(to_write, 1, GLYPH_SIZE, dst) != GLYPH_SIZE) {
+        if (fwrite(to_write, 1, s_glyph_size, dst) != s_glyph_size) {
             ESP_LOGE(TAG, "Write failed at index=%" PRIu32 " U+%04" PRIX32, i, unicode);
             break;
         }
         written++;
     }
 
+    free(glyph_buffer);
+    free(zero_buffer);
+
     fclose(src);
     fclose(dst);
 
-    ESP_LOGI(TAG, "Cache generated: count=%" PRIu32 " glyph=%u bytes, bad=%" PRIu32, written, (unsigned)GLYPH_SIZE, bad);
+    ESP_LOGI(TAG, "Cache generated: count=%" PRIu32 " glyph=%u bytes, bad=%" PRIu32, written, (unsigned)s_glyph_size, bad);
     s_cached_chars = written;
     return (written == count);
 }
@@ -314,26 +422,62 @@ bool font_cache_init(const char *sd_font_path)
         return false;
     }
 
+    // 计算 glyph_size（文件必须是 0x10000 个字形，无文件头）
+    struct stat st_font;
+    if (stat(sd_font_path, &st_font) != 0 || st_font.st_size <= 0) {
+        ESP_LOGE(TAG, "Failed to stat SD font: %s (errno=%d)", sd_font_path, errno);
+        return false;
+    }
+    long file_size = st_font.st_size;
+    long expected_chars = 0x10000L;
+    if ((file_size % expected_chars) != 0) {
+        ESP_LOGW(TAG, "Unsupported font file size (not divisible by 65536): %s size=%ld", sd_font_path, file_size);
+        return false;
+    }
+    long char_byte = file_size / expected_chars;
+    if (char_byte <= 0 || char_byte > 4096) {
+        ESP_LOGW(TAG, "Invalid glyph_size=%ld derived from file: %s", char_byte, sd_font_path);
+        return false;
+    }
+    s_glyph_size = (size_t)char_byte;
+
     // 保存路径
     strncpy(s_sd_font_path, sd_font_path, sizeof(s_sd_font_path) - 1);
     s_sd_font_path[sizeof(s_sd_font_path) - 1] = '\0';
 
-    // 选择模式：若固件内置表非空，则用 table；否则用 range。
+    // 生成“当前字体专属”缓存文件名，并清理历史缓存
+    uint32_t h = fnv1a_32(sd_font_path);
+    int nn = snprintf(s_cache_path_buf, sizeof(s_cache_path_buf), "%s/%s%08" PRIX32 "_g%u.bin",
+                      CACHE_DIR, USER_CACHE_PREFIX, h, (unsigned)s_glyph_size);
+    if (nn <= 0 || (size_t)nn >= sizeof(s_cache_path_buf)) {
+        ESP_LOGE(TAG, "Cache path too long");
+        return false;
+    }
+    s_cache_path = s_cache_path_buf;
+    const char *keep_name = strrchr(s_cache_path_buf, '/');
+    keep_name = (keep_name != NULL) ? (keep_name + 1) : s_cache_path_buf;
+
+    // 选择模式：优先使用固件内置表（3555）以节省空间；否则用 range。
     if (FONT_CACHE_LEVEL1_TABLE_COUNT > 0) {
         s_mode = FONT_CACHE_MODE_TABLE;
         s_active_count = (uint32_t)FONT_CACHE_LEVEL1_TABLE_COUNT;
-        s_cache_path = CACHE_FILE_TABLE;
     } else {
         s_mode = FONT_CACHE_MODE_RANGE;
         s_active_count = (uint32_t)RANGE_CACHE_COUNT;
-        s_cache_path = CACHE_FILE_RANGE;
     }
 
-    // 打开 SD 卡字体文件（用于缓存未命中时读取）
+    // 切换字体：关闭旧句柄并清理历史缓存文件
+    if (s_cache_file != NULL) {
+        fclose(s_cache_file);
+        s_cache_file = NULL;
+    }
     if (s_sd_font_file != NULL) {
         fclose(s_sd_font_file);
         s_sd_font_file = NULL;
     }
+    purge_old_font_cache_files(keep_name);
+
+    // 打开 SD 卡字体文件（用于缓存未命中时读取）
     s_sd_font_file = fopen(sd_font_path, "rb");
     if (s_sd_font_file == NULL) {
         ESP_LOGE(TAG, "Failed to open SD font: %s (errno=%d)", sd_font_path, errno);
@@ -349,7 +493,7 @@ bool font_cache_init(const char *sd_font_path)
             font_cache_file_header_t hdr;
             if (read_cache_header(tmp, &hdr)) {
                 uint32_t expect_flags = (s_mode == FONT_CACHE_MODE_TABLE) ? FONT_CACHE_FLAG_HAS_CODEPOINT_TABLE : 0u;
-                if (hdr.glyph_size == GLYPH_SIZE && hdr.count == s_active_count && hdr.flags == expect_flags) {
+                if ((size_t)hdr.glyph_size == s_glyph_size && hdr.count == s_active_count && hdr.flags == expect_flags) {
                     need_generate = false;
                     s_cached_chars = hdr.count;
                 }
@@ -369,36 +513,33 @@ bool font_cache_init(const char *sd_font_path)
         ESP_LOGI(TAG, "Cache found: %s (%ld bytes)", s_cache_path, st.st_size);
     }
 
-    if (s_cache_file != NULL) {
-        fclose(s_cache_file);
-        s_cache_file = NULL;
-    }
     s_cache_file = fopen(s_cache_path, "rb");
     if (s_cache_file == NULL) {
         ESP_LOGE(TAG, "Failed to open cache file: %s (errno=%d)", s_cache_path, errno);
         return false;
     }
 
-    ESP_LOGI(TAG, "Font cache initialized: mode=%s cached=%" PRIu32 " file=%s",
-             (s_mode == FONT_CACHE_MODE_TABLE) ? "table" : "range", s_cached_chars, s_cache_path);
+    ESP_LOGI(TAG, "Font cache initialized: mode=%s cached=%" PRIu32 " glyph=%u file=%s",
+             (s_mode == FONT_CACHE_MODE_TABLE) ? "table" : "range", s_cached_chars, (unsigned)s_glyph_size, s_cache_path);
     return true;
 }
 
 int font_cache_get_glyph(uint32_t unicode, uint8_t *buffer, size_t buf_size) {
-    if (buffer == NULL || buf_size < GLYPH_SIZE) {
+    // 缓存只对“当前已 init 的字体”有效：要求 buf_size 与当前 glyph_size 一致
+    if (buffer == NULL || s_cache_file == NULL || s_glyph_size == 0 || buf_size != s_glyph_size) {
         return 0;
     }
 
     // 1) 尝试从 LittleFS 缓存读取
     if (read_from_cache(unicode, buffer)) {
         s_cache_hits++;
-        return GLYPH_SIZE;
+        return (int)s_glyph_size;
     }
 
     // 2) 未命中：从 SD 卡读取
     s_cache_misses++;
     if (read_from_sd(unicode, buffer)) {
-        return GLYPH_SIZE;
+        return (int)s_glyph_size;
     }
 
     return 0;
@@ -421,4 +562,18 @@ void font_cache_cleanup(void) {
     }
     s_cache_hits = 0;
     s_cache_misses = 0;
+    s_cached_chars = 0;
+    s_glyph_size = 0;
+    s_cache_path_buf[0] = '\0';
+    s_cache_path = NULL;
+}
+
+bool font_cache_is_enabled(void)
+{
+    return (s_cache_file != NULL) && (s_glyph_size > 0);
+}
+
+size_t font_cache_get_active_glyph_size(void)
+{
+    return font_cache_is_enabled() ? s_glyph_size : 0;
 }

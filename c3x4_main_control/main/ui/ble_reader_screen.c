@@ -271,11 +271,9 @@ static void on_draw(screen_t *screen)
     // 清屏
     display_clear(COLOR_WHITE);
 
-    sFONT *font = display_get_default_ascii_font();
-
     // 绘制标题栏
     int title_y = 20;
-    display_draw_text_font(20, title_y, "BLE Book Reader", font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_menu(20, title_y, "BLE Book Reader", COLOR_BLACK, COLOR_WHITE);
 
     // 绘制连接状态
     int status_y = 60;
@@ -303,13 +301,13 @@ static void on_draw(screen_t *screen)
             status_str = "Status: Unknown";
             break;
     }
-    display_draw_text_font(20, status_y, status_str, font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_menu(20, status_y, status_str, COLOR_BLACK, COLOR_WHITE);
 
     // 绘制电池信息
     char bat_str[32];
     snprintf(bat_str, sizeof(bat_str), "Battery: %u%%", s_context->battery_pct);
-    int bat_width = display_get_text_width_font(bat_str, font);
-    display_draw_text_font(SCREEN_WIDTH - bat_width - 20, title_y, bat_str, font, COLOR_BLACK, COLOR_WHITE);
+    int bat_width = display_get_text_width_menu(bat_str);
+    display_draw_text_menu(SCREEN_WIDTH - bat_width - 20, title_y, bat_str, COLOR_BLACK, COLOR_WHITE);
 
     // 绘制页面内容
     if (s_ble_state.page_loaded && s_ble_state.page_buffer != NULL) {
@@ -332,9 +330,9 @@ static void on_draw(screen_t *screen)
         }
     } else if (s_ble_state.current_book_id != 0) {
         // 页面未加载，显示提示
-        display_draw_text_font(20, 100, "Loading page...", font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, 100, "Loading page...", COLOR_BLACK, COLOR_WHITE);
     } else {
-        display_draw_text_font(20, 100, "No book selected", font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, 100, "No book selected", COLOR_BLACK, COLOR_WHITE);
     }
 
     // 绘制页码信息
@@ -347,13 +345,13 @@ static void on_draw(screen_t *screen)
             snprintf(page_info, sizeof(page_info), "Page %u",
                      s_ble_state.current_page + 1);
         }
-        display_draw_text_font(20, SCREEN_HEIGHT - 60, page_info, font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, SCREEN_HEIGHT - 60, page_info, COLOR_BLACK, COLOR_WHITE);
     }
 
     // 绘制底部提示
-    display_draw_text_font(20, SCREEN_HEIGHT - 40,
+    display_draw_text_menu(20, SCREEN_HEIGHT - 40,
                            "Up: Prev  Down: Next  Back: Return",
-                           font, COLOR_BLACK, COLOR_WHITE);
+                           COLOR_BLACK, COLOR_WHITE);
 
     ESP_LOGI(TAG, "on_draw END");
 }

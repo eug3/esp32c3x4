@@ -12,14 +12,16 @@
 #include "nimble/ble.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
-#include "nimble/host/include/host/ble_hs.h"
-#include "nimble/host/include/host/ble_gap.h"
-#include "nimble/host/include/host/ble_gatt.h"
-#include "nimble/host/include/host/ble_gattc.h"
-#include "nimble/host/include/os/os_mbuf.h"
-#include "nimble/host/include/host/ble_uuid.h"
-#include "nimble/host/include/services/gap/ble_svc_gap.h"
-#include "nimble/host/include/services/gatt/ble_svc_gatt.h"
+#include "host/ble_hs.h"
+#include "host/ble_gap.h"
+#include "host/ble_gatt.h"
+#ifndef BLE_OWN_ADDR_PUBLIC
+#define BLE_OWN_ADDR_PUBLIC 0
+#endif
+#include "os/os_mbuf.h"
+#include "host/ble_uuid.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
 #include <string.h>
 
 static const char *TAG = "BLE_MANAGER";
@@ -434,7 +436,8 @@ bool ble_manager_start_scan(uint32_t duration_ms)
         .filter_duplicates = false,
     };
     
-    int rc = ble_gap_disc(BLE_GAP_ADDR_TYPE_PUBLIC, duration_ms, &disc_params);
+    int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, duration_ms, &disc_params, 
+                          ble_gap_event_handler, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to start scan: %d", rc);
         return false;
@@ -499,7 +502,20 @@ bool ble_manager_connect(const uint8_t *addr)
     };
     memcpy(peer_addr.val, addr, 6);
     
-    int rc = ble_gap_connect(BLE_GAP_ADDR_TYPE_PUBLIC, &peer_addr, 10000, NULL);
+    // Default connection parameters
+    struct ble_gap_conn_params conn_params = {
+        .scan_itvl = 16,    // x 0.625ms = 10ms
+        .scan_window = 16,  // x 0.625ms = 10ms
+        .itvl_min = 24,     // x 1.25ms = 30ms
+        .itvl_max = 40,     // x 1.25ms = 50ms
+        .latency = 0,
+        .supervision_timeout = 200, // x 10ms = 2000ms
+        .min_ce_len = 0,
+        .max_ce_len = 0,
+    };
+    
+    int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &peer_addr, 30000, &conn_params, 
+                             ble_gap_event_handler, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to initiate connection: %d", rc);
         return false;

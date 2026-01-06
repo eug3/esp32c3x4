@@ -19,7 +19,8 @@ struct epub_xml_parser {
 };
 
 // XML 标签辅助函数
-static const char* find_tag(const char *xml, size_t len, const char *tag, size_t *tag_len) {
+static const char* __attribute__((unused))
+find_tag(const char *xml, size_t len, const char *tag, size_t *tag_len) {
     char open_tag[64];
     snprintf(open_tag, sizeof(open_tag), "<%s", tag);
 
@@ -34,7 +35,8 @@ static const char* find_tag(const char *xml, size_t len, const char *tag, size_t
     return start;
 }
 
-static const char* find_closing_tag(const char *xml, size_t len, const char *tag) {
+static const char* __attribute__((unused))
+find_closing_tag(const char *xml, size_t len, const char *tag) {
     char close_tag[64];
     snprintf(close_tag, sizeof(close_tag), "</%s>", tag);
     return strstr(xml, close_tag);

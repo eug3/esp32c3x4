@@ -36,6 +36,7 @@
 #include "ble_manager.h"
 #include "input_handler.h"
 #include "font_select_screen.h"
+#include "boot_animation.h"
 
 // ============================================================================
 // Xteink X4 引脚定义 - 参考 examples/xteink-x4-sample
@@ -446,22 +447,58 @@ void app_main(void)
     EPD_4in26_Init_Fast();
     EPD_4in26_Clear_Fast();
 
+    // ============================================================================
+    // 启动动画：先初始化 display_engine，再播放 GIF 动画/状态
+    // ============================================================================
+    ESP_LOGI("MAIN", "Initializing display engine (early) for boot animation...");
+    display_config_t disp_config = {
+        .use_partial_refresh = true,
+        .auto_refresh = false,
+        .default_mode = REFRESH_MODE_PARTIAL,
+    };
+    bool display_ok = display_engine_init(&disp_config);
+    if (!display_ok) {
+        ESP_LOGE("MAIN", "Display engine init failed!");
+    } else {
+        // 第一次：全刷成全白，用于清残影/确保背景干净
+        display_clear(COLOR_WHITE);
+        display_refresh(REFRESH_MODE_FULL);
+        boot_animation_show("Booting...", 0);
+    }
+
     // Add delay before initializing high-power components to prevent brownout
     ESP_LOGI("MAIN", "Waiting 1 second before initializing SD card to prevent brownout...");
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    if (display_ok) {
+        boot_animation_play_ms("Booting...", 1000);
+    } else {
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
 
     // Initialize SD card
     ESP_LOGI("MAIN", "Initializing SD card...");
+    if (display_ok) {
+        boot_animation_show("Init SD...", 0);
+    }
     esp_err_t sd_ret = sd_card_init();
     if (sd_ret != ESP_OK) {
         ESP_LOGW("MAIN", "SD card initialization failed, but system will continue");
         ESP_LOGW("MAIN", "File browser and SD-related features will be unavailable");
+        if (display_ok) {
+            boot_animation_show("SD init failed", 1);
+        }
+    } else {
+        if (display_ok) {
+            boot_animation_show("SD OK", 1);
+        }
     }
 
     // ============================================================================
     // LittleFS Flash 存储初始化（用于页面缓存）
     // ============================================================================
     ESP_LOGI("MAIN", "Initializing LittleFS for page cache...");
+    if (display_ok) {
+        boot_animation_show("Init LittleFS...", 0);
+    }
     esp_vfs_littlefs_conf_t littlefs_conf = {
         .base_path = "/littlefs",
         .partition_label = "littlefs",
@@ -479,6 +516,9 @@ void app_main(void)
             ESP_LOGE("LITTLEFS", "Failed to initialize LittleFS (%s)", esp_err_to_name(ret));
         }
         ESP_LOGW("LITTLEFS", "System will continue without Flash cache (slower page turns)");
+        if (display_ok) {
+            boot_animation_show("LittleFS failed", 1);
+        }
     } else {
         // 获取文件系统信息
         size_t total = 0, used = 0;
@@ -500,6 +540,9 @@ void app_main(void)
         }
 
         ESP_LOGI("LITTLEFS", "LittleFS mounted at /littlefs for page cache");
+        if (display_ok) {
+            boot_animation_show("LittleFS OK", 1);
+        }
     }
 
     // ============================================================================
@@ -511,15 +554,8 @@ void app_main(void)
     context.battery_pct = read_battery_percentage();
     context.version_str = VERSION_STRING;
 
-    // 初始化显示引擎
-    ESP_LOGI("MAIN", "Initializing display engine...");
-    display_config_t disp_config = {
-        .use_partial_refresh = true,
-        .auto_refresh = false,
-        .default_mode = REFRESH_MODE_PARTIAL,
-    };
-    if (!display_engine_init(&disp_config)) {
-        ESP_LOGE("MAIN", "Display engine init failed!");
+    if (display_ok) {
+        boot_animation_show("Init UI...", 0);
     }
 
     // 初始化屏幕管理器
@@ -532,19 +568,15 @@ void app_main(void)
     file_browser_screen_init();
     image_viewer_screen_init();  // 初始化图片浏览器
     reader_screen_init();  // 初始化阅读器
-    ble_reader_screen_init();  // 初始化蓝牙读书屏幕
+    // ble_reader_screen_init();  // 初始化蓝牙读书屏幕 (BLE API incompatible with IDF v5.5.2)
     font_select_screen_init();  // 初始化字体选择屏幕
     screen_manager_register(home_screen_get_instance());
     screen_manager_register(settings_screen_simple_get_instance());
     screen_manager_register(file_browser_screen_get_instance());
     screen_manager_register(image_viewer_screen_get_instance());  // 注册图片浏览器
     screen_manager_register(reader_screen_get_instance());  // 注册阅读器
-    screen_manager_register(ble_reader_screen_get_instance());  // 注册蓝牙读书屏幕
+    // screen_manager_register(ble_reader_screen_get_instance());  // 注册蓝牙读书屏幕 (BLE disabled)
     screen_manager_register(font_select_screen_get_instance());  // 注册字体选择屏幕
-
-    // 显示主屏幕
-    ESP_LOGI("MAIN", "Showing home screen...");
-    screen_manager_show("home");
 
     // ============================================================================
     // Xteink X4: 初始化按键输入处理（轮询 + 事件派发到当前屏幕）
@@ -553,6 +585,10 @@ void app_main(void)
     input_handler_register_callback(ui_button_event_cb, NULL);
     // 注意：input_poll 里可能触发屏幕切换/目录扫描等较深调用栈，给更大的栈以避免 stack protection fault
     xTaskCreate(input_poll_task, "input_poll", 8192, NULL, 5, NULL);
+
+    // 显示主屏幕（放到所有初始化完成后再显示）
+    ESP_LOGI("MAIN", "Showing home screen...");
+    screen_manager_show("home");
 
     ESP_LOGI("MAIN", "System initialized successfully.");
 }

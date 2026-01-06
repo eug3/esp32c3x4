@@ -101,6 +101,46 @@ int xt_eink_font_get_height(void);
 const char *xt_eink_font_get_current_path(void);
 
 /**
+ * @brief 获取菜单默认字体（不受用户字体切换影响）
+ *
+ * 菜单界面应使用此函数获取字体对象，以确保菜单显示始终使用
+ * 启动时初始化的默认字体，不会因用户切换字体而改变。
+ *
+ * @return 菜单默认字体对象指针，若未初始化则返回 NULL
+ */
+void *xt_eink_font_get_menu_default_font(void);
+
+/**
+ * @brief 检查菜单字体中是否包含指定字符
+ *
+ * 使用菜单默认字体而不是当前用户字体。
+ *
+ * @param ch UTF-32 字符
+ * @return true 存在，false 不存在
+ */
+bool xt_eink_font_menu_has_char(uint32_t ch);
+
+/**
+ * @brief 获取菜单字体中字符的位图
+ *
+ * 使用菜单默认字体而不是当前用户字体。
+ *
+ * @param ch UTF-32 字符
+ * @param glyph 输出字形信息
+ * @return true 成功，false 失败
+ */
+bool xt_eink_font_menu_get_glyph(uint32_t ch, xt_eink_glyph_t *glyph);
+
+/**
+ * @brief 获取菜单字体高度
+ *
+ * 使用菜单默认字体而不是当前用户字体。
+ *
+ * @return 字体高度（像素）
+ */
+int xt_eink_font_menu_get_height(void);
+
+/**
  * @brief 设置当前字体路径（不重新加载）
  * @param path 字体文件路径
  */

@@ -65,6 +65,16 @@ int epub_zip_extract_file(epub_zip_t *zip, const epub_zip_file_info_t *file_info
                           void *buffer, size_t buffer_size);
 
 /**
+ * @brief 流式解压单个文件到指定路径（用于 LittleFS 缓存等场景）
+ * @param zip ZIP 句柄
+ * @param file_info 文件信息
+ * @param out_path 输出文件路径
+ * @return 实际解压的字节数，失败返回 -1
+ */
+int epub_zip_extract_file_to_path(epub_zip_t *zip, const epub_zip_file_info_t *file_info,
+                                 const char *out_path);
+
+/**
  * @brief 查找特定文件
  * @param zip ZIP 句柄
  * @param filename 文件名（如 "OEBPS/content.opf"）

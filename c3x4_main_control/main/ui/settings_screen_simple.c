@@ -47,7 +47,6 @@ static void on_hide(screen_t *screen)
 
 static void draw_setting_item(int index, bool is_selected)
 {
-    sFONT *font = display_get_default_ascii_font();
     int item_height = 50;
     int start_y = 80;
     int item_y = start_y + index * item_height;
@@ -58,23 +57,21 @@ static void draw_setting_item(int index, bool is_selected)
     if (is_selected) {
         display_draw_rect(menu_x - 10, item_y - 5, menu_width + 20, item_height - 10,
                          COLOR_BLACK, true);
-        display_draw_text_font(menu_x, item_y + 12, s_setting_labels[index], font, COLOR_WHITE, COLOR_BLACK);
+        display_draw_text_menu(menu_x, item_y + 12, s_setting_labels[index], COLOR_WHITE, COLOR_BLACK);
     } else {
         display_draw_rect(menu_x - 10, item_y - 5, menu_width + 20, item_height - 10,
                          COLOR_BLACK, false);
-        display_draw_text_font(menu_x, item_y + 12, s_setting_labels[index], font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(menu_x, item_y + 12, s_setting_labels[index], COLOR_BLACK, COLOR_WHITE);
     }
 }
 
 static void on_draw(screen_t *screen)
 {
-    sFONT *ui_font = display_get_default_ascii_font();
-
     // 清屏
     display_clear(COLOR_WHITE);
 
     // 标题
-    display_draw_text_font(20, 20, "设置", ui_font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_menu(20, 20, "设置", COLOR_BLACK, COLOR_WHITE);
 
     // 绘制菜单项
     for (int i = 0; i < SETTING_ITEM_COUNT; i++) {
@@ -86,8 +83,8 @@ static void on_draw(screen_t *screen)
     }
 
     // 底部提示
-    display_draw_text_font(20, SCREEN_HEIGHT - 60, "上下: 选择  确认: 进入  返回: 返回",
-                           ui_font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_menu(20, SCREEN_HEIGHT - 60, "上下: 选择  确认: 进入  返回: 返回",
+                           COLOR_BLACK, COLOR_WHITE);
 }
 
 static void on_event(screen_t *screen, button_t btn, button_event_t event)

@@ -401,13 +401,17 @@ static bool read_glyph_from_file(xt_eink_font_t *font, uint32_t unicode, uint8_t
         return false;
     }
 
-    // 使用智能缓存系统（优先 LittleFS，未命中则 SD 卡）
-    int bytes_read = font_cache_get_glyph(unicode, bitmap, font->header.glyph_size);
-    if (bytes_read > 0) {
-        return true;
-    }
+    // 使用智能缓存系统（优先 LittleFS，未命中则 SD 卡）。
+    // 缓存仅对“当前已 init 的用户字体”生效，且要求 glyph_size 匹配。
+    if (font_cache_is_enabled() && font_cache_get_active_glyph_size() == font->header.glyph_size) {
+        int bytes_read = font_cache_get_glyph(unicode, bitmap, font->header.glyph_size);
+        if (bytes_read > 0) {
+            return true;
+        }
 
-    ESP_LOGW(TAG, "Font cache failed for U+%04X, fallback to direct file read", unicode);
+        // table 缓存未覆盖的字很常见（未命中后会走直读），避免刷屏 warning。
+        ESP_LOGD(TAG, "Font cache miss for U+%04X, fallback to direct file read", unicode);
+    }
 
     // 兜底：直接从原文件读取
     // fontdecode.cs 格式：无文件头，直接按 unicode 索引

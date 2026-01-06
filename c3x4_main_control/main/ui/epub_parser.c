@@ -8,6 +8,7 @@
 
 #include "epub_parser.h"
 #include "epub_zip.h"
+#include "epub_cache.h"
 #include "epub_xml.h"
 #include "epub_html.h"
 #include "esp_log.h"
@@ -63,6 +64,9 @@ bool epub_parser_init(epub_reader_t *reader) {
 
     memset(reader, 0, sizeof(epub_reader_t));
     reader->current_file = NULL;
+
+    // LittleFS 缓存（用于加速重复打开/翻章，减少 SD 访问）
+    (void)epub_cache_init();
 
     ESP_LOGI(TAG, "EPUB parser initialized");
     return true;
@@ -154,6 +158,18 @@ bool epub_parser_open(epub_reader_t *reader, const char *epub_path) {
         return false;
     }
 
+    // 记录 opf 所在目录（章节 href 通常是相对 opf 的路径）
+    char opf_dir[128] = {0};
+    const char *slash = strrchr(opf_file.filename, '/');
+    if (slash != NULL) {
+        size_t dir_len = (size_t)(slash - opf_file.filename + 1);
+        if (dir_len >= sizeof(opf_dir)) {
+            dir_len = sizeof(opf_dir) - 1;
+        }
+        memcpy(opf_dir, opf_file.filename, dir_len);
+        opf_dir[dir_len] = '\0';
+    }
+
     // 步骤 3: 读取并解析 content.opf
     char *opf_buffer = malloc(opf_file.uncompressed_size + 1);
     if (!opf_buffer) {
@@ -197,7 +213,16 @@ bool epub_parser_open(epub_reader_t *reader, const char *epub_path) {
     }
 
     // 解析 spine (章节顺序)
-    epub_xml_spine_item_t spine_items[MAX_CHAPTERS];
+    // 注意：spine_items 结构体较大（含 href[256]），不能放在小栈任务上。
+    epub_xml_spine_item_t *spine_items = calloc(MAX_CHAPTERS, sizeof(epub_xml_spine_item_t));
+    if (!spine_items) {
+        ESP_LOGE(TAG, "Failed to allocate spine items");
+        epub_xml_destroy(xml);
+        free(opf_buffer);
+        epub_zip_close(zip);
+        return false;
+    }
+
     int spine_count = epub_xml_parse_spine(xml, spine_items, MAX_CHAPTERS);
     ESP_LOGI(TAG, "Found %d spine items", spine_count);
 
@@ -205,6 +230,7 @@ bool epub_parser_open(epub_reader_t *reader, const char *epub_path) {
     reader->chapters = calloc(spine_count, sizeof(epub_chapter_t));
     if (!reader->chapters) {
         ESP_LOGE(TAG, "Failed to allocate chapters array");
+        free(spine_items);
         epub_xml_destroy(xml);
         free(opf_buffer);
         epub_zip_close(zip);
@@ -216,14 +242,39 @@ bool epub_parser_open(epub_reader_t *reader, const char *epub_path) {
     for (int i = 0; i < spine_count; i++) {
         char href[256];
         if (epub_xml_find_manifest_item(xml, spine_items[i].idref, href, sizeof(href))) {
-            // 构建完整路径 - 确保 href 不会超出目标缓冲区
-            size_t href_len = strlen(href);
-            size_t max_copy = sizeof(reader->chapters[valid_chapters].content_file) - 1;
-            if (href_len > max_copy) {
-                href_len = max_copy;
+            // 组合 opf_dir + href（href 为相对路径）
+            // 注意：避免 snprintf 触发 format-truncation 警告（项目里当作 error）。
+            char full_path[256];
+            full_path[0] = '\0';
+            if (opf_dir[0] != '\0' && href[0] != '/' && strstr(href, "://") == NULL) {
+                size_t dlen = strlen(opf_dir);
+                size_t hlen = strlen(href);
+                if (dlen >= sizeof(full_path)) {
+                    dlen = sizeof(full_path) - 1;
+                }
+                memcpy(full_path, opf_dir, dlen);
+                size_t remain = sizeof(full_path) - 1 - dlen;
+                if (hlen > remain) {
+                    hlen = remain;
+                }
+                memcpy(full_path + dlen, href, hlen);
+                full_path[dlen + hlen] = '\0';
+            } else {
+                size_t hlen = strlen(href);
+                if (hlen >= sizeof(full_path)) {
+                    hlen = sizeof(full_path) - 1;
+                }
+                memcpy(full_path, href, hlen);
+                full_path[hlen] = '\0';
             }
-            strncpy(reader->chapters[valid_chapters].content_file, href, href_len);
-            reader->chapters[valid_chapters].content_file[href_len] = '\0';
+
+            size_t fp_len = strlen(full_path);
+            size_t max_copy = sizeof(reader->chapters[valid_chapters].content_file) - 1;
+            if (fp_len > max_copy) {
+                fp_len = max_copy;
+            }
+            memcpy(reader->chapters[valid_chapters].content_file, full_path, fp_len);
+            reader->chapters[valid_chapters].content_file[fp_len] = '\0';
             reader->chapters[valid_chapters].chapter_index = valid_chapters;
             snprintf(reader->chapters[valid_chapters].title,
                     sizeof(reader->chapters[valid_chapters].title),
@@ -235,6 +286,7 @@ bool epub_parser_open(epub_reader_t *reader, const char *epub_path) {
     reader->metadata.total_chapters = valid_chapters;
 
     // 清理
+    free(spine_items);
     epub_xml_destroy(xml);
     free(opf_buffer);
     epub_zip_close(zip);
@@ -309,6 +361,25 @@ int epub_parser_read_chapter(const epub_reader_t *reader, int chapter_index,
 
     const epub_chapter_t *chapter = &reader->chapters[chapter_index];
 
+    if (buffer_size <= 1) {
+        return -1;
+    }
+
+    // 先尝试从 LittleFS 缓存读取
+    epub_cache_key_t cache_key;
+    memset(&cache_key, 0, sizeof(cache_key));
+    cache_key.type = EPUB_CACHE_CHAPTER;
+    strncpy(cache_key.epub_path, reader->epub_path, sizeof(cache_key.epub_path) - 1);
+    strncpy(cache_key.content_path, chapter->content_file, sizeof(cache_key.content_path) - 1);
+
+    if (epub_cache_exists(&cache_key)) {
+        int n = epub_cache_read(&cache_key, text_buffer, buffer_size - 1);
+        if (n > 0) {
+            text_buffer[n] = '\0';
+            return n;
+        }
+    }
+
     // 从 EPUB 中流式读取章节内容
     // 重新打开 ZIP（因为之前已关闭）
     epub_zip_t *zip = epub_zip_open(reader->epub_path);
@@ -320,18 +391,38 @@ int epub_parser_read_chapter(const epub_reader_t *reader, int chapter_index,
     // 查找章节文件
     epub_zip_file_info_t chapter_file;
     if (!epub_zip_find_file(zip, chapter->content_file, &chapter_file)) {
-        // 尝试添加 OEBPS/ 前缀
-        char full_path[256];
-        snprintf(full_path, sizeof(full_path), "OEBPS/%s", chapter->content_file);
-        if (!epub_zip_find_file(zip, full_path, &chapter_file)) {
-            ESP_LOGE(TAG, "Chapter file not found: %s", chapter->content_file);
+        ESP_LOGE(TAG, "Chapter file not found: %s", chapter->content_file);
+        epub_zip_close(zip);
+        return -1;
+    }
+
+    // 使用 ZIP 内的真实路径作为缓存键（更稳定）
+    strncpy(cache_key.content_path, chapter_file.filename, sizeof(cache_key.content_path) - 1);
+    cache_key.content_path[sizeof(cache_key.content_path) - 1] = '\0';
+
+    if (!epub_cache_exists(&cache_key)) {
+        char cache_path[256];
+        if (epub_cache_get_file_path(&cache_key, cache_path, sizeof(cache_path))) {
+            int ext_ret = epub_zip_extract_file_to_path(zip, &chapter_file, cache_path);
+            if (ext_ret < 0) {
+                // 写缓存失败不影响阅读：继续走内存解压
+                ESP_LOGW(TAG, "Failed to precache chapter to %s", cache_path);
+            }
+        }
+    }
+
+    // 再次尝试从缓存读（即使 buffer 较小，也可读前 N 字节用于显示）
+    if (epub_cache_exists(&cache_key)) {
+        int n = epub_cache_read(&cache_key, text_buffer, buffer_size - 1);
+        if (n > 0) {
+            text_buffer[n] = '\0';
             epub_zip_close(zip);
-            return -1;
+            return n;
         }
     }
 
     // 解压章节内容
-    int bytes_read = epub_zip_extract_file(zip, &chapter_file, text_buffer, buffer_size);
+    int bytes_read = epub_zip_extract_file(zip, &chapter_file, text_buffer, buffer_size - 1);
     if (bytes_read < 0) {
         ESP_LOGE(TAG, "Failed to extract chapter: %s", chapter->content_file);
         epub_zip_close(zip);

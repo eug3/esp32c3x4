@@ -182,7 +182,7 @@ static void free_file_list(void)
  */
 static void draw_single_file(int display_index, const file_info_t *file, bool is_selected)
 {
-    sFONT *ui_font = display_get_default_ascii_font();
+    sFONT *ui_font = display_get_menu_font();
 
     // 计算位置
     int start_y = 80;
@@ -202,7 +202,7 @@ static void draw_single_file(int display_index, const file_info_t *file, bool is
     display_name[sizeof(display_name) - 4] = '\0';
 
     // 如果文本太长，添加省略号
-    int text_width = display_get_text_width_font(display_name, ui_font);
+    int text_width = display_get_text_width_menu(display_name);
     if (text_width > max_text_width) {
         int keep_chars = (max_text_width * strlen(display_name)) / text_width;
         if (keep_chars > 3) {
@@ -213,11 +213,11 @@ static void draw_single_file(int display_index, const file_info_t *file, bool is
     if (is_selected) {
         // 选中状态：黑底白字
         display_draw_rect(20, y, SCREEN_WIDTH - 40, item_height - 8, COLOR_BLACK, true);
-        display_draw_text_font(30, text_y, display_name, ui_font, COLOR_WHITE, COLOR_BLACK);
+        display_draw_text_menu(30, text_y, display_name, COLOR_WHITE, COLOR_BLACK);
     } else {
         // 普通状态：白底黑字
         display_draw_rect(20, y, SCREEN_WIDTH - 40, item_height - 8, COLOR_BLACK, false);
-        display_draw_text_font(30, text_y, display_name, ui_font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(30, text_y, display_name, COLOR_BLACK, COLOR_WHITE);
     }
 }
 
@@ -254,9 +254,8 @@ static void draw_page_indicator(void)
     char page_str[32];
     snprintf(page_str, sizeof(page_str), "%d/%d", s_browser_state.current_page + 1, total_pages);
 
-    sFONT *ui_font = display_get_default_ascii_font();
-    int text_width = display_get_text_width_font(page_str, ui_font);
-    display_draw_text_font(SCREEN_WIDTH - text_width - 20, SCREEN_HEIGHT - 30, page_str, ui_font, COLOR_BLACK, COLOR_WHITE);
+    int text_width = display_get_text_width_menu(page_str);
+    display_draw_text_menu(SCREEN_WIDTH - text_width - 20, SCREEN_HEIGHT - 30, page_str, COLOR_BLACK, COLOR_WHITE);
 }
 
 static void on_show(screen_t *screen)
@@ -286,10 +285,8 @@ static void on_draw(screen_t *screen)
     // 清屏
     display_clear(COLOR_WHITE);
 
-    sFONT *ui_font = display_get_default_ascii_font();
-
     // 绘制标题栏
-    display_draw_text_font(20, 20, "File Browser", ui_font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_menu(20, 20, "File Browser", COLOR_BLACK, COLOR_WHITE);
 
     // 绘制当前路径
     int path_y = 50;
@@ -298,7 +295,7 @@ static void on_draw(screen_t *screen)
     path_display[sizeof(path_display) - 1] = '\0';
 
     // 如果路径太长，截断显示
-    int path_width = display_get_text_width_font(path_display, ui_font);
+    int path_width = display_get_text_width_menu(path_display);
     int max_path_width = SCREEN_WIDTH - 40;
     if (path_width > max_path_width) {
         int keep_chars = (max_path_width * strlen(path_display)) / path_width;
@@ -307,11 +304,11 @@ static void on_draw(screen_t *screen)
             strcat(path_display, path_display + strlen(path_display) - keep_chars + 3);
         }
     }
-    display_draw_text_font(20, path_y, path_display, ui_font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_menu(20, path_y, path_display, COLOR_BLACK, COLOR_WHITE);
 
     // 绘制文件列表
     if (s_browser_state.file_count == 0) {
-        display_draw_text_font(20, 150, "No files found", ui_font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, 150, "No files found", COLOR_BLACK, COLOR_WHITE);
     } else {
         draw_file_list();
     }
@@ -320,8 +317,8 @@ static void on_draw(screen_t *screen)
     draw_page_indicator();
 
     // 绘制底部提示
-    display_draw_text_font(20, SCREEN_HEIGHT - 60, "VOL+/-: Select  L/R: Page  CONFIRM: Open  BACK: Return",
-                           ui_font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_menu(20, SCREEN_HEIGHT - 60, "VOL+/-: Select  L/R: Page  CONFIRM: Open  BACK: Return",
+                           COLOR_BLACK, COLOR_WHITE);
 }
 
 /**

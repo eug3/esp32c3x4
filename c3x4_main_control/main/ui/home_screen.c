@@ -49,7 +49,7 @@ static void paint_draw_text_utf8(UWORD x, UWORD y, const char *text, sFONT *asci
     }
 
     if (ascii_font == NULL) {
-        ascii_font = display_get_default_ascii_font();
+        ascii_font = display_get_menu_font();
     }
 
     static bool s_xt_inited = false;
@@ -59,22 +59,23 @@ static void paint_draw_text_utf8(UWORD x, UWORD y, const char *text, sFONT *asci
     }
 
     // 英文宽度：根据中文字体全角宽度推导半角宽度（通过字距补齐）
+    // 菜单使用默认字体，不受用户字体切换影响
     int cjk_w = 0;
     {
         static const uint32_t probes[] = { 0x4E2Du, 0x56FDu, 0x6C49u, 0x6587u };
         for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
             uint32_t ch = probes[i];
-            if (!xt_eink_font_has_char(ch)) {
+            if (!xt_eink_font_menu_has_char(ch)) {
                 continue;
             }
             xt_eink_glyph_t g;
-            if (xt_eink_font_get_glyph(ch, &g) && g.width > 0) {
+            if (xt_eink_font_menu_get_glyph(ch, &g) && g.width > 0) {
                 cjk_w = g.width;
                 break;
             }
         }
         if (cjk_w <= 0) {
-            int h = xt_eink_font_get_height();
+            int h = xt_eink_font_menu_get_height();
             if (h > 0) {
                 cjk_w = (h * 3) / 4;
             }
@@ -101,13 +102,13 @@ static void paint_draw_text_utf8(UWORD x, UWORD y, const char *text, sFONT *asci
             break;
         }
 
-        // 规则：ASCII 永远走内置字体；非 ASCII 才尝试字体文件（xt_eink）
+        // 规则：ASCII 永远走内置字体；非 ASCII 才尝试菜单默认字体文件
         if (ch <= 0x7Fu) {
             Paint_DrawChar(current_x, y, (char)ch, ascii_font, color_fg, color_bg);
             current_x += ascii_adv;
-        } else if (xt_eink_font_has_char(ch)) {
+        } else if (xt_eink_font_menu_has_char(ch)) {
             xt_eink_glyph_t glyph;
-            if (xt_eink_font_get_glyph(ch, &glyph) && glyph.bitmap != NULL) {
+            if (xt_eink_font_menu_get_glyph(ch, &glyph) && glyph.bitmap != NULL) {
                 int bytes_per_row = (glyph.width + 7) / 8;
                 for (int row = 0; row < glyph.height; row++) {
                     for (int col = 0; col < glyph.width; col++) {
@@ -121,7 +122,7 @@ static void paint_draw_text_utf8(UWORD x, UWORD y, const char *text, sFONT *asci
                 }
                 current_x += glyph.width;
             } else {
-                current_x += xt_eink_font_get_height();
+                current_x += xt_eink_font_menu_get_height();
             }
         } else {
             Paint_DrawChar(current_x, y, '?', ascii_font, color_fg, color_bg);
@@ -173,24 +174,24 @@ static void on_draw(screen_t *screen)
     display_clear(COLOR_WHITE);
     ESP_LOGI(TAG, "Screen cleared");
 
-    sFONT *menu_font = display_get_default_ascii_font();
+    sFONT *menu_font = display_get_menu_font();
 
     // 绘制标题栏
     int title_y = 20;
     ESP_LOGI(TAG, "Drawing title...");
-    display_draw_text_font(20, title_y, "Monster For Pan", menu_font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_menu(20, title_y, "Monster For Pan", COLOR_BLACK, COLOR_WHITE);
 
     // 绘制电池信息
     char bat_str[32];
     snprintf(bat_str, sizeof(bat_str), "电量: %u%%", s_context->battery_pct);
-    int bat_width = display_get_text_width_font(bat_str, menu_font);
-    display_draw_text_font(SCREEN_WIDTH - bat_width - 20, title_y, bat_str, menu_font, COLOR_BLACK, COLOR_WHITE);
+    int bat_width = display_get_text_width_menu(bat_str);
+    display_draw_text_menu(SCREEN_WIDTH - bat_width - 20, title_y, bat_str, COLOR_BLACK, COLOR_WHITE);
 
     // 绘制版本信息
     if (s_context->version_str != NULL) {
         char ver_str[96];
         snprintf(ver_str, sizeof(ver_str), "版本: %s", s_context->version_str);
-        display_draw_text_font(20, SCREEN_HEIGHT - 30, ver_str, menu_font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, SCREEN_HEIGHT - 30, ver_str, COLOR_BLACK, COLOR_WHITE);
     }
 
     // 绘制菜单
@@ -211,17 +212,17 @@ static void on_draw(screen_t *screen)
         if (is_selected) {
             display_draw_rect(menu_x - 10, item_y - 5, menu_width + 20, menu_item_height - 10,
                              COLOR_BLACK, true);
-            display_draw_text_font(menu_x, text_y, s_menu_items[i].label, menu_font, COLOR_WHITE, COLOR_BLACK);
+            display_draw_text_menu(menu_x, text_y, s_menu_items[i].label, COLOR_WHITE, COLOR_BLACK);
         } else {
             display_draw_rect(menu_x - 10, item_y - 5, menu_width + 20, menu_item_height - 10,
                              COLOR_BLACK, false);
-            display_draw_text_font(menu_x, text_y, s_menu_items[i].label, menu_font, COLOR_BLACK, COLOR_WHITE);
+            display_draw_text_menu(menu_x, text_y, s_menu_items[i].label, COLOR_BLACK, COLOR_WHITE);
         }
     }
 
     // 绘制底部提示
-    display_draw_text_font(20, SCREEN_HEIGHT - 60, "上下: 选择  确认: 进入",
-                           menu_font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_menu(20, SCREEN_HEIGHT - 60, "上下: 选择  确认: 进入",
+                           COLOR_BLACK, COLOR_WHITE);
     
     ESP_LOGI(TAG, "on_draw END");
 }
@@ -356,7 +357,7 @@ static void draw_single_menu_item(int index, bool is_selected)
     int local_x = menu_x - 10;  // 区域内的X坐标
     int local_y = 0;            // 区域内的Y坐标从0开始
     
-    sFONT *menu_font = display_get_default_ascii_font();
+    sFONT *menu_font = display_get_menu_font();
     int text_y = (region_height - menu_font->Height) / 2;
     if (text_y < 0) {
         text_y = 0;

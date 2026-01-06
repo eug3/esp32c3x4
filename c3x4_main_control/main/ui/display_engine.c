@@ -47,10 +47,17 @@ static int measure_text_width_utf8(const char *text, sFONT *ascii_font);
 static int measure_text_height_utf8(const char *text, sFONT *ascii_font);
 static int draw_text_utf8_locked(int x, int y, const char *text, sFONT *ascii_font, uint8_t color, uint8_t bg_color);
 
+// 菜单专用：中文固定使用菜单默认字体（不受用户字体切换影响）
+static int measure_text_width_utf8_menu(const char *text, sFONT *ascii_font);
+static int measure_text_height_utf8_menu(const char *text, sFONT *ascii_font);
+static int draw_text_utf8_menu_locked(int x, int y, const char *text, sFONT *ascii_font, uint8_t color, uint8_t bg_color);
+
 static void ensure_xt_font_initialized(void);
 static int get_cjk_typical_width(void);
 static int get_ascii_advance_width(sFONT *ascii_font);
 static sFONT* choose_ascii_font_by_cjk_height(void);
+static sFONT* choose_ascii_font_by_cjk_height_menu(void);
+static sFONT* choose_ascii_font_by_target_height(int target_height);
 
 /**********************
  *  STATIC FUNCTIONS
@@ -117,21 +124,16 @@ static void ensure_xt_font_initialized(void)
 {
     static bool xt_font_initialized = false;
     if (!xt_font_initialized) {
-        xt_eink_font_init();
-        xt_font_initialized = true;
+        if (xt_eink_font_init()) {
+            xt_font_initialized = true;
+        }
     }
 }
 
-static sFONT* choose_ascii_font_by_cjk_height(void)
+static sFONT* choose_ascii_font_by_target_height(int target_height)
 {
-    ensure_xt_font_initialized();
-    int cjk_h = xt_eink_font_get_height();
-    if (cjk_h <= 0) {
-        return &Font12;
-    }
-
-    // 候选 ASCII 字体：只按高度挑选“最接近”的。
-    // SourceSansPro16 是 21px 高，能填补 Font20/Font24 之间的空档。
+    // 目标：英文不应高于中文行高。选择“Height <= target_height”的最大字体。
+    // 候选 ASCII 字体按高度递增。
     sFONT *candidates[] = {
         &Font8,
         &Font12,
@@ -141,24 +143,34 @@ static sFONT* choose_ascii_font_by_cjk_height(void)
         &Font24,
     };
 
+    if (target_height <= 0) {
+        return &Font16;
+    }
+
     sFONT *best = candidates[0];
-    int best_diff = 0x7FFFFFFF;
     for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
         sFONT *f = candidates[i];
-        int diff = (int)f->Height - cjk_h;
-        if (diff < 0) diff = -diff;
-
-        if (diff < best_diff) {
+        if ((int)f->Height <= target_height) {
             best = f;
-            best_diff = diff;
-        } else if (diff == best_diff) {
-            // 同差值时，优先选择更小的字体，避免英文“顶到行高”显得拥挤
-            if (f->Height < best->Height) {
-                best = f;
-            }
+        } else {
+            break;
         }
     }
     return best;
+}
+
+static sFONT* choose_ascii_font_by_cjk_height(void)
+{
+    ensure_xt_font_initialized();
+    int cjk_h = xt_eink_font_get_height();
+    return choose_ascii_font_by_target_height(cjk_h);
+}
+
+static sFONT* choose_ascii_font_by_cjk_height_menu(void)
+{
+    ensure_xt_font_initialized();
+    int cjk_h = xt_eink_font_menu_get_height();
+    return choose_ascii_font_by_target_height(cjk_h);
 }
 
 sFONT* display_get_default_ascii_font(void)
@@ -166,11 +178,16 @@ sFONT* display_get_default_ascii_font(void)
     return choose_ascii_font_by_cjk_height();
 }
 
+sFONT* display_get_menu_font(void)
+{
+    // 菜单界面必须与“菜单中文高度”匹配，但不能受用户字体影响。
+    // 这里按菜单中文字体高度自动挑选合适的 ASCII 字号。
+    return choose_ascii_font_by_cjk_height_menu();
+}
+
 static int get_cjk_typical_width(void)
 {
     // 使用常见汉字探测“全角宽度”，用于推导英文半角宽度
-    ensure_xt_font_initialized();
-
     static const uint32_t probes[] = {
         0x4E2Du, // 中
         0x56FDu, // 国
@@ -283,6 +300,140 @@ static int measure_text_height_utf8(const char *text, sFONT *ascii_font)
         h = xt_h;
     }
     return h;
+}
+
+static int measure_text_width_utf8_menu(const char *text, sFONT *ascii_font)
+{
+    if (text == NULL || *text == '\0') {
+        return 0;
+    }
+
+    if (ascii_font == NULL) {
+        ascii_font = display_get_menu_font();
+    }
+
+    ensure_xt_font_initialized();
+    const int ascii_adv = (int)ascii_font->Width;
+
+    int width = 0;
+    const char *p = text;
+    while (*p != '\0') {
+        uint32_t ch;
+        int offset = xt_eink_font_utf8_to_utf32(p, &ch);
+        if (offset <= 0) {
+            break;
+        }
+
+        if (ch <= 0x7Fu) {
+            width += ascii_adv;
+        } else if (xt_eink_font_menu_has_char(ch)) {
+            xt_eink_glyph_t glyph;
+            if (xt_eink_font_menu_get_glyph(ch, &glyph) && glyph.width > 0) {
+                width += glyph.width;
+            } else {
+                width += xt_eink_font_menu_get_height();
+            }
+        } else {
+            width += ascii_adv;
+        }
+
+        p += offset;
+    }
+
+    return width;
+}
+
+static int measure_text_height_utf8_menu(const char *text, sFONT *ascii_font)
+{
+    (void)text;
+
+    if (ascii_font == NULL) {
+        ascii_font = display_get_menu_font();
+    }
+
+    ensure_xt_font_initialized();
+
+    int h = ascii_font->Height;
+    int xt_h = xt_eink_font_menu_get_height();
+    if (xt_h > h) {
+        h = xt_h;
+    }
+    return h;
+}
+
+static int draw_text_utf8_menu_locked(int x, int y, const char *text, sFONT *ascii_font, uint8_t color, uint8_t bg_color)
+{
+    if (text == NULL || *text == '\0') {
+        return 0;
+    }
+
+    if (ascii_font == NULL) {
+        ascii_font = display_get_menu_font();
+    }
+
+    ensure_xt_font_initialized();
+    const int ascii_adv = (int)ascii_font->Width;
+
+    int text_w = measure_text_width_utf8_menu(text, ascii_font);
+    int text_h = measure_text_height_utf8_menu(text, ascii_font);
+
+    if (bg_color != COLOR_WHITE) {
+        Paint_DrawRectangle(x, y, x + text_w - 1, y + text_h - 1, bg_color, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+    }
+
+    int current_x = x;
+    const char *p = text;
+
+    while (*p != '\0') {
+        uint32_t ch;
+        int offset = xt_eink_font_utf8_to_utf32(p, &ch);
+        if (offset <= 0) {
+            break;
+        }
+
+        if (ch <= 0x7Fu) {
+            Paint_DrawChar(current_x, y, (char)ch, ascii_font, color, bg_color);
+            current_x += ascii_adv;
+        } else if (xt_eink_font_menu_has_char(ch)) {
+            xt_eink_glyph_t glyph;
+            if (!xt_eink_font_menu_get_glyph(ch, &glyph) || glyph.bitmap == NULL) {
+                current_x += xt_eink_font_menu_get_height();
+                p += offset;
+                continue;
+            }
+
+            int bytes_per_row = (glyph.width + 7) / 8;
+            for (int row = 0; row < glyph.height; row++) {
+                for (int col = 0; col < glyph.width; col++) {
+                    int byte_idx = row * bytes_per_row + col / 8;
+                    int bit_idx = 7 - (col % 8);
+                    bool pixel_set = (glyph.bitmap[byte_idx] >> bit_idx) & 1;
+                    if (!pixel_set) {
+                        continue;
+                    }
+
+                    int px = current_x + col;
+                    int py = y + row;
+                    if (px >= 0 && px < SCREEN_WIDTH && py >= 0 && py < SCREEN_HEIGHT) {
+                        Paint_SetPixel(px, py, color);
+                    }
+                }
+            }
+
+            current_x += glyph.width;
+        } else {
+            Paint_DrawChar(current_x, y, '?', ascii_font, color, bg_color);
+            current_x += ascii_adv;
+        }
+
+        p += offset;
+    }
+
+    if (s_config.use_partial_refresh) {
+        expand_dirty_region(x, y, text_w, text_h);
+    }
+
+    return text_w;
 }
 
 static int draw_text_utf8_locked(int x, int y, const char *text, sFONT *ascii_font, uint8_t color, uint8_t bg_color)
@@ -752,6 +903,43 @@ int display_draw_text_font(int x, int y, const char *text, sFONT *font, uint8_t 
         width = cur_x - x;
 
         if (s_config.use_partial_refresh) {
+            // 纯 ASCII 文本也要按中文字体高度参与刷新区域计算，避免在 TXT 渲染时
+            // 英文/数字行仅按较小 ASCII 高度刷新而产生残影/裁切。
+            int h = (int)font->Height;
+            int xt_h = xt_eink_font_get_height();
+            if (xt_h > h) {
+                h = xt_h;
+            }
+            expand_dirty_region(x, y, width, h);
+        }
+    }
+    unlock_engine();
+
+    return width;
+}
+
+int display_draw_text_menu(int x, int y, const char *text, uint8_t color, uint8_t bg_color)
+{
+    if (text == NULL || *text == '\0') {
+        return 0;
+    }
+
+    sFONT *font = display_get_menu_font();
+
+    lock_engine();
+    int width;
+    if (text_has_non_ascii(text)) {
+        width = draw_text_utf8_menu_locked(x, y, text, font, color, bg_color);
+    } else {
+        const int ascii_adv = (int)font->Width;
+        int cur_x = x;
+        for (const char *p = text; *p != '\0'; p++) {
+            Paint_DrawChar(cur_x, y, *p, font, color, bg_color);
+            cur_x += ascii_adv;
+        }
+        width = cur_x - x;
+
+        if (s_config.use_partial_refresh) {
             expand_dirty_region(x, y, width, font->Height);
         }
     }
@@ -777,6 +965,20 @@ int display_get_text_width_font(const char *text, sFONT *font)
     return (int)strlen(text) * get_ascii_advance_width(font);
 }
 
+int display_get_text_width_menu(const char *text)
+{
+    if (text == NULL) {
+        return 0;
+    }
+
+    sFONT *font = display_get_menu_font();
+    if (text_has_non_ascii(text)) {
+        return measure_text_width_utf8_menu(text, font);
+    }
+
+    return (int)strlen(text) * (int)font->Width;
+}
+
 int display_get_text_height_font(sFONT *font)
 {
     if (font == NULL) {
@@ -791,7 +993,61 @@ int display_get_text_height_font(sFONT *font)
     return h;
 }
 
+int display_get_text_height_menu(void)
+{
+    sFONT *font = display_get_menu_font();
+
+    int h = font->Height;
+    int xt_h = xt_eink_font_menu_get_height();
+    if (xt_h > h) {
+        h = xt_h;
+    }
+    return h;
+}
+
 uint8_t* display_get_framebuffer(void)
 {
     return s_framebuffer;
+}
+
+void display_draw_bitmap_mask_1bpp(int x, int y, int width, int height,
+                                  const uint8_t *bits, int stride_bytes,
+                                  uint8_t color)
+{
+    if (bits == NULL || width <= 0 || height <= 0 || stride_bytes <= 0) {
+        return;
+    }
+
+    lock_engine();
+
+    for (int row = 0; row < height; row++) {
+        const uint8_t *row_bits = bits + (row * stride_bytes);
+        int py = y + row;
+        if (py < 0 || py >= SCREEN_HEIGHT) {
+            continue;
+        }
+
+        for (int col = 0; col < width; col++) {
+            int px = x + col;
+            if (px < 0 || px >= SCREEN_WIDTH) {
+                continue;
+            }
+
+            uint8_t b = row_bits[col / 8];
+            uint8_t mask = (uint8_t)(0x80u >> (col % 8));
+            if ((b & mask) != 0) {
+                Paint_SetPixel((UWORD)px, (UWORD)py, (UWORD)color);
+            }
+        }
+    }
+
+    if (s_config.use_partial_refresh) {
+        expand_dirty_region(x, y, width, height);
+    }
+
+    unlock_engine();
+
+    if (s_config.auto_refresh) {
+        display_refresh(s_config.default_mode);
+    }
 }

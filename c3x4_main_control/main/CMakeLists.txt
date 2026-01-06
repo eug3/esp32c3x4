@@ -28,6 +28,8 @@ idf_component_register(SRCS
 
                        # Hand-drawn UI / screens
                        "ui/display_engine.c"
+                       "ui/boot_animation.c"
+                       "ui/boot_animation_frames.c"
                        "ui/screen_manager.c"
                        "ui/input_handler.c"
                        "ui/ui_region_manager.c"
@@ -36,11 +38,11 @@ idf_component_register(SRCS
                        "ui/file_browser_screen.c"
                        "ui/reader_screen_simple.c"
                        "ui/image_viewer_screen.c"
-                       # Bluetooth (temporarily disabled due to API compatibility issues)
-                       # "ui/ble_reader_screen.c"
-                       # "ui/ble_manager.c"
-                       # "ui/ble_book_protocol.c"
-                       # "ui/ble_cache_manager.c"
+                       # Bluetooth (BLE API incompatible with IDF v5.5.2 - needs API migration)
+                       # \"ui/ble_reader_screen.c\"
+                       # \"ui/ble_manager.c\"
+                       # \"ui/ble_book_protocol.c\"
+                       # \"ui/ble_cache_manager.c\"
 
                        # XTEink font (no LVGL dependency)
                        "ui/xt_eink_font.c"
@@ -70,6 +72,7 @@ idf_component_register(SRCS
                        "ui/epub_html.c"
                        "ui/epub_xml.c"
                        "ui/epub_zip.c"
+                       "ui/epub_cache.c"
                        "ui/txt_reader.c"
                        "ui/gb18030_conv.c"
 

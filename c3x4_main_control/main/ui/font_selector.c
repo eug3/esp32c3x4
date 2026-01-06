@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <ctype.h>
+#include <stdio.h>
 
 static const char *TAG = "FONT_SELECTOR";
 
@@ -130,7 +131,6 @@ static void parse_font_dimensions(const char *path, uint16_t *width, uint16_t *h
 
     if (p > name_copy) {
         // 找到末尾数字
-        char *end = p;
         while (p > name_copy && (*(p - 1) >= '0' && *(p - 1) <= '9')) {
             p--;
         }

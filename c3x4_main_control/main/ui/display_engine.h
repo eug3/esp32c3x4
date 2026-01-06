@@ -175,6 +175,13 @@ int display_draw_text(int x, int y, const char *text, uint8_t color, uint8_t bg_
 int display_draw_text_font(int x, int y, const char *text, sFONT *font, uint8_t color, uint8_t bg_color);
 
 /**
+ * @brief 绘制文本（菜单专用：ASCII 固定 + 中文固定为菜单默认字体）
+ *
+ * 用于菜单/设置等界面，确保不会受 TXT/用户字体切换影响。
+ */
+int display_draw_text_menu(int x, int y, const char *text, uint8_t color, uint8_t bg_color);
+
+/**
  * @brief 获取文本宽度（自定义字体）
  * @param text 文本
  * @param font 字体（NULL 则使用内置默认字体 Font12，作为"14号"的近似）
@@ -183,11 +190,21 @@ int display_draw_text_font(int x, int y, const char *text, sFONT *font, uint8_t 
 int display_get_text_width_font(const char *text, sFONT *font);
 
 /**
+ * @brief 获取文本宽度（菜单专用）
+ */
+int display_get_text_width_menu(const char *text);
+
+/**
  * @brief 获取文本高度（自定义字体）
  * @param font 字体（NULL 则使用内置默认字体 Font12，作为"14号"的近似）
  * @return 文本高度（像素）
  */
 int display_get_text_height_font(sFONT *font);
+
+/**
+ * @brief 获取文本高度（菜单专用）
+ */
+int display_get_text_height_menu(void);
 
 /**
  * @brief 获取当前推荐的英文/ASCII字体（按中文字体高度自动选择）
@@ -198,9 +215,35 @@ int display_get_text_height_font(sFONT *font);
 sFONT* display_get_default_ascii_font(void);
 
 /**
+ * @brief 获取菜单专用字体（固定的，始终不受用户设置的字体影响）
+ *
+ * 菜单界面必须使用此函数获取字体，以确保菜单显示不会因为用户设置字体而乱码。
+ * 返回值是“菜单中文行高”对应的内置 ASCII 字体（按中文高度自动选择），且不会跟随用户字体变化。
+ */
+sFONT* display_get_menu_font(void);
+
+/**
  * @brief 获取帧缓冲指针（直接访问）
  * @return 帧缓冲指针
  */
 uint8_t* display_get_framebuffer(void);
+
+/**
+ * @brief 绘制 1bpp 位图蒙版（bit=1 的像素被绘制为指定颜色）
+ *
+ * 用途：启动动画等需要快速把小图贴到帧缓冲的场景。
+ * 注意：该位图是“蒙版”语义——仅对 bit=1 的像素调用绘制。
+ *
+ * @param x 左上角 X（逻辑坐标 480x800）
+ * @param y 左上角 Y（逻辑坐标 480x800）
+ * @param width 位图宽度（像素）
+ * @param height 位图高度（像素）
+ * @param bits 1bpp 数据，按行排列，MSB 先（0x80 >> (col%8)）
+ * @param stride_bytes 每行字节数（通常为 (width+7)/8）
+ * @param color 绘制颜色（COLOR_BLACK/COLOR_WHITE）
+ */
+void display_draw_bitmap_mask_1bpp(int x, int y, int width, int height,
+                                  const uint8_t *bits, int stride_bytes,
+                                  uint8_t color);
 
 #endif // DISPLAY_ENGINE_H

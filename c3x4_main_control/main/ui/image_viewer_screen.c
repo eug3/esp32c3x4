@@ -257,17 +257,15 @@ static bool load_and_display_image(int index)
         // 2. 实现 png_helper.h/c 类似 jpeg_helper
         // 3. 在此调用 png_helper_render_fullscreen()
         ESP_LOGE(TAG, "PNG format: 需要集成 PNGdec 库");
-        sFONT *ui_font = display_get_default_ascii_font();
-        display_draw_text_font(20, SCREEN_HEIGHT / 2 - 20, "PNG format",
-                               ui_font, COLOR_BLACK, COLOR_WHITE);
-        display_draw_text_font(20, SCREEN_HEIGHT / 2 + 20, "需要PNGdec库支持",
-                               ui_font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, SCREEN_HEIGHT / 2 - 20, "PNG format",
+                               COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, SCREEN_HEIGHT / 2 + 20, "需要PNGdec库支持",
+                               COLOR_BLACK, COLOR_WHITE);
     } else {
         // 其他格式暂不支持
         ESP_LOGE(TAG, "Unsupported image format: %s", ext ? ext : "unknown");
-        sFONT *ui_font = display_get_default_ascii_font();
-        display_draw_text_font(20, SCREEN_HEIGHT / 2, "Format not supported",
-                               ui_font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, SCREEN_HEIGHT / 2, "Format not supported",
+                               COLOR_BLACK, COLOR_WHITE);
     }
 
     heap_caps_free(image_data);
@@ -326,11 +324,10 @@ static void on_show(screen_t *screen)
 
         // 显示占位符
         display_clear(COLOR_WHITE);
-        sFONT *ui_font = display_get_default_ascii_font();
-        display_draw_text_font(20, 20, "No Images", ui_font, COLOR_BLACK, COLOR_WHITE);
-        display_draw_text_font(20, 100, "No supported image", ui_font, COLOR_BLACK, COLOR_WHITE);
-        display_draw_text_font(20, 150, "files in directory", ui_font, COLOR_BLACK, COLOR_WHITE);
-        display_draw_text_font(20, SCREEN_HEIGHT - 60, "返回: 返回", ui_font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, 20, "No Images", COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, 100, "No supported image", COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, 150, "files in directory", COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, SCREEN_HEIGHT - 60, "返回: 返回", COLOR_BLACK, COLOR_WHITE);
 
         return;
     }
