@@ -15,3 +15,4 @@ esp32_env/
 lib/
 E-Paper_ESP32_Driver_Board_Code/
 flash_dump_bak.*
+c3x4_main_control/.vscode/settings.json
