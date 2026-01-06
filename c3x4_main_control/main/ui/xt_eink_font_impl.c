@@ -5,6 +5,7 @@
 
 #include "xt_eink_font_impl.h"
 #include "xt_eink_font.h"
+#include "font_cache.h"
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include <ctype.h>
@@ -17,6 +18,9 @@ static const char *TAG = "XT_FONT_IMPL";
 
 // 字体上下文
 static xt_eink_font_t *s_font = NULL;
+
+// 已加载字体路径（用于初始化缓存）
+static char s_loaded_font_path[128] = {0};
 
 // 字形缓冲区
 static uint8_t s_glyph_buffer[256];  // 最大字形大小
@@ -262,6 +266,18 @@ bool xt_eink_font_init(void)
         if (s_font != NULL) {
             ESP_LOGI(TAG, "Font loaded successfully: %s", font_paths[i]);
 
+            // 保存字体路径
+            strncpy(s_loaded_font_path, font_paths[i], sizeof(s_loaded_font_path) - 1);
+
+            // 初始化智能缓存系统
+            if (!font_cache_init(font_paths[i])) {
+                ESP_LOGW(TAG, "Font cache init failed, will use direct SD card access");
+            } else {
+                uint32_t cached_chars = 0;
+                font_cache_get_stats(NULL, NULL, &cached_chars);
+                ESP_LOGI(TAG, "Font cache ready: %lu common chars in Flash", (unsigned long)cached_chars);
+            }
+
             // 自检：读取几个常见汉字的位图，统计置位数量，帮助判断是否读到了有效数据
             const uint32_t probe_chars[] = { 0x6587u /* 文 */, 0x8BBEu /* 设 */, 0x7F6Eu /* 置 */ };
             for (size_t k = 0; k < sizeof(probe_chars) / sizeof(probe_chars[0]); k++) {
@@ -283,6 +299,12 @@ bool xt_eink_font_init(void)
                          (unsigned int)s_font->width, (unsigned int)s_font->height,
                          (unsigned int)s_font->glyph_size);
             }
+
+            // 显示缓存统计
+            uint32_t hits = 0, misses = 0;
+            font_cache_get_stats(&hits, &misses, NULL);
+            ESP_LOGI(TAG, "Cache stats after probe: hits=%lu, misses=%lu", 
+                     (unsigned long)hits, (unsigned long)misses);
 
             return true;
         }

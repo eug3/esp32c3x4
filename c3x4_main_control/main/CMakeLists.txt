@@ -40,6 +40,7 @@ idf_component_register(SRCS
                        # XTEink font (no LVGL dependency)
                        "ui/xt_eink_font.c"
                        "ui/xt_eink_font_impl.c"
+                       "ui/font_cache.c"
 
                        # Image helpers (JPEG/BMP/PNG support)
                        "lib/tjpgd/tjpgd.c"

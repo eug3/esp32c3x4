@@ -121,31 +121,92 @@ static txt_encoding_t detect_encoding_from_content(FILE *file) {
         }
     }
     if (is_ascii) {
+        ESP_LOGI(TAG, "Encoding detection: ASCII (no high bytes)");
         return TXT_ENCODING_ASCII;
     }
 
-    // 关键：先判断是否为合法 UTF-8（很多 UTF-8 中文会“看起来像 GBK 双字节模式”）
-    if (is_valid_utf8_buffer(buffer, n)) {
+    // 统计 UTF-8 合法字符的覆盖率（不再要求 100% 合法）
+    size_t valid_utf8_bytes = 0;
+    size_t idx = 0;
+    while (idx < n) {
+        unsigned char c = buffer[idx];
+        if (c < 0x80) {
+            valid_utf8_bytes++;
+            idx++;
+            continue;
+        }
+
+        int seq_len = 0;
+        if ((c & 0xE0) == 0xC0) {
+            if (c < 0xC2) { idx++; continue; }
+            seq_len = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            seq_len = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            if (c > 0xF4) { idx++; continue; }
+            seq_len = 4;
+        } else {
+            idx++; continue;
+        }
+
+        if (idx + (size_t)seq_len > n) break;
+
+        bool valid_seq = true;
+        for (int j = 1; j < seq_len; j++) {
+            if ((buffer[idx + j] & 0xC0) != 0x80) {
+                valid_seq = false;
+                break;
+            }
+        }
+        if (!valid_seq) { idx++; continue; }
+
+        if (seq_len == 3) {
+            unsigned char c1 = buffer[idx + 1];
+            if ((c == 0xE0 && c1 < 0xA0) || (c == 0xED && c1 >= 0xA0)) {
+                idx++; continue;
+            }
+        } else if (seq_len == 4) {
+            unsigned char c1 = buffer[idx + 1];
+            if ((c == 0xF0 && c1 < 0x90) || (c == 0xF4 && c1 > 0x8F)) {
+                idx++; continue;
+            }
+        }
+
+        valid_utf8_bytes += (size_t)seq_len;
+        idx += (size_t)seq_len;
+    }
+
+    float utf8_ratio = (float)valid_utf8_bytes / (float)n;
+    ESP_LOGI(TAG, "Encoding detection: valid_utf8_bytes=%u / total=%u (%.1f%%)",
+             (unsigned)valid_utf8_bytes, (unsigned)n, utf8_ratio * 100.0f);
+
+    if (utf8_ratio >= 0.80f) {
+        ESP_LOGI(TAG, "Encoding detection: UTF-8 (ratio >= 80%%)");
         return TXT_ENCODING_UTF8;
     }
 
     // 再判断是否有 GB18030/GBK 特征：第一个字节在 0x81-0xFE 之间
     // 且第二个字节在 0x40-0xFE 之间（排除 0x7F）
-    bool has_gb_pattern = false;
-    for (size_t i = 0; i + 1 < n; i++) {
-        if (buffer[i] >= 0x81 && buffer[i] <= 0xFE) {
-            unsigned char next = buffer[i + 1];
+    size_t gb_pairs = 0;
+    for (size_t j = 0; j + 1 < n; j++) {
+        if (buffer[j] >= 0x81 && buffer[j] <= 0xFE) {
+            unsigned char next = buffer[j + 1];
             if (next >= 0x40 && next <= 0xFE && next != 0x7F) {
-                has_gb_pattern = true;
-                break;
+                gb_pairs++;
             }
         }
     }
-    if (has_gb_pattern) {
+    float gb_ratio = (float)(gb_pairs * 2) / (float)n;
+    ESP_LOGI(TAG, "Encoding detection: gb_pairs=%u (%.1f%% coverage)",
+             (unsigned)gb_pairs, gb_ratio * 100.0f);
+
+    if (gb_pairs > 10 && gb_ratio > 0.30f) {
+        ESP_LOGI(TAG, "Encoding detection: GB18030 (gb_pairs > 10 && ratio > 30%%)");
         return TXT_ENCODING_GB18030;
     }
 
     // 否则回退为 UTF-8（即使不完全合法也比乱转更安全）
+    ESP_LOGI(TAG, "Encoding detection: fallback to UTF-8");
     return TXT_ENCODING_UTF8;
 }
 
@@ -205,7 +266,8 @@ bool txt_reader_open(txt_reader_t *reader, const char *file_path, txt_encoding_t
     }
 
     reader->is_open = true;
-    reader->position.file_position = 0;
+    // 让逻辑位置与真实文件指针一致（BOM 场景下 ftell() 可能为 3）
+    reader->position.file_position = ftell(reader->file);
     reader->position.page_number = 0;
 
     ESP_LOGI(TAG, "Opened TXT file: %s (encoding=%d, size=%ld bytes)",
@@ -411,9 +473,13 @@ int txt_reader_read_page(txt_reader_t *reader, char *text_buffer, size_t buffer_
     return chars_count;
 }
 
-bool txt_reader_goto_page(txt_reader_t *reader, int page_number) {
+bool txt_reader_goto_page(txt_reader_t *reader, int page_number, int chars_per_page) {
     if (reader == NULL || !reader->is_open) {
         return false;
+    }
+
+    if (chars_per_page <= 0) {
+        chars_per_page = 512;
     }
 
     // 简单实现：回到开头然后逐页读取
@@ -425,23 +491,43 @@ bool txt_reader_goto_page(txt_reader_t *reader, int page_number) {
     if (page_number < reader->position.page_number) {
         fseek(reader->file, 0, SEEK_SET);
         reader->position.page_number = 0;
+        reader->position.file_position = 0;
 
         // 跳过 UTF-8 BOM
         if (reader->encoding == TXT_ENCODING_UTF8 && is_utf8_bom(reader->file)) {
             fseek(reader->file, 3, SEEK_SET);
         }
+        reader->position.file_position = ftell(reader->file);
     }
 
     // 逐页读取直到目标页
-    char temp_buffer[512];
+    // 注意：该函数常在输入轮询任务里调用，栈很小，不能放大数组在栈上。
+    // 分配一个足够容纳“单页 UTF-8 输出”的缓冲区即可。
+    size_t tmp_size = (size_t)chars_per_page * 4u + 8u;
+    if (tmp_size < 128u) {
+        tmp_size = 128u;
+    }
+    if (tmp_size > 8192u) {
+        tmp_size = 8192u;
+    }
+
+    char *temp_buffer = (char *)malloc(tmp_size);
+    if (temp_buffer == NULL) {
+        ESP_LOGE(TAG, "malloc failed in goto_page (tmp_size=%u)", (unsigned)tmp_size);
+        return false;
+    }
+
     while (reader->position.page_number < page_number - 1) {
-        int n = txt_reader_read_page(reader, temp_buffer, sizeof(temp_buffer), 512);
+        int n = txt_reader_read_page(reader, temp_buffer, tmp_size, chars_per_page);
         if (n <= 0) {
+            free(temp_buffer);
             return false; // 已到文件末尾
         }
     }
 
-    ESP_LOGI(TAG, "Jumped to page %d", page_number);
+    free(temp_buffer);
+
+    ESP_LOGI(TAG, "Jumped to page %d (chars_per_page=%d)", page_number, chars_per_page);
     return true;
 }
 

@@ -77,9 +77,10 @@ int txt_reader_read_page(txt_reader_t *reader, char *text_buffer, size_t buffer_
  * @brief 跳转到指定页码
  * @param reader 阅读器实例指针
  * @param page_number 目标页码
+ * @param chars_per_page 每页字符数（必须与渲染/缓存使用的值一致，否则会导致分页边界不一致）
  * @return true 成功，false 失败
  */
-bool txt_reader_goto_page(txt_reader_t *reader, int page_number);
+bool txt_reader_goto_page(txt_reader_t *reader, int page_number, int chars_per_page);
 
 /**
  * @brief 跳转到文件位置

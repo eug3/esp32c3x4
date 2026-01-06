@@ -23,6 +23,7 @@
 #include "sdmmc_cmd.h"
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
+#include "esp_littlefs.h"
 #include "DEV_Config.h"
 #include "EPD_4in26.h"
 #include "ImageData.h"
@@ -573,6 +574,50 @@ void app_main(void)
     if (sd_ret != ESP_OK) {
         ESP_LOGW("MAIN", "SD card initialization failed, but system will continue");
         ESP_LOGW("MAIN", "File browser and SD-related features will be unavailable");
+    }
+
+    // ============================================================================
+    // LittleFS Flash 存储初始化（用于页面缓存）
+    // ============================================================================
+    ESP_LOGI("MAIN", "Initializing LittleFS for page cache...");
+    esp_vfs_littlefs_conf_t littlefs_conf = {
+        .base_path = "/littlefs",
+        .partition_label = "littlefs",
+        .format_if_mount_failed = true,
+        .dont_mount = false,
+    };
+
+    ret = esp_vfs_littlefs_register(&littlefs_conf);
+    if (ret != ESP_OK) {
+        if (ret == ESP_FAIL) {
+            ESP_LOGE("LITTLEFS", "Failed to mount or format filesystem");
+        } else if (ret == ESP_ERR_NOT_FOUND) {
+            ESP_LOGE("LITTLEFS", "Failed to find LittleFS partition");
+        } else {
+            ESP_LOGE("LITTLEFS", "Failed to initialize LittleFS (%s)", esp_err_to_name(ret));
+        }
+        ESP_LOGW("LITTLEFS", "System will continue without Flash cache (slower page turns)");
+    } else {
+        // 获取文件系统信息
+        size_t total = 0, used = 0;
+        ret = esp_littlefs_info(littlefs_conf.partition_label, &total, &used);
+        if (ret == ESP_OK) {
+            ESP_LOGI("LITTLEFS", "Partition size: total: %d, used: %d", total, used);
+        }
+
+        // 创建缓存目录
+        struct stat st;
+        if (stat("/littlefs/cache", &st) != 0) {
+            if (mkdir("/littlefs/cache", 0755) == 0) {
+                ESP_LOGI("LITTLEFS", "Created cache directory");
+            } else {
+                ESP_LOGE("LITTLEFS", "Failed to create cache directory");
+            }
+        } else {
+            ESP_LOGI("LITTLEFS", "Cache directory already exists");
+        }
+
+        ESP_LOGI("LITTLEFS", "LittleFS mounted at /littlefs for page cache");
     }
 
     // ============================================================================

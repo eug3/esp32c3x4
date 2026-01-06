@@ -4,6 +4,7 @@
  */
 
 #include "xt_eink_font.h"
+#include "font_cache.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include <dirent.h>
@@ -391,7 +392,7 @@ static void cache_glyph(xt_eink_font_t *font, uint32_t unicode, uint8_t *bitmap,
 }
 
 /**
- * @brief 从文件读取字形位图
+ * @brief 从文件读取字形位图（使用智能缓存）
  */
 static bool read_glyph_from_file(xt_eink_font_t *font, uint32_t unicode, uint8_t *bitmap)
 {
@@ -400,6 +401,15 @@ static bool read_glyph_from_file(xt_eink_font_t *font, uint32_t unicode, uint8_t
         return false;
     }
 
+    // 使用智能缓存系统（优先 LittleFS，未命中则 SD 卡）
+    int bytes_read = font_cache_get_glyph(unicode, bitmap, font->header.glyph_size);
+    if (bytes_read > 0) {
+        return true;
+    }
+
+    ESP_LOGW(TAG, "Font cache failed for U+%04X, fallback to direct file read", unicode);
+
+    // 兜底：直接从原文件读取
     // fontdecode.cs 格式：无文件头，直接按 unicode 索引
     uint32_t glyph_index = unicode - font->header.first_char;
     uint32_t offset = glyph_index * font->header.glyph_size;
