@@ -67,9 +67,10 @@ static void load_font_options(void)
 
         // 构造显示名称：名称 + 尺寸
         if (font->width > 0 && font->height > 0) {
-            snprintf(opt->name, sizeof(opt->name), "%s (%dx%d)", font->name, font->width, font->height);
+            snprintf(opt->name, sizeof(opt->name), "%.50s (%dx%d)",
+                     font->name, font->width, font->height);
         } else {
-            snprintf(opt->name, sizeof(opt->name), "%s", font->name);
+            snprintf(opt->name, sizeof(opt->name), "%.60s", font->name);
         }
 
         opt->is_default = false;
@@ -171,7 +172,7 @@ static void show_restart_dialog(void)
     display_refresh(REFRESH_MODE_PARTIAL);
 }
 
-static void restart_device(void)
+static void __attribute__((unused)) restart_device(void)
 {
     ESP_LOGI(TAG, "Restarting device...");
     display_draw_text_font(100, 300, "正在重启...", display_get_default_ascii_font(),
@@ -298,6 +299,15 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
             // 返回
             screen_manager_back();
             return;
+
+        case BTN_NONE:
+        case BTN_POWER:
+            // 忽略这些按钮
+            break;
+
+        default:
+            // 其他按钮忽略
+            break;
     }
 
     // 更新选中项

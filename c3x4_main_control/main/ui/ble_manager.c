@@ -1,7 +1,7 @@
 /**
  * @file ble_manager.c
  * @brief 蓝牙管理器实现 - 处理蓝牙通信的核心功能
- * 
+ *
  * 使用 NimBLE 栈实现蓝牙扫描、连接和数据传输功能
  */
 
@@ -12,14 +12,14 @@
 #include "nimble/ble.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
-#include "host/ble_hs.h"
-#include "host/ble_gap.h"
-#include "host/ble_gatt.h"
-#include "host/ble_gattc.h"
-#include "os/os_mbuf.h"
-#include "host/ble_uuid.h"
-#include "services/gap/ble_svc_gap.h"
-#include "services/gatt/ble_svc_gatt.h"
+#include "nimble/host/include/host/ble_hs.h"
+#include "nimble/host/include/host/ble_gap.h"
+#include "nimble/host/include/host/ble_gatt.h"
+#include "nimble/host/include/host/ble_gattc.h"
+#include "nimble/host/include/os/os_mbuf.h"
+#include "nimble/host/include/host/ble_uuid.h"
+#include "nimble/host/include/services/gap/ble_svc_gap.h"
+#include "nimble/host/include/services/gatt/ble_svc_gatt.h"
 #include <string.h>
 
 static const char *TAG = "BLE_MANAGER";

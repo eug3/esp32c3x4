@@ -36,15 +36,18 @@ idf_component_register(SRCS
                        "ui/file_browser_screen.c"
                        "ui/reader_screen_simple.c"
                        "ui/image_viewer_screen.c"
-                       "ui/ble_reader_screen.c"
-                       "ui/ble_manager.c"
-                       "ui/ble_book_protocol.c"
-                       "ui/ble_cache_manager.c"
+                       # Bluetooth (temporarily disabled due to API compatibility issues)
+                       # "ui/ble_reader_screen.c"
+                       # "ui/ble_manager.c"
+                       # "ui/ble_book_protocol.c"
+                       # "ui/ble_cache_manager.c"
 
                        # XTEink font (no LVGL dependency)
                        "ui/xt_eink_font.c"
                        "ui/xt_eink_font_impl.c"
                        "ui/font_cache.c"
+                       "ui/font_selector.c"
+                       "ui/font_select_screen.c"
 
                        # Image helpers (JPEG/BMP/PNG support)
                        "lib/tjpgd/tjpgd.c"
@@ -71,7 +74,7 @@ idf_component_register(SRCS
                        "ui/gb18030_conv.c"
 
                        ${EPUB_PARSER_SOURCES}
-                       PRIV_REQUIRES spi_flash esp_driver_gpio esp_driver_spi driver esp_wifi nvs_flash fatfs littlefs esp_adc esp_timer bt
+                       PRIV_REQUIRES spi_flash esp_driver_gpio esp_driver_spi driver esp_wifi nvs_flash fatfs littlefs esp_adc esp_timer
                        INCLUDE_DIRS "." "Fonts" "ui" "lib/tjpgd" "lib/pngdec")
 
 # Disable type-limits warning for GUI_Paint.c
