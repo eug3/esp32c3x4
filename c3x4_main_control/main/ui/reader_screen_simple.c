@@ -180,6 +180,18 @@ static void display_current_page(void)
                                                sizeof(s_reader_state.current_text),
                                                s_reader_state.chars_per_page);
 
+        // 确保 NUL 结尾，避免后续 while(*p) 越界
+        if (chars_read > 0) {
+            size_t max_idx = sizeof(s_reader_state.current_text) - 1;
+            size_t idx = (size_t)chars_read;
+            if (idx > max_idx) {
+                idx = max_idx;
+            }
+            s_reader_state.current_text[idx] = '\0';
+        } else {
+            s_reader_state.current_text[0] = '\0';
+        }
+
         ESP_LOGI(TAG, "txt_reader_read_page: chars_read=%d, text[0]=0x%02X text[1]=0x%02X text[2]=0x%02X text[3]=0x%02X",
                  chars_read,
                  (unsigned char)s_reader_state.current_text[0],
@@ -192,7 +204,6 @@ static void display_current_page(void)
             int y = 40;
             int x = 10;
             int max_width = SCREEN_WIDTH - 20;
-            uint8_t *framebuffer = display_get_framebuffer();
             const char *text = s_reader_state.current_text;
             const char *p = text;
             char line[MAX_LINE_BUFFER_SIZE];
@@ -204,8 +215,7 @@ static void display_current_page(void)
                     // 渲染当前行
                     if (line_bytes > 0) {
                         line[line_bytes] = '\0';
-                        xt_eink_font_render_text(x, y, line, COLOR_BLACK, 
-                                                framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
+                        display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
                     }
                     y += font_height;
                     line_bytes = 0;
@@ -228,13 +238,12 @@ static void display_current_page(void)
                 memcpy(line + line_bytes, p, char_bytes);
                 line[line_bytes + char_bytes] = '\0';
                 
-                int line_width = xt_eink_font_get_text_width(line);
+                int line_width = display_get_text_width_font(line, ui_font);
                 
                 if (line_width > max_width && line_bytes > 0) {
                     // 超出宽度，撤销当前字符，渲染当前行
                     line[line_bytes] = '\0';
-                    xt_eink_font_render_text(x, y, line, COLOR_BLACK,
-                                            framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
+                    display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
                     y += font_height;
                     
                     // 检查是否还有空间
@@ -257,8 +266,7 @@ static void display_current_page(void)
             // 显示最后一行
             if (line_bytes > 0 && y < SCREEN_HEIGHT - 40) {
                 line[line_bytes] = '\0';
-                xt_eink_font_render_text(x, y, line, COLOR_BLACK,
-                                        framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
+                display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
             }
         }
     } else if (s_reader_state.type == READER_TYPE_EPUB) {
@@ -266,7 +274,6 @@ static void display_current_page(void)
         int y = 40;
         int x = 10;
         int max_width = SCREEN_WIDTH - 20;
-        uint8_t *framebuffer = display_get_framebuffer();
         const char *text = s_reader_state.current_text;
         const char *p = text;
         char line[MAX_LINE_BUFFER_SIZE];
@@ -276,8 +283,7 @@ static void display_current_page(void)
             if (*p == '\n') {
                 if (line_bytes > 0) {
                     line[line_bytes] = '\0';
-                    xt_eink_font_render_text(x, y, line, COLOR_BLACK,
-                                            framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
+                    display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
                 }
                 y += font_height;
                 line_bytes = 0;
@@ -297,13 +303,12 @@ static void display_current_page(void)
             memcpy(line + line_bytes, p, char_bytes);
             line[line_bytes + char_bytes] = '\0';
 
-            int line_width = xt_eink_font_get_text_width(line);
+            int line_width = display_get_text_width_font(line, ui_font);
             
             if (line_width > max_width && line_bytes > 0) {
                 // 超出宽度，撤销当前字符，渲染当前行
                 line[line_bytes] = '\0';
-                xt_eink_font_render_text(x, y, line, COLOR_BLACK,
-                                        framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
+                display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
                 y += font_height;
                 
                 if (y >= SCREEN_HEIGHT - 40) {
@@ -324,8 +329,7 @@ static void display_current_page(void)
 
         if (line_bytes > 0 && y < SCREEN_HEIGHT - 40) {
             line[line_bytes] = '\0';
-            xt_eink_font_render_text(x, y, line, COLOR_BLACK,
-                                    framebuffer, SCREEN_WIDTH, SCREEN_HEIGHT);
+            display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
         }
     }
 

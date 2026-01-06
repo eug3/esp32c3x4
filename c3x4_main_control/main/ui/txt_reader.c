@@ -32,6 +32,75 @@ static bool is_utf8_bom(FILE *file) {
     return false;
 }
 
+// UTF-8 合法性校验（严格校验，包含 overlong/surrogate 范围）
+static bool is_valid_utf8_buffer(const unsigned char *buf, size_t len) {
+    size_t i = 0;
+    while (i < len) {
+        unsigned char c = buf[i];
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+
+        int seq_len = 0;
+        if ((c & 0xE0) == 0xC0) {
+            // 2-byte
+            if (c < 0xC2) {
+                return false;  // overlong
+            }
+            seq_len = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            // 3-byte
+            seq_len = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            // 4-byte
+            if (c > 0xF4) {
+                return false;
+            }
+            seq_len = 4;
+        } else {
+            return false;
+        }
+
+        if (i + (size_t)seq_len > len) {
+            return false;
+        }
+
+        // Check continuation bytes
+        for (int j = 1; j < seq_len; j++) {
+            if ((buf[i + j] & 0xC0) != 0x80) {
+                return false;
+            }
+        }
+
+        // Additional constraints
+        if (seq_len == 3) {
+            unsigned char c1 = buf[i + 1];
+            // Overlong for 3-byte
+            if (c == 0xE0 && c1 < 0xA0) {
+                return false;
+            }
+            // UTF-16 surrogate halves U+D800..U+DFFF
+            if (c == 0xED && c1 >= 0xA0) {
+                return false;
+            }
+        } else if (seq_len == 4) {
+            unsigned char c1 = buf[i + 1];
+            // Overlong for 4-byte
+            if (c == 0xF0 && c1 < 0x90) {
+                return false;
+            }
+            // > U+10FFFF
+            if (c == 0xF4 && c1 > 0x8F) {
+                return false;
+            }
+        }
+
+        i += (size_t)seq_len;
+    }
+    return true;
+}
+
 // 简单编码检测（启发式）
 static txt_encoding_t detect_encoding_from_content(FILE *file) {
     unsigned char buffer[4096];
@@ -45,33 +114,38 @@ static txt_encoding_t detect_encoding_from_content(FILE *file) {
 
     // 检查是否为纯 ASCII
     bool is_ascii = true;
-    bool has_gb_pattern = false;
-
     for (size_t i = 0; i < n; i++) {
         if (buffer[i] > 0x7F) {
             is_ascii = false;
-
-            // GB18030/GBK 特征：第一个字节在 0x81-0xFE 之间
-            // 且第二个字节在 0x40-0xFE 之间
-            if (buffer[i] >= 0x81 && buffer[i] <= 0xFE && i + 1 < n) {
-                unsigned char next = buffer[i + 1];
-                if (next >= 0x40 && next <= 0xFE) {
-                    has_gb_pattern = true;
-                }
-            }
+            break;
         }
     }
-
     if (is_ascii) {
         return TXT_ENCODING_ASCII;
     }
 
-    // 如果有 GB 模式，优先认为是 GB18030
+    // 关键：先判断是否为合法 UTF-8（很多 UTF-8 中文会“看起来像 GBK 双字节模式”）
+    if (is_valid_utf8_buffer(buffer, n)) {
+        return TXT_ENCODING_UTF8;
+    }
+
+    // 再判断是否有 GB18030/GBK 特征：第一个字节在 0x81-0xFE 之间
+    // 且第二个字节在 0x40-0xFE 之间（排除 0x7F）
+    bool has_gb_pattern = false;
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (buffer[i] >= 0x81 && buffer[i] <= 0xFE) {
+            unsigned char next = buffer[i + 1];
+            if (next >= 0x40 && next <= 0xFE && next != 0x7F) {
+                has_gb_pattern = true;
+                break;
+            }
+        }
+    }
     if (has_gb_pattern) {
         return TXT_ENCODING_GB18030;
     }
 
-    // 默认假设为 UTF-8
+    // 否则回退为 UTF-8（即使不完全合法也比乱转更安全）
     return TXT_ENCODING_UTF8;
 }
 
@@ -107,7 +181,7 @@ bool txt_reader_open(txt_reader_t *reader, const char *file_path, txt_encoding_t
     strncpy(reader->file_path, file_path, sizeof(reader->file_path) - 1);
     reader->file_path[sizeof(reader->file_path) - 1] = '\0';
 
-    reader->file = fopen(file_path, "r");
+    reader->file = fopen(file_path, "rb");
     if (reader->file == NULL) {
         ESP_LOGE(TAG, "Failed to open file: %s", file_path);
         return false;
@@ -526,7 +600,7 @@ bool txt_reader_load_position(txt_reader_t *reader) {
 }
 
 txt_encoding_t txt_reader_detect_encoding(const char *file_path) {
-    FILE *file = fopen(file_path, "r");
+    FILE *file = fopen(file_path, "rb");
     if (file == NULL) {
         ESP_LOGE(TAG, "Failed to open file for encoding detection: %s", file_path);
         return TXT_ENCODING_UTF8;

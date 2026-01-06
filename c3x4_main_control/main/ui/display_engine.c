@@ -580,7 +580,7 @@ void display_refresh(refresh_mode_t mode)
             }
 
             // 标准局刷模式：只写 0x24，依赖 0x26 中的旧数据作为对比基准
-            EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
+            //EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
             EPD_4in26_Display_Fast(s_framebuffer);
             break;
     }

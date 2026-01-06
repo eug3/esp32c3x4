@@ -320,7 +320,7 @@ static void EPD_4in26_TurnOnDisplay(void)
 static void EPD_4in26_TurnOnDisplay_Fast(void)
 {
 	EPD_4in26_SendCommand(0x22); //Display Update Control
-	EPD_4in26_SendData(0xC7);
+	EPD_4in26_SendData(0xFC);
 	EPD_4in26_SendCommand(0x20); //Activate Display Update Sequence
 	EPD_4in26_ReadBusy();
 }
@@ -333,7 +333,7 @@ static void EPD_4in26_TurnOnDisplay_Part(void)
 
 	// 2. 执行局部刷新
 	EPD_4in26_SendCommand(0x22); // Display Update Control
-	EPD_4in26_SendData(0xFF);    // partial update mode
+	EPD_4in26_SendData(0xFC);    // partial update mode
 	EPD_4in26_SendCommand(0x20); // Master Activation
 	EPD_4in26_ReadBusy();
 }
