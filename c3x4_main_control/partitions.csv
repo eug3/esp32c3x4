@@ -1,7 +1,8 @@
-# Name,   Type, SubType, Offset,  Size, Flags
+# Name,     Type, SubType, Offset,   Size,    Flags
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap
 # LVGL GUI 需要更大的应用分区（1.4MB -> 1.75MB），减小 LittleFS
-nvs,      data, nvs,     0x9000,  0x6000,
-phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 0x1C0000,
-littlefs, data, spiffs,  0x1D0000, 0x30000,
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+factory,    app,  factory, 0x10000,  0x1C0000,
+gbk_table,  data, littlefs,  0x1D0000, 0x14000,
+littlefs,   data, littlefs,  0x1E4000, 0x1C000,

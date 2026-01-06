@@ -19,6 +19,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+// SPI master maximum transfer size (bytes) per transaction.
+// Keep this in sync with spi_bus_config_t.max_transfer_sz in DEV_Module_Init().
+#define DEV_SPI_MAX_TRANSFER_SZ 4096
+
 /**
  * data
 **/

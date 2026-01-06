@@ -446,9 +446,12 @@ int chinese_font_render_char(int x, int y, uint32_t ch, uint8_t color,
             int fb_bit_idx = 7 - (fb_x % 8);
 
             if (pixel_set) {
-                framebuffer[fb_byte_idx] |= (color << fb_bit_idx);
-            } else {
-                framebuffer[fb_byte_idx] &= ~(1 << fb_bit_idx);
+                // 帧缓冲约定：bit=0 黑，bit=1 白。color 采用 0x00/0xFF。
+                if (color == 0x00) {
+                    framebuffer[fb_byte_idx] &= ~(1 << fb_bit_idx);
+                } else {
+                    framebuffer[fb_byte_idx] |= (1 << fb_bit_idx);
+                }
             }
         }
     }

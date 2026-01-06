@@ -36,11 +36,24 @@ void DEV_SPI_WriteByte(UBYTE Value) {
 }
 
 void DEV_SPI_Write_nByte(uint8_t *pData, uint32_t Len) {
-    spi_transaction_t trans = {
-        .length = Len * 8,
-        .tx_buffer = pData,
-    };
-    spi_device_transmit(spi_handle, &trans);
+    if (pData == NULL || Len == 0) {
+        return;
+    }
+
+    // The SPI master driver enforces an upper bound per transaction (max_transfer_sz).
+    // Split large writes to avoid check_trans_valid() failures.
+    while (Len > 0) {
+        const uint32_t chunk = (Len > DEV_SPI_MAX_TRANSFER_SZ) ? DEV_SPI_MAX_TRANSFER_SZ : Len;
+
+        spi_transaction_t trans = {
+            .length = chunk * 8,
+            .tx_buffer = pData,
+        };
+
+        spi_device_transmit(spi_handle, &trans);
+        pData += chunk;
+        Len -= chunk;
+    }
 }
 
 UBYTE DEV_SPI_ReadByte(void) {
@@ -88,7 +101,7 @@ UBYTE DEV_Module_Init(void) {
             .sclk_io_num = EPD_SCLK_PIN,
             .quadwp_io_num = -1,
             .quadhd_io_num = -1,
-            .max_transfer_sz = 4096,
+            .max_transfer_sz = DEV_SPI_MAX_TRANSFER_SZ,
         };
         ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 

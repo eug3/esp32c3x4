@@ -180,6 +180,13 @@ static void display_current_page(void)
                                                sizeof(s_reader_state.current_text),
                                                s_reader_state.chars_per_page);
 
+        ESP_LOGI(TAG, "txt_reader_read_page: chars_read=%d, text[0]=0x%02X text[1]=0x%02X text[2]=0x%02X text[3]=0x%02X",
+                 chars_read,
+                 (unsigned char)s_reader_state.current_text[0],
+                 (unsigned char)s_reader_state.current_text[1],
+                 (unsigned char)s_reader_state.current_text[2],
+                 (unsigned char)s_reader_state.current_text[3]);
+
         if (chars_read > 0) {
             // UTF-8 文本换行显示 - 支持中文
             int y = 40;

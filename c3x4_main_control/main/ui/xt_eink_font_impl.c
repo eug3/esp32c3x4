@@ -369,11 +369,14 @@ int xt_eink_font_render_char(int x, int y, uint32_t ch, uint8_t color,
                 int bit_pos = 7 - (px % 8);
 
                 if (pixel) {
-                    // 绘制像素
-                    if (color == 0) {
-                        framebuffer[byte_pos] |= (1 << bit_pos);  // 黑色
+                    // 帧缓冲约定（与 EPD/GUI_Paint 一致）：bit=0 表示黑，bit=1 表示白。
+                    // 调用方通常传入 COLOR_BLACK(0x00) / COLOR_WHITE(0xFF)。
+                    if (color == 0x00) {
+                        // 黑色：清零该位
+                        framebuffer[byte_pos] &= ~(1 << bit_pos);
                     } else {
-                        framebuffer[byte_pos] &= ~(1 << bit_pos);  // 白色
+                        // 白色：置位该位
+                        framebuffer[byte_pos] |= (1 << bit_pos);
                     }
                 }
             }

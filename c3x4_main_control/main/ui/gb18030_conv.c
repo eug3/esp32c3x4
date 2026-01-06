@@ -1,34 +1,77 @@
 /**
  * @file gb18030_conv.c
  * @brief GB18030/GBK to UTF-8 conversion implementation
- * 
- * This is a simplified converter that handles:
+ *
+ * Uses a lookup table stored in Flash for accurate GBK to Unicode conversion.
+ * The table is stored in the 'gbk_table' partition and mapped directly from Flash.
+ *
+ * This converter handles:
  * - ASCII (0x00-0x7F): Direct pass-through
- * - GBK double-byte (0x81-0xFE, 0x40-0xFE): Common Chinese characters
- * 
- * For a production system, consider using a full conversion table or library like iconv.
- * This implementation provides reasonable coverage for typical Chinese text files.
+ * - GBK double-byte (0x81-0xFE, 0x40-0xFE): Full GBK character set
  */
 
 #include "gb18030_conv.h"
 #include "esp_log.h"
+#include "esp_partition.h"
+#include "spi_flash_mmap.h"
 #include <string.h>
 
 static const char *TAG = "GB18030_CONV";
 
-// Include simplified GBK to Unicode mapping
-// This maps GBK区位码 (zone-point) to Unicode
-// GBK uses: high byte (0x81-0xFE), low byte (0x40-0xFE)
+// GBK table partition handle and pointer
+static const esp_partition_t *s_gbk_partition = NULL;
+static const uint8_t *s_gbk_table_mapped = NULL;
+static spi_flash_mmap_handle_t s_gbk_mmap_handle;
+
+// Table parameters (must match generate_gbk_table.py)
+#define GBK_TABLE_START   0x8140   // First valid GBK code
+#define GBK_TABLE_END     0xFEFE   // Last valid GBK code
+#define GBK_TABLE_SIZE    (GBK_TABLE_END - GBK_TABLE_START + 1)  // 32,191 entries
 
 /**
- * @brief Convert GBK double-byte character to Unicode codepoint
+ * @brief Initialize the GBK lookup table from Flash partition
+ * @return true if table loaded successfully
+ */
+static bool gbk_table_init(void)
+{
+    if (s_gbk_table_mapped != NULL) {
+        return true;  // Already initialized
+    }
+
+    // Find the GBK table partition (search all data subtypes)
+    s_gbk_partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                                ESP_PARTITION_SUBTYPE_ANY,
+                                                "gbk_table");
+    if (s_gbk_partition == NULL) {
+        ESP_LOGE(TAG, "Failed to find 'gbk_table' partition");
+        return false;
+    }
+
+    // Map the partition to memory (read-only, cached)
+    const void *mapped_ptr = NULL;
+    esp_err_t err = esp_partition_mmap(s_gbk_partition, 0, s_gbk_partition->size,
+                                        SPI_FLASH_MMAP_DATA, &mapped_ptr, &s_gbk_mmap_handle);
+    if (err != ESP_OK || mapped_ptr == NULL) {
+        ESP_LOGE(TAG, "Failed to map 'gbk_table' partition to memory: %d", err);
+        return false;
+    }
+
+    s_gbk_table_mapped = (const uint8_t *)mapped_ptr;
+
+    ESP_LOGI(TAG, "GBK lookup table loaded from Flash: addr=%p, size=%lu",
+             (void *)s_gbk_table_mapped, (unsigned long)s_gbk_partition->size);
+    return true;
+}
+
+/**
+ * @brief Convert GBK double-byte character to Unicode codepoint using Flash lookup table
  * @param gb_high High byte (0x81-0xFE)
- * @param gb_low Low byte (0x40-0xFE)
- * @return Unicode codepoint, or 0 if invalid
+ * @param gb_low Low byte (0x40-0xFE, excluding 0x7F)
+ * @return Unicode codepoint, or 0 if invalid/unmapped
  */
 static uint32_t gbk_to_unicode(uint8_t gb_high, uint8_t gb_low)
 {
-    // GBK character range check
+    // Validate input range
     if (gb_high < 0x81 || gb_high > 0xFE) {
         return 0;
     }
@@ -39,64 +82,25 @@ static uint32_t gbk_to_unicode(uint8_t gb_high, uint8_t gb_low)
     // Calculate GBK code
     uint16_t gbk_code = (gb_high << 8) | gb_low;
 
-    // GB2312 Level-1 range (most common): 0xB0A1-0xD7F9
-    // GB2312 Level-2 range: 0xD8A1-0xF7FE
-    // GBK extensions: 0x8140-0xA0FE, 0xA8A1-0xFEFE
+    // Check if within table range
+    if (gbk_code < GBK_TABLE_START || gbk_code > GBK_TABLE_END) {
+        return 0;
+    }
 
-    // Simplified mapping using offset calculation
-    // This is an approximation - for accurate conversion, use a lookup table
-    
-    // GB2312 Level-1 (most common characters)
-    if (gbk_code >= 0xB0A1 && gbk_code <= 0xD7F9) {
-        // Map to Unicode CJK Unified Ideographs (U+4E00-U+9FFF)
-        // GB2312 Level-1 has ~3755 characters starting from "啊"
-        uint32_t offset = 0;
-        
-        // Calculate offset from GB2312 table start
-        int zone = gb_high - 0xB0;  // Zone (区): 16-55
-        int point = gb_low - 0xA1;   // Point (位): 1-94
-        
-        if (zone >= 0 && zone < 40 && point >= 0 && point < 94) {
-            offset = zone * 94 + point;
-            // Map to Unicode starting from U+554A (啊)
-            return 0x554A + offset;
+    // Read from Flash lookup table
+    // Each entry is 2 bytes (16-bit Unicode)
+    if (s_gbk_table_mapped == NULL) {
+        // Initialize table on first use if not already done
+        if (!gbk_table_init()) {
+            ESP_LOGW(TAG, "GBK table not available");
+            return 0;
         }
     }
 
-    // GB2312 Level-2
-    if (gbk_code >= 0xD8A1 && gbk_code <= 0xF7FE) {
-        int zone = gb_high - 0xD8;
-        int point = gb_low - 0xA1;
-        
-        if (zone >= 0 && zone < 32 && point >= 0 && point < 94) {
-            uint32_t offset = zone * 94 + point;
-            // Map to Unicode starting from U+7EA0
-            return 0x7EA0 + offset;
-        }
-    }
+    uint16_t table_offset = gbk_code - GBK_TABLE_START;
+    uint16_t unicode = (s_gbk_table_mapped[table_offset * 2] << 8) |
+                       s_gbk_table_mapped[table_offset * 2 + 1];
 
-    // GBK extensions (less common)
-    if (gbk_code >= 0x8140 && gbk_code <= 0xA0FE) {
-        int zone = gb_high - 0x81;
-        int point = (gb_low >= 0x80) ? (gb_low - 0x80 + 63) : (gb_low - 0x40);
-        
-        if (zone >= 0 && zone < 32 && point >= 0 && point < 190) {
-            uint32_t offset = zone * 190 + point;
-            return 0x4E00 + offset;  // Approximate mapping
-        }
-    }
-
-    // Fallback: clamp to valid CJK range
-    // CJK Unified Ideographs range: U+4E00 to U+9FFF (20,992 characters)
-    // 0x51FF = 20,991 (last offset before wrapping)
-    // 0x5200 = 20,992 (total characters in range)
-    ESP_LOGD(TAG, "Using fallback mapping for GBK: 0x%04X", gbk_code);
-    uint32_t offset = (gbk_code - 0x8140) % 0x51FF;
-    uint32_t unicode = 0x4E00 + offset;
-    // Ensure we stay within CJK Unified Ideographs (U+4E00-U+9FFF)
-    if (unicode > 0x9FFF) {
-        unicode = 0x4E00 + (offset % 0x5200);
-    }
     return unicode;
 }
 
@@ -172,6 +176,14 @@ int gb18030_to_utf8(const uint8_t *gb_text, size_t gb_len,
     if (gb_text == NULL || utf8_text == NULL || utf8_size == 0) {
         ESP_LOGE(TAG, "Invalid parameters");
         return -1;
+    }
+
+    // Initialize GBK table on first use
+    if (s_gbk_table_mapped == NULL) {
+        if (!gbk_table_init()) {
+            ESP_LOGE(TAG, "Failed to initialize GBK table");
+            return -1;
+        }
     }
 
     size_t gb_pos = 0;

@@ -581,17 +581,7 @@ void display_refresh(refresh_mode_t mode)
 
             // 标准局刷模式：只写 0x24，依赖 0x26 中的旧数据作为对比基准
             EPD_4in26_Display_Part_Stream(s_framebuffer, 100, phys_x, phys_y, phys_w, phys_h);
-             EPD_4in26_Display_Fast(s_framebuffer);   
-            // 局刷计数器递增
-            // s_partial_refresh_count++;
-            // ESP_LOGI(TAG, "Partial refresh count: %d/%d", s_partial_refresh_count, MAX_PARTIAL_REFRESH_COUNT);
-
-            // // 达到最大次数时强制快刷，清除残影
-            // if (s_partial_refresh_count >= MAX_PARTIAL_REFRESH_COUNT) {
-            //     ESP_LOGI(TAG, "Reached max partial refresh count, forcing fast refresh");
-               
-            //     s_partial_refresh_count = 0;
-            // }
+            EPD_4in26_Display_Fast(s_framebuffer);
             break;
     }
 
