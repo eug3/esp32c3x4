@@ -17,6 +17,150 @@
 #include <string.h>
 #include <inttypes.h>
 #include <ctype.h>
+#include <sys/stat.h>
+#include <stdio.h>
+
+#define HTML_STREAM_IN_CHUNK  2048
+#define HTML_STREAM_OUT_CHUNK 2048
+
+static int ensure_chapter_cached_and_get_key(const epub_reader_t *reader, int chapter_index, epub_cache_key_t *out_key)
+{
+    if (reader == NULL || out_key == NULL) {
+        return -1;
+    }
+    if (chapter_index < 0 || chapter_index >= reader->metadata.total_chapters) {
+        return -1;
+    }
+
+    const epub_chapter_t *chapter = &reader->chapters[chapter_index];
+
+    memset(out_key, 0, sizeof(*out_key));
+    out_key->type = EPUB_CACHE_CHAPTER;
+    strncpy(out_key->epub_path, reader->epub_path, sizeof(out_key->epub_path) - 1);
+    strncpy(out_key->content_path, chapter->content_file, sizeof(out_key->content_path) - 1);
+
+    if (epub_cache_exists(out_key)) {
+        return 0;
+    }
+
+    epub_zip_t *zip = epub_zip_open(reader->epub_path);
+    if (!zip) {
+        return -1;
+    }
+
+    epub_zip_file_info_t chapter_file;
+    if (!epub_zip_find_file(zip, chapter->content_file, &chapter_file)) {
+        epub_zip_close(zip);
+        return -1;
+    }
+
+    // Use the real filename inside ZIP as the stable cache key
+    strncpy(out_key->content_path, chapter_file.filename, sizeof(out_key->content_path) - 1);
+    out_key->content_path[sizeof(out_key->content_path) - 1] = '\0';
+
+    if (!epub_cache_exists(out_key)) {
+        char *cache_path = (char *)malloc(256);
+        if (cache_path != NULL) {
+            if (epub_cache_get_file_path(out_key, cache_path, 256)) {
+                (void)epub_zip_extract_file_to_path(zip, &chapter_file, cache_path);
+            }
+            free(cache_path);
+        }
+    }
+
+    epub_zip_close(zip);
+    return epub_cache_exists(out_key) ? 0 : -1;
+}
+
+static int ensure_rendered_text_cache(const epub_reader_t *reader, int chapter_index, epub_cache_key_t *out_text_key)
+{
+    epub_cache_key_t html_key;
+    if (ensure_chapter_cached_and_get_key(reader, chapter_index, &html_key) != 0) {
+        return -1;
+    }
+
+    epub_cache_key_t text_key = html_key;
+    text_key.type = EPUB_CACHE_RENDERED_TEXT;
+
+    if (epub_cache_exists(&text_key)) {
+        if (out_text_key) {
+            *out_text_key = text_key;
+        }
+        return 0;
+    }
+
+    char *html_path = (char *)malloc(256);
+    char *text_path = (char *)malloc(256);
+    if (html_path == NULL || text_path == NULL) {
+        free(html_path);
+        free(text_path);
+        return -1;
+    }
+
+    if (!epub_cache_get_file_path(&html_key, html_path, 256) ||
+        !epub_cache_get_file_path(&text_key, text_path, 256)) {
+        free(html_path);
+        free(text_path);
+        return -1;
+    }
+
+    FILE *fin = fopen(html_path, "rb");
+    if (fin == NULL) {
+        free(html_path);
+        free(text_path);
+        return -1;
+    }
+    FILE *fout = fopen(text_path, "wb");
+    if (fout == NULL) {
+        fclose(fin);
+        free(html_path);
+        free(text_path);
+        return -1;
+    }
+
+    epub_html_stream_t st;
+    epub_html_stream_init(&st);
+
+    char *in_buf = (char *)malloc(HTML_STREAM_IN_CHUNK);
+    char *out_buf = (char *)malloc(HTML_STREAM_OUT_CHUNK);
+    if (in_buf == NULL || out_buf == NULL) {
+        free(in_buf);
+        free(out_buf);
+        fclose(fin);
+        fclose(fout);
+        free(html_path);
+        free(text_path);
+        return -1;
+    }
+
+    while (1) {
+        size_t n = fread(in_buf, 1, HTML_STREAM_IN_CHUNK, fin);
+        if (n == 0) {
+            break;
+        }
+
+        size_t produced = epub_html_stream_feed(&st, in_buf, n, out_buf, HTML_STREAM_OUT_CHUNK);
+        if (produced > 0) {
+            (void)fwrite(out_buf, 1, produced, fout);
+        }
+    }
+
+    free(in_buf);
+    free(out_buf);
+    fclose(fin);
+    fclose(fout);
+    free(html_path);
+    free(text_path);
+
+    if (!epub_cache_exists(&text_key)) {
+        return -1;
+    }
+
+    if (out_text_key) {
+        *out_text_key = text_key;
+    }
+    return 0;
+}
 
 static const char *TAG = "EPUB_PARSER";
 
@@ -437,6 +581,127 @@ int epub_parser_read_chapter(const epub_reader_t *reader, int chapter_index,
     ESP_LOGD(TAG, "Read chapter %d: %d bytes", chapter_index, bytes_read);
 
     return bytes_read;
+}
+
+int epub_parser_read_chapter_at(const epub_reader_t *reader, int chapter_index,
+                               long offset, char *text_buffer, size_t buffer_size)
+{
+    if (reader == NULL || !reader->is_open || text_buffer == NULL) {
+        ESP_LOGE(TAG, "Invalid reader or buffer");
+        return -1;
+    }
+    if (chapter_index < 0 || chapter_index >= reader->metadata.total_chapters) {
+        ESP_LOGE(TAG, "Invalid chapter index: %d", chapter_index);
+        return -1;
+    }
+    if (offset < 0) {
+        offset = 0;
+    }
+    if (buffer_size <= 1) {
+        return -1;
+    }
+
+    const epub_chapter_t *chapter = &reader->chapters[chapter_index];
+
+    epub_cache_key_t cache_key;
+    memset(&cache_key, 0, sizeof(cache_key));
+    cache_key.type = EPUB_CACHE_CHAPTER;
+    strncpy(cache_key.epub_path, reader->epub_path, sizeof(cache_key.epub_path) - 1);
+    strncpy(cache_key.content_path, chapter->content_file, sizeof(cache_key.content_path) - 1);
+
+    // If not cached under the original path, resolve real filename and (pre)cache.
+    if (!epub_cache_exists(&cache_key)) {
+        epub_zip_t *zip = epub_zip_open(reader->epub_path);
+        if (!zip) {
+            ESP_LOGE(TAG, "Failed to reopen EPUB");
+            return -1;
+        }
+
+        epub_zip_file_info_t chapter_file;
+        if (!epub_zip_find_file(zip, chapter->content_file, &chapter_file)) {
+            ESP_LOGE(TAG, "Chapter file not found: %s", chapter->content_file);
+            epub_zip_close(zip);
+            return -1;
+        }
+
+        strncpy(cache_key.content_path, chapter_file.filename, sizeof(cache_key.content_path) - 1);
+        cache_key.content_path[sizeof(cache_key.content_path) - 1] = '\0';
+
+        if (!epub_cache_exists(&cache_key)) {
+            char cache_path[256];
+            if (epub_cache_get_file_path(&cache_key, cache_path, sizeof(cache_path))) {
+                int ext_ret = epub_zip_extract_file_to_path(zip, &chapter_file, cache_path);
+                if (ext_ret < 0) {
+                    ESP_LOGW(TAG, "Failed to precache chapter to %s", cache_path);
+                }
+            }
+        }
+
+        epub_zip_close(zip);
+    }
+
+    // Now read from cache file at offset
+    char cache_path[256];
+    if (!epub_cache_get_file_path(&cache_key, cache_path, sizeof(cache_path))) {
+        return -1;
+    }
+
+    FILE *f = fopen(cache_path, "rb");
+    if (f == NULL) {
+        return -1;
+    }
+
+    if (fseek(f, offset, SEEK_SET) != 0) {
+        fclose(f);
+        return 0; // treat as EOF/invalid offset
+    }
+
+    size_t n = fread(text_buffer, 1, buffer_size - 1, f);
+    fclose(f);
+    text_buffer[n] = '\0';
+    return (int)n;
+}
+
+int epub_parser_read_chapter_text_at(const epub_reader_t *reader, int chapter_index,
+                                    long offset, char *text_buffer, size_t buffer_size)
+{
+    if (reader == NULL || !reader->is_open || text_buffer == NULL) {
+        return -1;
+    }
+    if (chapter_index < 0 || chapter_index >= reader->metadata.total_chapters) {
+        return -1;
+    }
+    if (offset < 0) {
+        offset = 0;
+    }
+    if (buffer_size <= 1) {
+        return -1;
+    }
+
+    epub_cache_key_t text_key;
+    if (ensure_rendered_text_cache(reader, chapter_index, &text_key) != 0) {
+        return -1;
+    }
+
+    char text_path[256];
+    if (!epub_cache_get_file_path(&text_key, text_path, sizeof(text_path))) {
+        return -1;
+    }
+
+    FILE *f = fopen(text_path, "rb");
+    if (f == NULL) {
+        return -1;
+    }
+
+    if (fseek(f, offset, SEEK_SET) != 0) {
+        fclose(f);
+        return 0;
+    }
+
+    size_t n = fread(text_buffer, 1, buffer_size - 1, f);
+    fclose(f);
+    text_buffer[n] = '\0';
+    return (int)n;
 }
 
 bool epub_parser_goto_chapter(epub_reader_t *reader, int chapter_index) {

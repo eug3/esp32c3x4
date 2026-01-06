@@ -106,6 +106,33 @@ int epub_parser_read_chapter(const epub_reader_t *reader, int chapter_index,
                              char *text_buffer, size_t buffer_size);
 
 /**
+ * @brief 从指定章节的指定字节偏移开始读取内容（用于章节内翻页）
+ *
+ * 说明：该函数优先使用 LittleFS 缓存的章节文件，并从 offset 处读取最多 buffer_size-1 字节。
+ * offset 按字节计数（UTF-8 可能切在字符中间，上层需要容错）。
+ *
+ * @param reader 阅读器实例指针
+ * @param chapter_index 章节索引
+ * @param offset 章节内字节偏移（>=0）
+ * @param text_buffer 输出缓冲区
+ * @param buffer_size 缓冲区大小
+ * @return 实际读取字节数；到文件尾返回 0；失败返回 -1
+ */
+int epub_parser_read_chapter_at(const epub_reader_t *reader, int chapter_index,
+                               long offset, char *text_buffer, size_t buffer_size);
+
+/**
+ * @brief 读取章节“渲染后的纯文本”内容（按字节偏移）
+ *
+ * 该接口会确保章节 HTML 已缓存到 LittleFS，并在需要时生成对应的纯文本缓存文件。
+ * offset 按 UTF-8 字节计数（由上层分页逻辑保证落在字符边界上）。
+ *
+ * @return 实际读取字节数；到文件尾返回 0；失败返回 -1
+ */
+int epub_parser_read_chapter_text_at(const epub_reader_t *reader, int chapter_index,
+                                    long offset, char *text_buffer, size_t buffer_size);
+
+/**
  * @brief 跳转到指定章节
  * @param reader 阅读器实例指针
  * @param chapter_index 章节索引

@@ -9,6 +9,7 @@
 #include "fonts.h"
 #include "txt_reader.h"
 #include "epub_parser.h"
+#include "epub_html.h"
 #include "xt_eink_font_impl.h"
 #include "esp_log.h"
 #include "gb18030_conv.h"
@@ -20,6 +21,9 @@ static const char *TAG = "READER_SCREEN";
 
 // Line buffer size for text rendering
 #define MAX_LINE_BUFFER_SIZE 512
+
+// EPUB 章节内翻页：保留少量历史，支持左键回退
+#define EPUB_PAGE_HISTORY_DEPTH 24
 
 // 缓存窗口配置
 #define CACHE_WINDOW_BEFORE 2   // 当前页之前缓存页数
@@ -48,11 +52,20 @@ static struct {
     char file_path[256];
     txt_reader_t txt_reader;
     epub_reader_t epub_reader;  // EPUB 阅读器实例
+    char epub_html[4096];        // EPUB 章节原始 HTML/XHTML
     char current_text[4096];     // 当前页文本
     int current_page;
     int total_pages;
     int chars_per_page;
     bool is_loaded;
+
+    // EPUB 章节内翻页状态（按章节 HTML 文件字节偏移）
+    struct {
+        long html_offset;
+        int last_html_consumed;
+        long history[EPUB_PAGE_HISTORY_DEPTH];
+        int history_len;
+    } epub_page;
 
     // TXT 缓存状态（flash-backed）
     struct {
@@ -77,7 +90,152 @@ static struct {
     .total_pages = 0,
     .chars_per_page = 600,  // 每页约600字符 (适合480x800屏幕)
     .is_loaded = false,
+    .epub_page = {0},
 };
+
+static bool epub_fill_current_page_text(void)
+{
+    if (!s_reader_state.is_loaded || s_reader_state.type != READER_TYPE_EPUB) {
+        return false;
+    }
+
+    // 读一段“渲染后的纯文本”（从章节内 offset 开始，offset 基于纯文本字节数）
+    int bytes_read = epub_parser_read_chapter_text_at(&s_reader_state.epub_reader,
+                                                      s_reader_state.current_page - 1,
+                                                      s_reader_state.epub_page.html_offset,
+                                                      s_reader_state.epub_html,
+                                                      sizeof(s_reader_state.epub_html));
+
+    if (bytes_read <= 0) {
+        s_reader_state.epub_html[0] = '\0';
+        s_reader_state.current_text[0] = '\0';
+        s_reader_state.epub_page.last_html_consumed = 0;
+        return false;
+    }
+
+    // 根据屏幕尺寸/字体，计算本页实际能显示多少字节，并把分页后的文本写入 current_text
+    sFONT *ui_font = display_get_default_ascii_font();
+    int chinese_font_height = xt_eink_font_get_height();
+    if (chinese_font_height == 0) {
+        chinese_font_height = 25;
+    }
+    int line_spacing = 4;
+    int font_height = chinese_font_height + line_spacing;
+    int max_lines = (SCREEN_HEIGHT - 80) / font_height;
+    int max_width = SCREEN_WIDTH - 20;
+
+    size_t out_len = 0;
+    int consumed = 0;
+    int lines = 0;
+    char line[MAX_LINE_BUFFER_SIZE];
+    int line_bytes = 0;
+    const char *p = s_reader_state.epub_html;
+    const char *end = s_reader_state.epub_html + bytes_read;
+
+    s_reader_state.current_text[0] = '\0';
+
+    while (p < end && lines < max_lines && out_len + 2 < sizeof(s_reader_state.current_text)) {
+        if (*p == '\n') {
+            // flush line
+            if (line_bytes > 0) {
+                size_t copy = (size_t)line_bytes;
+                if (out_len + copy + 2 >= sizeof(s_reader_state.current_text)) {
+                    break;
+                }
+                memcpy(s_reader_state.current_text + out_len, line, copy);
+                out_len += copy;
+            }
+            s_reader_state.current_text[out_len++] = '\n';
+            s_reader_state.current_text[out_len] = '\0';
+            p++;
+            consumed++;
+            line_bytes = 0;
+            lines++;
+            continue;
+        }
+
+        uint32_t unicode;
+        int char_bytes = xt_eink_font_utf8_to_utf32(p, &unicode);
+        if (char_bytes <= 0 || p + char_bytes > end) {
+            // bad byte; skip
+            p++;
+            consumed++;
+            continue;
+        }
+
+        if (line_bytes + char_bytes >= (int)sizeof(line) - 1) {
+            // line buffer full, flush as a line
+            if (line_bytes > 0) {
+                size_t copy = (size_t)line_bytes;
+                if (out_len + copy + 2 >= sizeof(s_reader_state.current_text)) {
+                    break;
+                }
+                memcpy(s_reader_state.current_text + out_len, line, copy);
+                out_len += copy;
+                s_reader_state.current_text[out_len++] = '\n';
+                s_reader_state.current_text[out_len] = '\0';
+                lines++;
+                line_bytes = 0;
+                if (lines >= max_lines) {
+                    break;
+                }
+                continue;
+            }
+        }
+
+        memcpy(line + line_bytes, p, (size_t)char_bytes);
+        line_bytes += char_bytes;
+        line[line_bytes] = '\0';
+
+        int w = display_get_text_width_font(line, ui_font);
+        if (w > max_width && line_bytes > char_bytes) {
+            // flush line without this char
+            line_bytes -= char_bytes;
+            line[line_bytes] = '\0';
+
+            if (line_bytes > 0) {
+                size_t copy = (size_t)line_bytes;
+                if (out_len + copy + 2 >= sizeof(s_reader_state.current_text)) {
+                    break;
+                }
+                memcpy(s_reader_state.current_text + out_len, line, copy);
+                out_len += copy;
+            }
+            s_reader_state.current_text[out_len++] = '\n';
+            s_reader_state.current_text[out_len] = '\0';
+            lines++;
+            if (lines >= max_lines) {
+                // do NOT consume current char; it will be on next page
+                break;
+            }
+
+            // start new line with this char
+            memcpy(line, p, (size_t)char_bytes);
+            line_bytes = char_bytes;
+            line[line_bytes] = '\0';
+
+            p += char_bytes;
+            consumed += char_bytes;
+        } else {
+            p += char_bytes;
+            consumed += char_bytes;
+        }
+    }
+
+    // flush remaining line if any and we still have space
+    if (lines < max_lines && line_bytes > 0 && out_len + (size_t)line_bytes + 1 < sizeof(s_reader_state.current_text)) {
+        memcpy(s_reader_state.current_text + out_len, line, (size_t)line_bytes);
+        out_len += (size_t)line_bytes;
+        s_reader_state.current_text[out_len] = '\0';
+    }
+
+    if (consumed <= 0) {
+        // fallback: avoid infinite loop
+        consumed = 1;
+    }
+    s_reader_state.epub_page.last_html_consumed = consumed;
+    return true;
+}
 
 static uint32_t fnv1a32_str_local(const char *s)
 {
@@ -533,9 +691,15 @@ static bool load_epub_file(const char *file_path)
     }
 
     // 获取第一个章节内容
-    int bytes_read = epub_parser_read_chapter(&s_reader_state.epub_reader, 0,
-                                               s_reader_state.current_text,
-                                               sizeof(s_reader_state.current_text));
+    // 初始化章节内翻页
+    s_reader_state.epub_page.html_offset = 0;
+    s_reader_state.epub_page.last_html_consumed = 0;
+    s_reader_state.epub_page.history_len = 0;
+
+    int bytes_read = epub_parser_read_chapter_text_at(&s_reader_state.epub_reader, 0,
+                                                      0,
+                                                      s_reader_state.epub_html,
+                                                      sizeof(s_reader_state.epub_html));
 
     if (bytes_read <= 0) {
         ESP_LOGE(TAG, "Failed to read first chapter");
@@ -543,7 +707,9 @@ static bool load_epub_file(const char *file_path)
         return false;
     }
 
-    s_reader_state.current_text[bytes_read] = '\0';
+    s_reader_state.epub_html[bytes_read] = '\0';
+    // 第一次进入章节时，直接用分页逻辑生成 current_text 和 consumed
+    (void)epub_fill_current_page_text();
 
     s_reader_state.type = READER_TYPE_EPUB;
     s_reader_state.is_loaded = true;
@@ -667,69 +833,31 @@ static void display_current_page(void)
             }
         }
     } else if (s_reader_state.type == READER_TYPE_EPUB) {
-        // EPUB: 显示当前章节 - 支持中文（此处仍做简单自动换行）
+        // 先根据当前 offset 生成本页文本（章节内翻页 + 精确消耗字节数）
+        (void)epub_fill_current_page_text();
+
+        // current_text 已经按宽度插入了换行，这里直接逐行绘制即可
         int y = 40;
         int x = 10;
-        int max_width = SCREEN_WIDTH - 20;
         const char *p = s_reader_state.current_text;
         char line[MAX_LINE_BUFFER_SIZE];
-        int line_bytes = 0;
 
         while (*p != '\0' && y < SCREEN_HEIGHT - 40) {
-            if (*p == '\n') {
-                if (line_bytes > 0) {
-                    line[line_bytes] = '\0';
-                    display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
-                }
-                y += font_height;
-                line_bytes = 0;
-                p++;
-                continue;
+            const char *nl = strchr(p, '\n');
+            size_t len = nl ? (size_t)(nl - p) : strlen(p);
+            if (len >= sizeof(line)) {
+                len = sizeof(line) - 1;
             }
-
-            uint32_t unicode;
-            int char_bytes = xt_eink_font_utf8_to_utf32(p, &unicode);
-            if (char_bytes <= 0) {
-                p++;
-                continue;
-            }
-
-            if (line_bytes + char_bytes >= (int)sizeof(line) - 1) {
-                line[line_bytes] = '\0';
+            if (len > 0) {
+                memcpy(line, p, len);
+                line[len] = '\0';
                 display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
-                y += font_height;
-                line_bytes = 0;
-                if (y >= SCREEN_HEIGHT - 40) {
-                    break;
-                }
-                continue;
             }
-
-            memcpy(line + line_bytes, p, char_bytes);
-            line[line_bytes + char_bytes] = '\0';
-
-            int line_width = display_get_text_width_font(line, ui_font);
-            if (line_width > max_width && line_bytes > 0) {
-                // 超出宽度：先画当前行，再把字符作为下一行开头
-                line[line_bytes] = '\0';
-                display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
-                y += font_height;
-                if (y >= SCREEN_HEIGHT - 40) {
-                    break;
-                }
-                memcpy(line, p, char_bytes);
-                line_bytes = char_bytes;
-                line[line_bytes] = '\0';
-            } else {
-                line_bytes += char_bytes;
+            y += font_height;
+            if (!nl) {
+                break;
             }
-
-            p += char_bytes;
-        }
-
-        if (line_bytes > 0 && y < SCREEN_HEIGHT - 40) {
-            line[line_bytes] = '\0';
-            display_draw_text_font(x, y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
+            p = nl + 1;
         }
     }
 
@@ -793,18 +921,30 @@ static void next_page(void)
                  s_reader_state.current_page + 1, s_reader_state.total_pages,
                  (unsigned)s_reader_state.txt_cache.cursor);
     } else if (s_reader_state.type == READER_TYPE_EPUB) {
-        // EPUB: 切换到下一章
-        if (s_reader_state.current_page < s_reader_state.total_pages) {
-            s_reader_state.current_page++;
-            int bytes_read = epub_parser_read_chapter(&s_reader_state.epub_reader,
-                                                       s_reader_state.current_page - 1,
-                                                       s_reader_state.current_text,
-                                                       sizeof(s_reader_state.current_text));
-            if (bytes_read > 0) {
-                s_reader_state.current_text[bytes_read] = '\0';
+        // EPUB: 章节内翻页；到达章节尾部再进入下一章
+        if (s_reader_state.epub_page.history_len < EPUB_PAGE_HISTORY_DEPTH) {
+            s_reader_state.epub_page.history[s_reader_state.epub_page.history_len++] = s_reader_state.epub_page.html_offset;
+        }
+
+        int step = s_reader_state.epub_page.last_html_consumed;
+        if (step <= 0) {
+            step = (int)sizeof(s_reader_state.epub_html) - 1;
+        }
+        s_reader_state.epub_page.html_offset += step;
+
+        // 预读一下判断是否到章节末尾
+        if (!epub_fill_current_page_text()) {
+            // 章节已结束：切换到下一章
+            if (s_reader_state.current_page < s_reader_state.total_pages) {
+                s_reader_state.current_page++;
+                s_reader_state.epub_page.html_offset = 0;
+                s_reader_state.epub_page.last_html_consumed = 0;
+                s_reader_state.epub_page.history_len = 0;
+                (void)epub_fill_current_page_text();
             }
         }
-        ESP_LOGI(TAG, "Next page: %d/%d", s_reader_state.current_page, s_reader_state.total_pages);
+
+        ESP_LOGI(TAG, "Next page: chapter %d/%d offset=%ld", s_reader_state.current_page, s_reader_state.total_pages, (long)s_reader_state.epub_page.html_offset);
     }
 }
 
@@ -826,16 +966,17 @@ static void prev_page(void)
             }
         }
     } else if (s_reader_state.type == READER_TYPE_EPUB) {
-        // EPUB: 切换到上一章
-        if (s_reader_state.current_page > 1) {
+        // EPUB: 章节内上一页
+        if (s_reader_state.epub_page.history_len > 0) {
+            s_reader_state.epub_page.html_offset = s_reader_state.epub_page.history[--s_reader_state.epub_page.history_len];
+            (void)epub_fill_current_page_text();
+        } else if (s_reader_state.current_page > 1) {
+            // 若本章无历史（刚进入章开头），回到上一章开头
             s_reader_state.current_page--;
-            int bytes_read = epub_parser_read_chapter(&s_reader_state.epub_reader,
-                                                       s_reader_state.current_page - 1,
-                                                       s_reader_state.current_text,
-                                                       sizeof(s_reader_state.current_text));
-            if (bytes_read > 0) {
-                s_reader_state.current_text[bytes_read] = '\0';
-            }
+            s_reader_state.epub_page.html_offset = 0;
+            s_reader_state.epub_page.last_html_consumed = 0;
+            s_reader_state.epub_page.history_len = 0;
+            (void)epub_fill_current_page_text();
         }
     }
 

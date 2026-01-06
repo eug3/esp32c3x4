@@ -40,6 +40,51 @@ typedef struct {
 typedef struct epub_html_parser epub_html_parser_t;
 
 /**
+ * @brief 将 HTML/XHTML 转为可阅读的纯文本（最小渲染：段落/换行、实体解码、忽略脚本样式）
+ * @param html 输入 HTML 内容
+ * @param html_len 输入长度
+ * @param out 输出缓冲
+ * @param out_size 输出缓冲大小
+ * @return 输出文本长度（不含结尾 '\0'）
+ */
+size_t epub_html_to_text(const char *html, size_t html_len, char *out, size_t out_size);
+
+// 流式 HTML/XHTML -> 纯文本（用于将整章缓存为纯文本，避免一次性读入 RAM）
+typedef struct {
+    bool in_script;
+    bool in_style;
+    bool wrote_space;
+
+    // 标签解析状态
+    bool in_tag;
+    bool tag_is_close;
+    char tag_name[16];
+    uint8_t tag_len;
+    bool in_comment;
+    uint8_t comment_state; // 0..3 (for "<!--" detection/skip)
+
+    // 实体解析状态
+    bool in_entity;
+    char entity[20];
+    uint8_t entity_len;
+} epub_html_stream_t;
+
+void epub_html_stream_init(epub_html_stream_t *st);
+
+/**
+ * @brief 将一段 HTML 输入流式转换为纯文本输出
+ * @param st 流式状态（跨 chunk 保持）
+ * @param in 输入数据
+ * @param in_len 输入长度
+ * @param out 输出缓冲
+ * @param out_size 输出缓冲大小
+ * @return 输出字节数
+ */
+size_t epub_html_stream_feed(epub_html_stream_t *st,
+                             const char *in, size_t in_len,
+                             char *out, size_t out_size);
+
+/**
  * @brief 创建 HTML 解析器
  * @param html_content HTML 内容
  * @param content_length 内容长度

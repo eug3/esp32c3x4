@@ -497,6 +497,7 @@ int epub_zip_extract_file_to_path(epub_zip_t *zip, const epub_zip_file_info_t *f
         // Deflate(raw)
         z_stream strm;
         memset(&strm, 0, sizeof(strm));
+
         int ret = inflateInit2(&strm, -15);
         if (ret != Z_OK) {
             ESP_LOGE(TAG, "inflateInit2 failed: %d", ret);

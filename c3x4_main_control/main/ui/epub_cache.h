@@ -27,6 +27,7 @@ typedef enum {
     EPUB_CACHE_METADATA,     // 元数据
     EPUB_CACHE_IMAGE,        // 图片
     EPUB_CACHE_INDEX,        // 章节索引
+    EPUB_CACHE_RENDERED_TEXT,// 章节渲染后的纯文本
 } epub_cache_type_t;
 
 // 缓存键

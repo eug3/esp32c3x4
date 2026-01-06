@@ -8,8 +8,612 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <stdio.h>
 
 static const char *TAG = "EPUB_HTML";
+
+static size_t append_byte(char *out, size_t out_size, size_t out_len, char c)
+{
+    if (out == NULL || out_size == 0) {
+        return out_len;
+    }
+    if (out_len + 1 >= out_size) {
+        return out_len;
+    }
+    out[out_len++] = c;
+    out[out_len] = '\0';
+    return out_len;
+}
+
+static bool ends_with_newline(const char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return false;
+    }
+    return out[out_len - 1] == '\n';
+}
+
+static size_t append_newline(char *out, size_t out_size, size_t out_len)
+{
+    if (ends_with_newline(out, out_len)) {
+        return out_len;
+    }
+    return append_byte(out, out_size, out_len, '\n');
+}
+
+static size_t append_paragraph_break(char *out, size_t out_size, size_t out_len)
+{
+    // Ensure one blank line between paragraphs when possible.
+    out_len = append_newline(out, out_size, out_len);
+    if (out_len + 1 < out_size && out_len >= 1 && out[out_len - 1] == '\n') {
+        // Add a second newline if not already present.
+        if (out_len >= 2 && out[out_len - 2] == '\n') {
+            return out_len;
+        }
+        out_len = append_byte(out, out_size, out_len, '\n');
+    }
+    return out_len;
+}
+
+static int utf32_to_utf8(uint32_t codepoint, char out[4])
+{
+    if (codepoint <= 0x7Fu) {
+        out[0] = (char)codepoint;
+        return 1;
+    }
+    if (codepoint <= 0x7FFu) {
+        out[0] = (char)(0xC0u | ((codepoint >> 6) & 0x1Fu));
+        out[1] = (char)(0x80u | (codepoint & 0x3Fu));
+        return 2;
+    }
+    if (codepoint <= 0xFFFFu) {
+        out[0] = (char)(0xE0u | ((codepoint >> 12) & 0x0Fu));
+        out[1] = (char)(0x80u | ((codepoint >> 6) & 0x3Fu));
+        out[2] = (char)(0x80u | (codepoint & 0x3Fu));
+        return 3;
+    }
+    if (codepoint <= 0x10FFFFu) {
+        out[0] = (char)(0xF0u | ((codepoint >> 18) & 0x07u));
+        out[1] = (char)(0x80u | ((codepoint >> 12) & 0x3Fu));
+        out[2] = (char)(0x80u | ((codepoint >> 6) & 0x3Fu));
+        out[3] = (char)(0x80u | (codepoint & 0x3Fu));
+        return 4;
+    }
+    return 0;
+}
+
+static bool ascii_ieq(const char *a, const char *b)
+{
+    if (a == NULL || b == NULL) {
+        return false;
+    }
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return false;
+        }
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool starts_with_ascii_ci(const char *s, const char *prefix)
+{
+    if (s == NULL || prefix == NULL) {
+        return false;
+    }
+    while (*prefix) {
+        if (*s == '\0') {
+            return false;
+        }
+        if (tolower((unsigned char)*s) != tolower((unsigned char)*prefix)) {
+            return false;
+        }
+        s++;
+        prefix++;
+    }
+    return true;
+}
+
+static size_t decode_entity_and_advance(const char *in, size_t in_len, size_t i, char *out, size_t out_size, size_t out_len, bool *out_wrote_space)
+{
+    // in[i] == '&'
+    size_t j = i + 1;
+    while (j < in_len && j - i <= 16 && in[j] != ';' && in[j] != '<' && in[j] != '&') {
+        j++;
+    }
+    if (j >= in_len || in[j] != ';') {
+        // Not a complete entity; emit '&'
+        out_len = append_byte(out, out_size, out_len, '&');
+        if (out_wrote_space) {
+            *out_wrote_space = false;
+        }
+        return i + 1;
+    }
+
+    // Extract entity text between & and ;
+    char ent[20];
+    size_t ent_len = j - (i + 1);
+    if (ent_len >= sizeof(ent)) {
+        ent_len = sizeof(ent) - 1;
+    }
+    memcpy(ent, in + i + 1, ent_len);
+    ent[ent_len] = '\0';
+
+    // Common named entities
+    if (ascii_ieq(ent, "amp")) {
+        out_len = append_byte(out, out_size, out_len, '&');
+        if (out_wrote_space) *out_wrote_space = false;
+        return j + 1;
+    }
+    if (ascii_ieq(ent, "lt")) {
+        out_len = append_byte(out, out_size, out_len, '<');
+        if (out_wrote_space) *out_wrote_space = false;
+        return j + 1;
+    }
+    if (ascii_ieq(ent, "gt")) {
+        out_len = append_byte(out, out_size, out_len, '>');
+        if (out_wrote_space) *out_wrote_space = false;
+        return j + 1;
+    }
+    if (ascii_ieq(ent, "quot")) {
+        out_len = append_byte(out, out_size, out_len, '"');
+        if (out_wrote_space) *out_wrote_space = false;
+        return j + 1;
+    }
+    if (ascii_ieq(ent, "apos")) {
+        out_len = append_byte(out, out_size, out_len, '\'');
+        if (out_wrote_space) *out_wrote_space = false;
+        return j + 1;
+    }
+    if (ascii_ieq(ent, "nbsp")) {
+        // Treat as a space
+        if (out_wrote_space && *out_wrote_space) {
+            return j + 1;
+        }
+        if (!ends_with_newline(out, out_len) && out_len > 0) {
+            out_len = append_byte(out, out_size, out_len, ' ');
+            if (out_wrote_space) *out_wrote_space = true;
+        }
+        return j + 1;
+    }
+
+    // Numeric entities: &#123; or &#x1F4A9;
+    if (ent[0] == '#') {
+        uint32_t codepoint = 0;
+        const char *p = ent + 1;
+        int base = 10;
+        if (*p == 'x' || *p == 'X') {
+            base = 16;
+            p++;
+        }
+        bool ok = false;
+        while (*p) {
+            int v = -1;
+            if (*p >= '0' && *p <= '9') {
+                v = *p - '0';
+            } else if (base == 16 && *p >= 'a' && *p <= 'f') {
+                v = 10 + (*p - 'a');
+            } else if (base == 16 && *p >= 'A' && *p <= 'F') {
+                v = 10 + (*p - 'A');
+            } else {
+                v = -1;
+            }
+            if (v < 0 || v >= base) {
+                ok = false;
+                break;
+            }
+            ok = true;
+            codepoint = codepoint * (uint32_t)base + (uint32_t)v;
+            p++;
+        }
+        if (ok) {
+            char u8[4];
+            int u8len = utf32_to_utf8(codepoint, u8);
+            for (int k = 0; k < u8len; k++) {
+                out_len = append_byte(out, out_size, out_len, u8[k]);
+            }
+            if (out_wrote_space) *out_wrote_space = false;
+            return j + 1;
+        }
+    }
+
+    // Unknown entity: drop it
+    return j + 1;
+}
+
+size_t epub_html_to_text(const char *html, size_t html_len, char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (html == NULL || html_len == 0) {
+        return 0;
+    }
+
+    bool in_script = false;
+    bool in_style = false;
+    bool wrote_space = false;
+    size_t out_len = 0;
+
+    for (size_t i = 0; i < html_len; ) {
+        char c = html[i];
+
+        if (!in_script && !in_style && c == '&') {
+            size_t next_i = decode_entity_and_advance(html, html_len, i, out, out_size, out_len, &wrote_space);
+            // decode_entity_and_advance does not return updated out_len; redo with a safe approach.
+            // NOTE: To keep this function low-risk, we'll update out_len via strlen on small buffers.
+            out_len = strnlen(out, out_size);
+            i = next_i;
+            continue;
+        }
+
+        if (c == '<') {
+            // Handle comments
+            if (i + 3 < html_len && html[i + 1] == '!' && html[i + 2] == '-' && html[i + 3] == '-') {
+                size_t j = i + 4;
+                while (j + 2 < html_len) {
+                    if (html[j] == '-' && html[j + 1] == '-' && html[j + 2] == '>') {
+                        j += 3;
+                        break;
+                    }
+                    j++;
+                }
+                i = j;
+                continue;
+            }
+
+            // Find tag end
+            size_t j = i + 1;
+            while (j < html_len && html[j] != '>') {
+                j++;
+            }
+            if (j >= html_len) {
+                break;
+            }
+
+            // Extract tag content between < and >
+            char tag[32];
+            size_t k = 0;
+            size_t t = i + 1;
+            while (t < j && k + 1 < sizeof(tag)) {
+                char tc = html[t];
+                if (tc == ' ' || tc == '\t' || tc == '\r' || tc == '\n' || tc == '/' ) {
+                    break;
+                }
+                tag[k++] = (char)tolower((unsigned char)tc);
+                t++;
+            }
+            tag[k] = '\0';
+
+            bool is_close = (i + 1 < html_len && html[i + 1] == '/');
+            if (is_close) {
+                // Re-extract for closing tag
+                k = 0;
+                t = i + 2;
+                while (t < j && k + 1 < sizeof(tag)) {
+                    char tc = html[t];
+                    if (tc == ' ' || tc == '\t' || tc == '\r' || tc == '\n' || tc == '/' ) {
+                        break;
+                    }
+                    tag[k++] = (char)tolower((unsigned char)tc);
+                    t++;
+                }
+                tag[k] = '\0';
+            }
+
+            if (!is_close) {
+                if (starts_with_ascii_ci(tag, "script")) {
+                    in_script = true;
+                } else if (starts_with_ascii_ci(tag, "style")) {
+                    in_style = true;
+                }
+            } else {
+                if (starts_with_ascii_ci(tag, "script")) {
+                    in_script = false;
+                } else if (starts_with_ascii_ci(tag, "style")) {
+                    in_style = false;
+                }
+            }
+
+            if (!in_script && !in_style) {
+                if (starts_with_ascii_ci(tag, "br")) {
+                    out_len = append_newline(out, out_size, out_len);
+                    wrote_space = false;
+                } else if (starts_with_ascii_ci(tag, "p") || starts_with_ascii_ci(tag, "div") || starts_with_ascii_ci(tag, "section") || starts_with_ascii_ci(tag, "article")) {
+                    // Paragraph-ish blocks
+                    out_len = append_paragraph_break(out, out_size, out_len);
+                    wrote_space = false;
+                } else if (starts_with_ascii_ci(tag, "li")) {
+                    out_len = append_newline(out, out_size, out_len);
+                    out_len = append_byte(out, out_size, out_len, '-');
+                    out_len = append_byte(out, out_size, out_len, ' ');
+                    wrote_space = false;
+                } else if (tag[0] == 'h' && tag[1] >= '1' && tag[1] <= '6') {
+                    out_len = append_paragraph_break(out, out_size, out_len);
+                    wrote_space = false;
+                }
+            }
+
+            i = j + 1;
+            continue;
+        }
+
+        if (in_script || in_style) {
+            i++;
+            continue;
+        }
+
+        if (c == '\r' || c == '\n' || c == '\t' || c == ' ') {
+            // Collapse whitespace; keep explicit newlines we inserted.
+            if (!ends_with_newline(out, out_len) && out_len > 0 && !wrote_space) {
+                out_len = append_byte(out, out_size, out_len, ' ');
+                wrote_space = true;
+            }
+            i++;
+            continue;
+        }
+
+        // Avoid leading spaces at start of line
+        if (c != '\0') {
+            if (ends_with_newline(out, out_len) && c == ' ') {
+                i++;
+                continue;
+            }
+            out_len = append_byte(out, out_size, out_len, c);
+            wrote_space = false;
+        }
+        i++;
+    }
+
+    // Trim trailing spaces/newlines
+    while (out_len > 0 && (out[out_len - 1] == ' ' || out[out_len - 1] == '\n' || out[out_len - 1] == '\r' || out[out_len - 1] == '\t')) {
+        out[--out_len] = '\0';
+    }
+
+    return out_len;
+}
+
+void epub_html_stream_init(epub_html_stream_t *st)
+{
+    if (st == NULL) {
+        return;
+    }
+    memset(st, 0, sizeof(*st));
+}
+
+static bool tag_is_block_break(const char *tag)
+{
+    if (tag == NULL) {
+        return false;
+    }
+    return starts_with_ascii_ci(tag, "p") ||
+           starts_with_ascii_ci(tag, "div") ||
+           starts_with_ascii_ci(tag, "section") ||
+           starts_with_ascii_ci(tag, "article") ||
+           (tag[0] == 'h' && tag[1] >= '1' && tag[1] <= '6');
+}
+
+static bool tag_is_br(const char *tag)
+{
+    return (tag != NULL && starts_with_ascii_ci(tag, "br"));
+}
+
+static bool tag_is_li(const char *tag)
+{
+    return (tag != NULL && starts_with_ascii_ci(tag, "li"));
+}
+
+static size_t stream_flush_entity(epub_html_stream_t *st, char *out, size_t out_size, size_t out_len)
+{
+    if (st == NULL || !st->in_entity) {
+        return out_len;
+    }
+    st->entity[st->entity_len] = '\0';
+    // Reuse decode logic: build a fake "&...;" buffer.
+    char tmp[24];
+    int n = snprintf(tmp, sizeof(tmp), "&%s;", st->entity);
+    if (n > 0 && (size_t)n < sizeof(tmp)) {
+        size_t next_i = decode_entity_and_advance(tmp, (size_t)n, 0, out, out_size, out_len, &st->wrote_space);
+        (void)next_i;
+        out_len = strnlen(out, out_size);
+    }
+    st->in_entity = false;
+    st->entity_len = 0;
+    return out_len;
+}
+
+static size_t stream_emit_space(epub_html_stream_t *st, char *out, size_t out_size, size_t out_len)
+{
+    if (st == NULL) {
+        return out_len;
+    }
+    if (!ends_with_newline(out, out_len) && out_len > 0 && !st->wrote_space) {
+        out_len = append_byte(out, out_size, out_len, ' ');
+        st->wrote_space = true;
+    }
+    return out_len;
+}
+
+static size_t stream_handle_tag_end(epub_html_stream_t *st, char *out, size_t out_size, size_t out_len)
+{
+    if (st == NULL) {
+        return out_len;
+    }
+    st->tag_name[st->tag_len] = '\0';
+
+    // Comment end handled separately
+    if (!st->tag_is_close) {
+        if (starts_with_ascii_ci(st->tag_name, "script")) {
+            st->in_script = true;
+        } else if (starts_with_ascii_ci(st->tag_name, "style")) {
+            st->in_style = true;
+        }
+    } else {
+        if (starts_with_ascii_ci(st->tag_name, "script")) {
+            st->in_script = false;
+        } else if (starts_with_ascii_ci(st->tag_name, "style")) {
+            st->in_style = false;
+        }
+    }
+
+    if (!st->in_script && !st->in_style) {
+        if (tag_is_br(st->tag_name)) {
+            out_len = append_newline(out, out_size, out_len);
+            st->wrote_space = false;
+        } else if (tag_is_li(st->tag_name)) {
+            out_len = append_newline(out, out_size, out_len);
+            out_len = append_byte(out, out_size, out_len, '-');
+            out_len = append_byte(out, out_size, out_len, ' ');
+            st->wrote_space = false;
+        } else if (tag_is_block_break(st->tag_name)) {
+            out_len = append_paragraph_break(out, out_size, out_len);
+            st->wrote_space = false;
+        }
+    }
+
+    st->in_tag = false;
+    st->tag_is_close = false;
+    st->tag_len = 0;
+    return out_len;
+}
+
+size_t epub_html_stream_feed(epub_html_stream_t *st,
+                             const char *in, size_t in_len,
+                             char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (st == NULL || in == NULL || in_len == 0) {
+        return 0;
+    }
+
+    size_t out_len = 0;
+
+    for (size_t i = 0; i < in_len; i++) {
+        char c = in[i];
+
+        // If inside script/style, ignore everything until we see a closing tag start
+        if ((st->in_script || st->in_style) && !st->in_tag) {
+            if (c == '<') {
+                st->in_tag = true;
+                st->tag_is_close = false;
+                st->tag_len = 0;
+                st->in_comment = false;
+                st->comment_state = 0;
+            }
+            continue;
+        }
+
+        // Comment skipping state
+        if (st->in_comment) {
+            // Look for "-->"
+            if (st->comment_state == 0) {
+                st->comment_state = (c == '-') ? 1 : 0;
+            } else if (st->comment_state == 1) {
+                st->comment_state = (c == '-') ? 2 : 0;
+            } else if (st->comment_state == 2) {
+                if (c == '>') {
+                    st->in_comment = false;
+                    st->in_tag = false;
+                    st->comment_state = 0;
+                } else {
+                    st->comment_state = (c == '-') ? 2 : 0;
+                }
+            }
+            continue;
+        }
+
+        // Entity parsing
+        if (st->in_entity) {
+            if (c == ';') {
+                out_len = stream_flush_entity(st, out, out_size, out_len);
+                continue;
+            }
+            if (c == '<' || c == '&' || (st->entity_len + 1 >= sizeof(st->entity))) {
+                // Give up; emit nothing for unknown/partial entity
+                st->in_entity = false;
+                st->entity_len = 0;
+                // Re-handle this character normally
+            } else {
+                st->entity[st->entity_len++] = c;
+                continue;
+            }
+        }
+
+        if (st->in_tag) {
+            // Detect comment start: "<!--"
+            if (st->tag_len == 0 && c == '!') {
+                st->tag_name[st->tag_len++] = '!';
+                continue;
+            }
+            if (st->tag_len == 1 && st->tag_name[0] == '!' && c == '-') {
+                st->tag_name[st->tag_len++] = '-';
+                continue;
+            }
+            if (st->tag_len == 2 && st->tag_name[0] == '!' && st->tag_name[1] == '-' && c == '-') {
+                st->in_comment = true;
+                st->comment_state = 0;
+                continue;
+            }
+
+            if (st->tag_len == 0 && c == '/') {
+                st->tag_is_close = true;
+                continue;
+            }
+
+            if (c == '>') {
+                out_len = stream_handle_tag_end(st, out, out_size, out_len);
+                continue;
+            }
+
+            // Capture tag name (up to whitespace or '/')
+            if (st->tag_len < (sizeof(st->tag_name) - 1)) {
+                if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '/') {
+                    // stop collecting
+                } else {
+                    st->tag_name[st->tag_len++] = (char)tolower((unsigned char)c);
+                }
+            }
+            continue;
+        }
+
+        if (c == '<') {
+            // entering tag
+            st->in_tag = true;
+            st->tag_is_close = false;
+            st->tag_len = 0;
+            st->in_comment = false;
+            st->comment_state = 0;
+            continue;
+        }
+
+        if (c == '&') {
+            st->in_entity = true;
+            st->entity_len = 0;
+            continue;
+        }
+
+        if (c == '\r' || c == '\n' || c == '\t' || c == ' ') {
+            out_len = stream_emit_space(st, out, out_size, out_len);
+            continue;
+        }
+
+        // Normal character
+        out_len = append_byte(out, out_size, out_len, c);
+        st->wrote_space = false;
+
+        if (out_len + 2 >= out_size) {
+            break;
+        }
+    }
+
+    // Don't flush partial entity at chunk end; keep it for next chunk.
+    return out_len;
+}
 
 struct epub_html_parser {
     char *content;
