@@ -8,6 +8,7 @@
 #include "font_cache.h"
 #include "sdkconfig.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -15,6 +16,10 @@
 #include <sys/stat.h>
 
 static const char *TAG = "XT_FONT_IMPL";
+
+// NVS配置
+static const char *NVS_NAMESPACE = "font_settings";
+static const char *NVS_KEY_FONT_PATH = "font_path";
 
 // 字体上下文
 static xt_eink_font_t *s_font = NULL;
@@ -228,13 +233,98 @@ int xt_eink_font_utf8_to_utf32(const char *utf8, uint32_t *out_utf32)
     return 0;
 }
 
+/**
+ * @brief 从NVS加载用户选择的字体路径
+ * @param buffer 输出缓冲区
+ * @param buffer_size 缓冲区大小
+ * @return true 成功加载，false 无保存的设置
+ */
+static bool load_font_path_from_nvs(char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return false;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to open NVS: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    size_t required_size = buffer_size;
+    err = nvs_get_str(handle, NVS_KEY_FONT_PATH, buffer, &required_size);
+    if (err != ESP_OK) {
+        nvs_close(handle);
+        ESP_LOGW(TAG, "Failed to get font path from NVS: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    nvs_close(handle);
+    ESP_LOGI(TAG, "Loaded font path from NVS: %s", buffer);
+    return true;
+}
+
+/**
+ * @brief 尝试打开指定路径的字体
+ */
+static bool try_open_font(const char *path)
+{
+    if (path == NULL || path[0] == '\0') {
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Trying to load font: %s", path);
+    s_font = xt_eink_font_open(path);
+    if (s_font != NULL) {
+        ESP_LOGI(TAG, "Font loaded successfully: %s", path);
+
+        // 保存字体路径
+        strncpy(s_loaded_font_path, path, sizeof(s_loaded_font_path) - 1);
+        s_loaded_font_path[sizeof(s_loaded_font_path) - 1] = '\0';
+
+        // 初始化智能缓存系统
+        if (!font_cache_init(path)) {
+            ESP_LOGW(TAG, "Font cache init failed, will use direct SD card access");
+        } else {
+            uint32_t cached_chars = 0;
+            font_cache_get_stats(NULL, NULL, &cached_chars);
+            ESP_LOGI(TAG, "Font cache ready: %lu common chars in Flash", (unsigned long)cached_chars);
+        }
+
+        // 自检：读取几个常见汉字的位图
+        const uint32_t probe_chars[] = { 0x6587u /* 文 */, 0x8BBEu /* 设 */, 0x7F6Eu /* 置 */ };
+        for (size_t k = 0; k < sizeof(probe_chars) / sizeof(probe_chars[0]); k++) {
+            const uint8_t *bmp = xt_eink_font_get_bitmap(s_font, probe_chars[k]);
+            if (bmp != NULL) {
+                uint32_t bits = count_bits_set(bmp, s_font->glyph_size > 64 ? 64 : s_font->glyph_size);
+                ESP_LOGI(TAG, "Probe U+%04lX bits_set=%lu", (unsigned long)probe_chars[k], (unsigned long)bits);
+            }
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
 bool xt_eink_font_init(void)
 {
     if (s_font != NULL) {
         return true;  // 已初始化
     }
 
-    // 尝试加载默认字体（优先使用带像素尺寸的 raw 字体文件名）
+    // 1. 首先尝试从NVS加载用户选择的字体
+    char saved_font_path[128] = {0};
+    if (load_font_path_from_nvs(saved_font_path, sizeof(saved_font_path))) {
+        if (try_open_font(saved_font_path)) {
+            return true;
+        }
+        // NVS中的字体文件不存在或损坏，回退到默认字体
+        ESP_LOGW(TAG, "Saved font not available, falling back to default fonts");
+    }
+
+    // 2. 尝试加载默认字体（优先使用带像素尺寸的 raw 字体文件名）
     // 注意：若 FATFS 未启用 LFN 或不支持 UTF-8 文件名，包含中文/"×" 的文件名可能 fopen 失败。
 #if defined(CONFIG_FATFS_LFN_NONE) && CONFIG_FATFS_LFN_NONE
     ESP_LOGW(TAG, "FATFS LFN is disabled (8.3 only). Long/Unicode filenames will fail. Enable CONFIG_FATFS_LFN_STACK/HEAP.");
@@ -261,51 +351,7 @@ bool xt_eink_font_init(void)
     };
 
     for (int i = 0; font_paths[i] != NULL; i++) {
-        ESP_LOGI(TAG, "Trying to load font: %s", font_paths[i]);
-        s_font = xt_eink_font_open(font_paths[i]);
-        if (s_font != NULL) {
-            ESP_LOGI(TAG, "Font loaded successfully: %s", font_paths[i]);
-
-            // 保存字体路径
-            strncpy(s_loaded_font_path, font_paths[i], sizeof(s_loaded_font_path) - 1);
-
-            // 初始化智能缓存系统
-            if (!font_cache_init(font_paths[i])) {
-                ESP_LOGW(TAG, "Font cache init failed, will use direct SD card access");
-            } else {
-                uint32_t cached_chars = 0;
-                font_cache_get_stats(NULL, NULL, &cached_chars);
-                ESP_LOGI(TAG, "Font cache ready: %lu common chars in Flash", (unsigned long)cached_chars);
-            }
-
-            // 自检：读取几个常见汉字的位图，统计置位数量，帮助判断是否读到了有效数据
-            const uint32_t probe_chars[] = { 0x6587u /* 文 */, 0x8BBEu /* 设 */, 0x7F6Eu /* 置 */ };
-            for (size_t k = 0; k < sizeof(probe_chars) / sizeof(probe_chars[0]); k++) {
-                const uint8_t *bmp = xt_eink_font_get_bitmap(s_font, probe_chars[k]);
-                if (bmp == NULL) {
-                    ESP_LOGW(TAG, "Probe U+%04lX bitmap=NULL (w=%u h=%u glyph=%u)",
-                             (unsigned long)probe_chars[k],
-                             (unsigned int)s_font->width, (unsigned int)s_font->height,
-                             (unsigned int)s_font->glyph_size);
-                    continue;
-                }
-                size_t sample_len = s_font->glyph_size;
-                if (sample_len > 64) {
-                    sample_len = 64;
-                }
-                uint32_t bits = count_bits_set(bmp, sample_len);
-                ESP_LOGI(TAG, "Probe U+%04lX bits_set(first %u bytes)=%lu (w=%u h=%u glyph=%u)",
-                         (unsigned long)probe_chars[k], (unsigned int)sample_len, (unsigned long)bits,
-                         (unsigned int)s_font->width, (unsigned int)s_font->height,
-                         (unsigned int)s_font->glyph_size);
-            }
-
-            // 显示缓存统计
-            uint32_t hits = 0, misses = 0;
-            font_cache_get_stats(&hits, &misses, NULL);
-            ESP_LOGI(TAG, "Cache stats after probe: hits=%lu, misses=%lu", 
-                     (unsigned long)hits, (unsigned long)misses);
-
+        if (try_open_font(font_paths[i])) {
             return true;
         }
     }
@@ -465,4 +511,53 @@ int xt_eink_font_get_height(void)
         return 0;
     }
     return s_font->height;
+}
+
+const char *xt_eink_font_get_current_path(void)
+{
+    return s_loaded_font_path[0] != '\0' ? s_loaded_font_path : NULL;
+}
+
+void xt_eink_font_set_current_path(const char *path)
+{
+    if (path != NULL) {
+        strncpy(s_loaded_font_path, path, sizeof(s_loaded_font_path) - 1);
+        s_loaded_font_path[sizeof(s_loaded_font_path) - 1] = '\0';
+    } else {
+        s_loaded_font_path[0] = '\0';
+    }
+}
+
+bool xt_eink_font_reload(const char *path)
+{
+    if (path == NULL) {
+        return false;
+    }
+
+    // 关闭旧字体
+    if (s_font != NULL) {
+        xt_eink_font_close(s_font);
+        s_font = NULL;
+    }
+
+    font_cache_cleanup();
+
+    // 打开新字体
+    s_font = xt_eink_font_open(path);
+    if (s_font == NULL) {
+        ESP_LOGE(TAG, "Failed to reload font: %s", path);
+        return false;
+    }
+
+    // 更新保存的路径
+    strncpy(s_loaded_font_path, path, sizeof(s_loaded_font_path) - 1);
+    s_loaded_font_path[sizeof(s_loaded_font_path) - 1] = '\0';
+
+    // 初始化缓存
+    if (!font_cache_init(path)) {
+        ESP_LOGW(TAG, "Font cache init failed after reload");
+    }
+
+    ESP_LOGI(TAG, "Font reloaded: %s", path);
+    return true;
 }

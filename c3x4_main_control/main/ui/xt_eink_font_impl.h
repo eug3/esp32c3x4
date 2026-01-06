@@ -95,6 +95,25 @@ int xt_eink_font_get_text_width(const char *text);
 int xt_eink_font_get_height(void);
 
 /**
+ * @brief 获取当前字体路径
+ * @return 当前字体路径字符串
+ */
+const char *xt_eink_font_get_current_path(void);
+
+/**
+ * @brief 设置当前字体路径（不重新加载）
+ * @param path 字体文件路径
+ */
+void xt_eink_font_set_current_path(const char *path);
+
+/**
+ * @brief 重新加载字体（用于切换字体后）
+ * @param path 字体文件路径
+ * @return true 成功，false 失败
+ */
+bool xt_eink_font_reload(const char *path);
+
+/**
  * @brief UTF-8 转换为 UTF-32
  * @param utf8 UTF-8 字符串指针
  * @param out_utf32 输出 UTF-32 字符

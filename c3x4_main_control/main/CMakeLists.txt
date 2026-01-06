@@ -71,7 +71,7 @@ idf_component_register(SRCS
                        "ui/gb18030_conv.c"
 
                        ${EPUB_PARSER_SOURCES}
-                       PRIV_REQUIRES spi_flash esp_driver_gpio esp_driver_spi driver esp_wifi nvs_flash fatfs littlefs esp_adc esp_timer
+                       PRIV_REQUIRES spi_flash esp_driver_gpio esp_driver_spi driver esp_wifi nvs_flash fatfs littlefs esp_adc esp_timer bt
                        INCLUDE_DIRS "." "Fonts" "ui" "lib/tjpgd" "lib/pngdec")
 
 # Disable type-limits warning for GUI_Paint.c

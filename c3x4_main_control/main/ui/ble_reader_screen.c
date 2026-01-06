@@ -323,8 +323,8 @@ static void on_draw(screen_t *screen)
             // 直接拷贝位图数据到帧缓冲
             // 注意：实际映射取决于位图格式和硬件配置
             uint16_t copy_len = (SCREEN_WIDTH * SCREEN_HEIGHT) / 8;  // 1-bit format
-            if (copy_len > BLE_BITMAP_PAGE_SIZE) {
-                copy_len = BLE_BITMAP_PAGE_SIZE;
+            if (copy_len > BLE_BITMAP_SIZE) {
+                copy_len = BLE_BITMAP_SIZE;
             }
             
             memcpy(framebuffer, s_ble_state.page_buffer, copy_len);

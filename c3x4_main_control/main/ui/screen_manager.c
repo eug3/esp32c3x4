@@ -25,6 +25,7 @@ extern screen_t g_reader_screen;
 extern screen_t g_settings_screen;
 extern screen_t g_image_viewer_screen;
 extern screen_t g_ble_reader_screen;
+extern screen_t g_font_select_screen;
 
 /**********************
  *  STATIC PROTOTYPES
@@ -364,4 +365,9 @@ void screen_manager_show_image_browser(const char *file_path)
 bool screen_manager_go_back(void)
 {
     return screen_manager_back();
+}
+
+void screen_manager_show_font_select(void)
+{
+    screen_manager_show("font_select");
 }

@@ -215,7 +215,7 @@ int32_t ble_cache_get_min_page(uint16_t book_id)
 
     while ((entry = readdir(dir)) != NULL) {
         if (strncmp(entry->d_name, prefix, strlen(prefix)) == 0) {
-            uint32_t page = 0;
+            unsigned int page = 0;
             sscanf(entry->d_name + strlen(prefix), "%u", &page);
             if (page < min_page) {
                 min_page = page;
@@ -245,7 +245,7 @@ int32_t ble_cache_get_max_page(uint16_t book_id)
 
     while ((entry = readdir(dir)) != NULL) {
         if (strncmp(entry->d_name, prefix, strlen(prefix)) == 0) {
-            uint32_t page = 0;
+            unsigned int page = 0;
             sscanf(entry->d_name + strlen(prefix), "%u", &page);
             if (page > max_page) {
                 max_page = page;
@@ -277,12 +277,12 @@ uint32_t ble_cache_cleanup_outside_range(uint16_t book_id,
 
     while ((entry = readdir(dir)) != NULL) {
         if (strncmp(entry->d_name, prefix, strlen(prefix)) == 0) {
-            uint32_t page = 0;
+            unsigned int page = 0;
             sscanf(entry->d_name + strlen(prefix), "%u", &page);
-            
+
             // 删除范围外的页面
             if (page < min_page || page > max_page) {
-                char filename[64];
+                char filename[320];
                 snprintf(filename, sizeof(filename), "%s/%s", BLE_CACHE_DIR, entry->d_name);
                 if (remove(filename) == 0) {
                     deleted_count++;
@@ -314,7 +314,7 @@ uint32_t ble_cache_clear_book(uint16_t book_id)
 
     while ((entry = readdir(dir)) != NULL) {
         if (strncmp(entry->d_name, prefix, strlen(prefix)) == 0) {
-            char filename[64];
+            char filename[320];
             snprintf(filename, sizeof(filename), "%s/%s", BLE_CACHE_DIR, entry->d_name);
             if (remove(filename) == 0) {
                 deleted_count++;
@@ -343,7 +343,7 @@ uint32_t ble_cache_clear_all(void)
 
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_type == DT_REG && strstr(entry->d_name, ".bin") != NULL) {
-            char filename[64];
+            char filename[320];
             snprintf(filename, sizeof(filename), "%s/%s", BLE_CACHE_DIR, entry->d_name);
             if (remove(filename) == 0) {
                 deleted_count++;
@@ -376,7 +376,7 @@ bool ble_cache_get_stats(ble_cache_stats_t *stats)
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_type == DT_REG && strstr(entry->d_name, ".bin") != NULL) {
-            char filename[64];
+            char filename[320];
             snprintf(filename, sizeof(filename), "%s/%s", BLE_CACHE_DIR, entry->d_name);
             
             struct stat st;

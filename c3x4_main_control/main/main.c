@@ -35,6 +35,7 @@
 #include "ble_reader_screen.h"
 #include "ble_manager.h"
 #include "input_handler.h"
+#include "font_select_screen.h"
 
 // ============================================================================
 // Xteink X4 引脚定义 - 参考 examples/xteink-x4-sample
@@ -532,12 +533,14 @@ void app_main(void)
     image_viewer_screen_init();  // 初始化图片浏览器
     reader_screen_init();  // 初始化阅读器
     ble_reader_screen_init();  // 初始化蓝牙读书屏幕
+    font_select_screen_init();  // 初始化字体选择屏幕
     screen_manager_register(home_screen_get_instance());
     screen_manager_register(settings_screen_simple_get_instance());
     screen_manager_register(file_browser_screen_get_instance());
     screen_manager_register(image_viewer_screen_get_instance());  // 注册图片浏览器
     screen_manager_register(reader_screen_get_instance());  // 注册阅读器
     screen_manager_register(ble_reader_screen_get_instance());  // 注册蓝牙读书屏幕
+    screen_manager_register(font_select_screen_get_instance());  // 注册字体选择屏幕
 
     // 显示主屏幕
     ESP_LOGI("MAIN", "Showing home screen...");

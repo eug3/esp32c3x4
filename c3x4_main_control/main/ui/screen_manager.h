@@ -206,4 +206,9 @@ void screen_manager_show_image_browser(const char *file_path);
  */
 bool screen_manager_go_back(void);
 
+/**
+ * @brief 显示字体选择屏幕
+ */
+void screen_manager_show_font_select(void);
+
 #endif // SCREEN_MANAGER_H
