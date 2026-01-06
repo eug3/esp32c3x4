@@ -24,6 +24,7 @@ extern screen_t g_file_browser_screen;
 extern screen_t g_reader_screen;
 extern screen_t g_settings_screen;
 extern screen_t g_image_viewer_screen;
+extern screen_t g_ble_reader_screen;
 
 /**********************
  *  STATIC PROTOTYPES
@@ -333,6 +334,11 @@ void screen_manager_show_file_browser(void)
 void screen_manager_show_settings(void)
 {
     screen_manager_show("settings");
+}
+
+void screen_manager_show_ble_reader(void)
+{
+    screen_manager_show("ble_reader");
 }
 
 void screen_manager_show_reader(const char *file_path)

@@ -11,6 +11,7 @@
 // 菜单项
 typedef enum {
     MENU_ITEM_FILE_BROWSER = 0,  // 文件浏览器
+    MENU_ITEM_BLE_READER,         // 蓝牙读书
     MENU_ITEM_SETTINGS,           // 设置
     MENU_ITEM_COUNT
 } menu_item_t;

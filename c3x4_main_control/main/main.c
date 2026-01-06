@@ -1,8 +1,6 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <string.h>
-#include <time.h>
-#include <dirent.h>
 #include <sys/stat.h>
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
@@ -13,12 +11,8 @@
 #include "esp_system.h"
 #include "esp_mac.h"
 #include "esp_sleep.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
-#include "lwip/err.h"
-#include "lwip/sys.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "driver/sdspi_host.h"
@@ -38,6 +32,8 @@
 #include "file_browser_screen.h"
 #include "image_viewer_screen.h"
 #include "reader_screen_simple.h"
+#include "ble_reader_screen.h"
+#include "ble_manager.h"
 #include "input_handler.h"
 
 // ============================================================================
@@ -66,20 +62,10 @@
 #define POWER_BUTTON_WAKEUP_MS    1000  // 从睡眠唤醒需要按下时间
 #define POWER_BUTTON_SLEEP_MS     1000  // 进入睡眠需要按下时间
 
-// 电池监测 - ESP-IDF 6.1 新 API
+// ADC 校准
 adc_oneshot_unit_handle_t adc1_handle = NULL;
 static adc_cali_handle_t adc1_cali_handle = NULL;
 static bool do_calibration = true;
-
-// 按钮状态
-static volatile button_t current_pressed_button = BTN_NONE;
-
-// Define driver selection
-#define TEST_DRIVER_SSD1677 1
-#define TEST_DRIVER_GDEQ0426T82 2
-#define TEST_DRIVER_SSD1681 3
-
-#define CURRENT_DRIVER TEST_DRIVER_SSD1681  // Change this to test different drivers
 
 // Forward declarations
 esp_err_t sd_card_init(void);
@@ -257,109 +243,6 @@ static uint8_t read_battery_percentage(void) {
     return (voltage_mv - 3000) * 100 / (4200 - 3000);
 }
 
-// WiFi event handler
-static void wifi_event_handler(void* arg, esp_event_base_t event_base,
-                               int32_t event_id, void* event_data)
-{
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        ESP_LOGI("WIFI", "WiFi station started, connecting to AP...");
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGI("WIFI", "WiFi disconnected, retrying to connect to the AP");
-        esp_wifi_connect();
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI("WIFI", "WiFi connected successfully!");
-        ESP_LOGI("WIFI", "IP Address: " IPSTR, IP2STR(&event->ip_info.ip));
-    }
-}
-
-// WiFi initialization function
-// 注意：在 4 灰度模式下帧缓冲更大（96KB），WiFi 初始化可能因内存不足失败。
-// 不要 ESP_ERROR_CHECK 直接 abort，改为返回错误让系统继续运行。
-esp_err_t wifi_init_sta(void)
-{
-    ESP_LOGI("WIFI", "Initializing WiFi in station mode...");
-    esp_err_t err;
-
-    err = esp_netif_init();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE("WIFI", "esp_netif_init failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    err = esp_event_loop_create_default();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE("WIFI", "esp_event_loop_create_default failed: %s", esp_err_to_name(err));
-        return err;
-    }
-    esp_netif_create_default_wifi_sta();
-
-    // 优化WiFi配置以减少内存使用(ESP32-C3只有100KB RAM)
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    // 减少RX缓冲区(默认10→4,节省约6KB)
-    cfg.static_rx_buf_num = 4;     // 从默认10减到4
-    cfg.dynamic_rx_buf_num = 8;    // 从默认32减到8
-    cfg.dynamic_tx_buf_num = 8;    // 从默认32减到8
-    cfg.tx_buf_type = 1;           // 使用动态分配
-    cfg.cache_tx_buf_num = 1;      // 减少缓存
-    
-    err = esp_wifi_init(&cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE("WIFI", "esp_wifi_init failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    // Register event handlers
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    err = esp_event_handler_instance_register(WIFI_EVENT,
-                                              ESP_EVENT_ANY_ID,
-                                              &wifi_event_handler,
-                                              NULL,
-                                              &instance_any_id);
-    if (err != ESP_OK) {
-        ESP_LOGE("WIFI", "register WIFI_EVENT handler failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    err = esp_event_handler_instance_register(IP_EVENT,
-                                              IP_EVENT_STA_GOT_IP,
-                                              &wifi_event_handler,
-                                              NULL,
-                                              &instance_got_ip);
-    if (err != ESP_OK) {
-        ESP_LOGE("WIFI", "register IP_EVENT handler failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    // Simple WiFi config — updated with requested credentials
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = "foxwifi-plus",
-            .password = "epdc1984",
-        },
-    };
-    err = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (err != ESP_OK) {
-        ESP_LOGE("WIFI", "esp_wifi_set_mode failed: %s", esp_err_to_name(err));
-        return err;
-    }
-    err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-    if (err != ESP_OK) {
-        ESP_LOGE("WIFI", "esp_wifi_set_config failed: %s", esp_err_to_name(err));
-        return err;
-    }
-    err = esp_wifi_start();
-    if (err != ESP_OK) {
-        ESP_LOGE("WIFI", "esp_wifi_start failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    ESP_LOGI("WIFI", "WiFi initialization completed. Connecting...");
-    return ESP_OK;
-}
-
 // SD card initialization function
 esp_err_t sd_card_init(void)
 {
@@ -512,8 +395,6 @@ void sd_card_test_read_write(const char *mount_point)
 }
 
 // Save received image to SD card
-
-
 static void ui_button_event_cb(button_t btn, button_event_t event, void *user_data)
 {
     (void)user_data;
@@ -650,11 +531,13 @@ void app_main(void)
     file_browser_screen_init();
     image_viewer_screen_init();  // 初始化图片浏览器
     reader_screen_init();  // 初始化阅读器
+    ble_reader_screen_init();  // 初始化蓝牙读书屏幕
     screen_manager_register(home_screen_get_instance());
     screen_manager_register(settings_screen_simple_get_instance());
     screen_manager_register(file_browser_screen_get_instance());
     screen_manager_register(image_viewer_screen_get_instance());  // 注册图片浏览器
     screen_manager_register(reader_screen_get_instance());  // 注册阅读器
+    screen_manager_register(ble_reader_screen_get_instance());  // 注册蓝牙读书屏幕
 
     // 显示主屏幕
     ESP_LOGI("MAIN", "Showing home screen...");

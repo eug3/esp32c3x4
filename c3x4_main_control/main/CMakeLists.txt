@@ -36,6 +36,10 @@ idf_component_register(SRCS
                        "ui/file_browser_screen.c"
                        "ui/reader_screen_simple.c"
                        "ui/image_viewer_screen.c"
+                       "ui/ble_reader_screen.c"
+                       "ui/ble_manager.c"
+                       "ui/ble_book_protocol.c"
+                       "ui/ble_cache_manager.c"
 
                        # XTEink font (no LVGL dependency)
                        "ui/xt_eink_font.c"

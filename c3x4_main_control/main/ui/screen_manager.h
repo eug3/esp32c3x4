@@ -184,6 +184,11 @@ void screen_manager_show_file_browser(void);
 void screen_manager_show_settings(void);
 
 /**
+ * @brief 显示蓝牙读书屏幕（兼容旧 API）
+ */
+void screen_manager_show_ble_reader(void);
+
+/**
  * @brief 显示阅读器屏幕（兼容旧 API）
  * @param file_path 要打开的书籍文件路径
  */

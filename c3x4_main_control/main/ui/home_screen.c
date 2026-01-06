@@ -37,6 +37,7 @@ typedef struct {
 
 static const menu_info_t s_menu_items[MENU_ITEM_COUNT] = {
     [MENU_ITEM_FILE_BROWSER] = { .label = "文件", .icon = NULL },
+    [MENU_ITEM_BLE_READER] = { .label = "蓝牙读书", .icon = NULL },
     [MENU_ITEM_SETTINGS]       = { .label = "设置", .icon = NULL },
 };
 
@@ -458,6 +459,9 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
             switch (s_menu_state.selected_item) {
                 case MENU_ITEM_FILE_BROWSER:
                     screen_manager_show_file_browser();
+                    break;
+                case MENU_ITEM_BLE_READER:
+                    screen_manager_show_ble_reader();
                     break;
                 case MENU_ITEM_SETTINGS:
                     screen_manager_show_settings();
