@@ -183,12 +183,6 @@ static void on_draw(screen_t *screen)
     ESP_LOGI(TAG, "Drawing title...");
     display_draw_text_menu(20, title_y, "Monster For Pan", COLOR_BLACK, COLOR_WHITE);
 
-    // 绘制电池信息
-    char bat_str[32];
-    snprintf(bat_str, sizeof(bat_str), "电量: %u%%", s_context->battery_pct);
-    int bat_width = display_get_text_width_menu(bat_str);
-    display_draw_text_menu(SCREEN_WIDTH - bat_width - 20, title_y, bat_str, COLOR_BLACK, COLOR_WHITE);
-
     // 绘制版本信息
     if (s_context->version_str != NULL) {
         char ver_str[96];

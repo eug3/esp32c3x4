@@ -48,12 +48,18 @@ typedef enum {
  **********************/
 
 /**
+ * @brief 电池电量读取回调类型
+ */
+typedef uint8_t (*display_battery_read_t)(void);
+
+/**
  * @brief 显示引擎配置
  */
 typedef struct {
     bool use_partial_refresh;    // 是否使用局部刷新
     bool auto_refresh;            // 是否自动刷新（绘制完成后自动调用 EPD 刷新）
     refresh_mode_t default_mode;  // 默认刷新模式
+    display_battery_read_t read_battery_pct;  // 电池电量读取回调
 } display_config_t;
 
 /**
@@ -82,6 +88,12 @@ bool display_engine_init(const display_config_t *config);
  * @brief 反初始化显示引擎
  */
 void display_engine_deinit(void);
+
+/**
+ * @brief 设置电池电量读取回调
+ * @param read_battery 电池电量读取函数指针
+ */
+void display_set_battery_callback(display_battery_read_t read_battery);
 
 /**
  * @brief 清屏（使用指定颜色）

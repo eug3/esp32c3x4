@@ -106,11 +106,13 @@ static int jpeg_output_func(JDEC *jdec, void *bitmap, JRECT *rect)
             // 计算目标坐标
             const int dest_x = context->dest_x + (int)(src_x * context->x_scale);
 
-            // 直接写入 framebuffer（物理坐标，800x480，ROTATE_270）
+            // 直接写入 framebuffer（物理坐标，800x480，ROTATE_270 + 180度旋转）
             // 逻辑坐标 (dest_x, dest_y) -> 物理坐标需要转换
-            // ROTATE_270: logical(x,y) -> physical(479-y, x)
-            const int phys_x = 479 - dest_y;
-            const int phys_y = dest_x;
+            // 180度旋转: logical(x,y) -> logical'(799-x, 479-y)
+            // ROTATE_270: logical'(x',y') -> physical(479-y', x')
+            // 合并: physical_x = y, physical_y = 799 - x
+            const int phys_x = dest_y;
+            const int phys_y = 799 - dest_x;
 
             if (phys_x >= 0 && phys_x < 800 && phys_y >= 0 && phys_y < 480) {
                 const uint32_t byte_idx = phys_y * 100 + (phys_x / 8);
@@ -169,6 +171,31 @@ bool jpeg_helper_get_size(const uint8_t *jpeg_data, size_t jpeg_data_size,
     return res == JDR_OK;
 }
 
+/**
+ * @brief 计算 JPEG 解码所需的最小内存池大小
+ * 根据 TJPGD 文档，计算公式基于图片尺寸和 MCU 大小
+ */
+static size_t calculate_required_pool_size(int width, int height, uint8_t ncomp, uint8_t msx, uint8_t msy)
+{
+    // 基础大小: 输入缓冲区 + 霍夫曼表 + 量化表
+    size_t base_size = 512 + 256 + 64;
+
+    // MCU 相关缓冲区
+    // workbuf: n * 64 * 2 + 64 (至少 256 字节)
+    // mcubuf: (n + 2) * 64 * sizeof(jd_yuv_t)
+    // 对于 JD_FASTDECODE=1, jd_yuv_t = int16_t (2 bytes)
+    size_t n = msx * msy;
+    size_t workbuf_size = n * 128 + 64;
+    if (workbuf_size < 256) workbuf_size = 256;
+
+    size_t mcubuf_size = (n + 2) * 64 * 2;  // int16_t = 2 bytes
+
+    // 额外余量
+    size_t extra = 256;
+
+    return base_size + workbuf_size + mcubuf_size + extra;
+}
+
 bool jpeg_helper_render(const uint8_t *jpeg_data, size_t jpeg_data_size,
                         int x, int y, int width, int height, bool clear_bg)
 {
@@ -177,14 +204,45 @@ bool jpeg_helper_render(const uint8_t *jpeg_data, size_t jpeg_data_size,
         return false;
     }
 
-    // 分配内存池
-    void *pool = heap_caps_malloc(JPEG_HELPER_POOL_SIZE, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-    if (pool == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate memory pool (%d bytes)", JPEG_HELPER_POOL_SIZE);
+    // 首先获取图片尺寸
+    int img_width, img_height;
+    if (!jpeg_helper_get_size(jpeg_data, jpeg_data_size, &img_width, &img_height)) {
+        ESP_LOGE(TAG, "Failed to get JPEG size");
         return false;
     }
 
-    ESP_LOGI(TAG, "Allocated JPEG decode pool: %d bytes", JPEG_HELPER_POOL_SIZE);
+    // 计算所需内存池大小
+    // 默认使用 32KB，对于大多数图片足够
+    size_t required_pool = calculate_required_pool_size(img_width, img_height, 3, 1, 1);
+    if (required_pool < 4096) required_pool = 4096;  // 最小 4KB
+
+    // 尝试分配内存池（从 32KB 开始尝试，不够则递减）
+    size_t pool_sizes[] = {32768, 24576, 16384, 12288, 8192, 6144, 4096};
+    size_t num_sizes = sizeof(pool_sizes) / sizeof(pool_sizes[0]);
+
+    void *pool = NULL;
+    size_t allocated_size = 0;
+
+    for (size_t i = 0; i < num_sizes; i++) {
+        if (pool_sizes[i] < required_pool) {
+            ESP_LOGW(TAG, "Pool size %d < required %d, skipping", pool_sizes[i], required_pool);
+            continue;
+        }
+
+        pool = heap_caps_malloc(pool_sizes[i], MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+        if (pool != NULL) {
+            allocated_size = pool_sizes[i];
+            ESP_LOGI(TAG, "Allocated JPEG decode pool: %d bytes (required: %d)", allocated_size, required_pool);
+            break;
+        }
+
+        ESP_LOGW(TAG, "Failed to allocate %d bytes, trying smaller...", pool_sizes[i]);
+    }
+
+    if (pool == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate any memory pool for JPEG decoding");
+        return false;
+    }
 
     // 准备解码上下文
     jpeg_helper_t context = {0};
@@ -198,7 +256,7 @@ bool jpeg_helper_render(const uint8_t *jpeg_data, size_t jpeg_data_size,
 
     // 准备 JPEG 解码器
     JDEC dec;
-    JRESULT res = jd_prepare(&dec, jpeg_input_func, pool, JPEG_HELPER_POOL_SIZE, &context);
+    JRESULT res = jd_prepare(&dec, jpeg_input_func, pool, allocated_size, &context);
 
     if (res != JDR_OK) {
         ESP_LOGE(TAG, "Failed to prepare JPEG decoder: %d", res);

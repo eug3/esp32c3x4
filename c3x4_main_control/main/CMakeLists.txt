@@ -56,11 +56,23 @@ idf_component_register(SRCS
                        "ui/fonts/xt_eink_font_impl.c"
                        "ui/fonts/font_cache.c"
                        "ui/fonts/font_selector.c"
+                       "ui/fonts/font_partition.c"
 
                        # UI Image helpers
                        "ui/image/jpeg_helper.c"
                        "ui/image/bmp_helper.c"
                        "ui/image/png_helper.cpp"
+
+                       # Image libraries (tjpgd, PNGdec + bundled zlib)
+                       "lib/tjpgd/tjpgd.c"
+                       "lib/pngdec/PNGdec.cpp"
+                       "lib/pngdec/adler32.c"
+                       "lib/pngdec/crc32.c"
+                       "lib/pngdec/infback.c"
+                       "lib/pngdec/inffast.c"
+                       "lib/pngdec/inftrees.c"
+                       "lib/pngdec/inflate.c"
+                       "lib/pngdec/zutil.c"
 
                        # EPUB/TXT readers
                        "ui/epub/epub_parser.c"
@@ -71,15 +83,14 @@ idf_component_register(SRCS
                        "ui/txt/txt_reader.c"
                        "ui/txt/gb18030_conv.c"
 
-                       # Bluetooth (BLE API incompatible with IDF v5.5.2 - needs API migration)
-                       # "ui/ble/ble_reader_screen.c"
-                       # "ui/ble/ble_manager.c"
-                       # "ui/ble/ble_book_protocol.c"
-                       # "ui/ble/ble_cache_manager.c"
+                       # Bluetooth (NimBLE on ESP-IDF 6.1)
+                       "ui/ble/ble_manager.c"
+                       "ui/ble/ble_book_protocol.c"
+                       "ui/ble/ble_cache_manager.c"
 
                        "power_manager.c"
                        ${EPUB_PARSER_SOURCES}
-                       PRIV_REQUIRES spi_flash esp_driver_gpio esp_driver_spi driver esp_wifi nvs_flash fatfs littlefs esp_adc esp_timer vfs
+                       PRIV_REQUIRES spi_flash esp_driver_gpio esp_driver_spi driver esp_wifi nvs_flash fatfs littlefs esp_adc esp_timer vfs bt
                        INCLUDE_DIRS "." "Fonts" "ui" "ui/core" "ui/screens" "ui/boot" "ui/fonts" "ui/epub" "ui/txt" "ui/image" "ui/wallpaper" "ui/ble" "lib/tjpgd" "lib/pngdec")
 
 # Disable type-limits warning for GUI_Paint.c

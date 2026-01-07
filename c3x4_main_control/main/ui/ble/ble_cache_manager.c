@@ -14,7 +14,7 @@
 static const char *TAG = "BLE_CACHE";
 
 // 缓存目录路径
-#define BLE_CACHE_DIR "/data/ble_cache"
+#define BLE_CACHE_DIR "/littlefs/ble_pages"
 
 // 缓存预加载参数
 #define BLE_PRELOAD_THRESHOLD 2  // 剩余页数少于此值时触发预加载

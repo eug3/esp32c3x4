@@ -75,6 +75,7 @@ static bool do_calibration = true;
 // Forward declarations
 esp_err_t sd_card_init(void);
 void sd_card_test_read_write(const char *mount_point);
+uint8_t get_battery_percentage_for_display(void);
 
 #define SDCARD_MOUNT_POINT "/sdcard"
 #define SPI_DMA_CHAN    1
@@ -246,6 +247,11 @@ static uint8_t read_battery_percentage(void) {
     if (voltage_mv < 3000) return 0;
     if (voltage_mv > 4200) return 100;
     return (voltage_mv - 3000) * 100 / (4200 - 3000);
+}
+
+// 供显示引擎使用的电池电量获取函数
+uint8_t get_battery_percentage_for_display(void) {
+    return read_battery_percentage();
 }
 
 // SD card initialization function
@@ -463,6 +469,9 @@ void app_main(void)
     if (!display_ok) {
         ESP_LOGE("MAIN", "Display engine init failed!");
     } else {
+        // 设置电池电量回调（用于在刷新时显示电量）
+        display_set_battery_callback(get_battery_percentage_for_display);
+
         // 第一次：全刷成全白，用于清残影/确保背景干净
         display_clear(COLOR_WHITE);
         display_refresh(REFRESH_MODE_FULL);
@@ -573,7 +582,7 @@ void app_main(void)
     file_browser_screen_init();
     image_viewer_screen_init();  // 初始化图片浏览器
     reader_screen_init();  // 初始化阅读器
-    // ble_reader_screen_init();  // 初始化蓝牙读书屏幕 (BLE API incompatible with IDF v5.5.2)
+    ble_reader_screen_init();  // 初始化蓝牙读书屏幕
     font_select_screen_init();  // 初始化字体选择屏幕
     screen_manager_register(boot_screen_get_instance());  // 注册启动屏幕
     screen_manager_register(home_screen_get_instance());
@@ -582,7 +591,7 @@ void app_main(void)
     screen_manager_register(file_browser_screen_get_instance());
     screen_manager_register(image_viewer_screen_get_instance());  // 注册图片浏览器
     screen_manager_register(reader_screen_get_instance());  // 注册阅读器
-    // screen_manager_register(ble_reader_screen_get_instance());  // 注册蓝牙读书屏幕 (BLE disabled)
+    screen_manager_register(ble_reader_screen_get_instance());  // 注册蓝牙读书屏幕
     screen_manager_register(font_select_screen_get_instance());  // 注册字体选择屏幕
 
     // ============================================================================

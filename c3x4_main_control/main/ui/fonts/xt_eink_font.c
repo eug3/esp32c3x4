@@ -5,6 +5,7 @@
 
 #include "xt_eink_font.h"
 #include "font_cache.h"
+#include "font_partition.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include <dirent.h>
@@ -17,6 +18,10 @@ static const char *TAG = "XT_EINK_FONT";
 
 // fontdecode.cs 格式：固定 0x10000 个字形（U+0000..U+FFFF），无文件头
 #define XT_EINK_TOTAL_CHARS 0x10000u
+
+// SD卡访问状态缓存（避免重复检查）
+static bool s_sdcard_checked = false;
+static bool s_sdcard_accessible = false;
 
 // 字形位图缓冲区（临时缓存，用于从文件读取）
 static uint8_t *g_glyph_buffer = NULL;
@@ -413,7 +418,22 @@ static bool read_glyph_from_file(xt_eink_font_t *font, uint32_t unicode, uint8_t
         ESP_LOGD(TAG, "Font cache miss for U+%04X, fallback to direct file read", unicode);
     }
 
-    // 兜底：直接从原文件读取
+    // 兜底：尝试从字体分区读取，如果失败则从文件读取
+    if (font_partition_is_available()) {
+        size_t bytes_read = font_partition_read_glyph(unicode, bitmap, font->header.glyph_size);
+        if (bytes_read > 0) {
+            return true;
+        }
+        // 字体分区读取失败，继续尝试从文件读取
+        ESP_LOGD(TAG, "Font partition read failed for U+%04X, trying file", unicode);
+    }
+    
+    // 最终兜底：直接从原文件读取（需要 SD 卡）
+    if (font->fp == NULL) {
+        ESP_LOGW(TAG, "No file handle and partition unavailable for U+%04X", unicode);
+        return false;
+    }
+    
     // fontdecode.cs 格式：无文件头，直接按 unicode 索引
     uint32_t glyph_index = unicode - font->header.first_char;
     uint32_t offset = glyph_index * font->header.glyph_size;
@@ -447,16 +467,36 @@ xt_eink_font_t *xt_eink_font_open(const char *path)
         return NULL;
     }
 
+    // 检查SD卡是否可访问（缓存结果，避免重复检查）
+    if (!s_sdcard_checked) {
+        struct stat st;
+        s_sdcard_accessible = (stat("/sdcard", &st) == 0);
+        s_sdcard_checked = true;
+        if (!s_sdcard_accessible) {
+            ESP_LOGW(TAG, "SD card not mounted at /sdcard - font loading will fail");
+        }
+    }
+
     // 检查文件是否存在
     FILE *fp = fopen(path, "rb");
     if (fp == NULL) {
         int err = errno;
+        // 只输出错误信息，不做详细诊断（避免大量日志）
         ESP_LOGE(TAG, "Failed to open font file: %s (errno=%d: %s)", path, err, strerror(err));
-        log_stat_result("/sdcard");
-        log_stat_result("/sdcard/fonts");
-        log_stat_result(path);
-        dump_dir_limited("/sdcard", 24);
-        dump_dir_limited("/sdcard/fonts", 48);
+        // 只在SD卡不可访问且是第一次打印详细信息时输出诊断
+        if (!s_sdcard_accessible) {
+            static bool first_diagnostic = true;
+            if (first_diagnostic) {
+                log_stat_result("/sdcard");
+                log_stat_result("/sdcard/fonts");
+                dump_dir_limited("/sdcard", 24);
+                dump_dir_limited("/sdcard/fonts", 48);
+                first_diagnostic = false;
+            }
+        } else {
+            // SD卡可访问但文件不存在，输出路径检查
+            log_stat_result(path);
+        }
         return NULL;
     }
 

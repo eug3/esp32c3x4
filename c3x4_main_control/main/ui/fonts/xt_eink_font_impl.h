@@ -39,6 +39,11 @@ typedef struct {
 bool xt_eink_font_init(void);
 
 /**
+ * @brief 释放字体系统资源
+ */
+void xt_eink_font_deinit(void);
+
+/**
  * @brief 检查字符是否在字体中
  * @param ch UTF-32 字符
  * @return true 存在，false 不存在

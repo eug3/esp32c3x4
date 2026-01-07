@@ -303,12 +303,6 @@ static void on_draw(screen_t *screen)
     }
     display_draw_text_menu(20, status_y, status_str, COLOR_BLACK, COLOR_WHITE);
 
-    // 绘制电池信息
-    char bat_str[32];
-    snprintf(bat_str, sizeof(bat_str), "Battery: %u%%", s_context->battery_pct);
-    int bat_width = display_get_text_width_menu(bat_str);
-    display_draw_text_menu(SCREEN_WIDTH - bat_width - 20, title_y, bat_str, COLOR_BLACK, COLOR_WHITE);
-
     // 绘制页面内容
     if (s_ble_state.page_loaded && s_ble_state.page_buffer != NULL) {
         // 位图数据应该是预格式化的原始像素数据（8位灰度或1位黑白）
@@ -419,13 +413,13 @@ static void on_show(screen_t *screen)
     s_context = screen_manager_get_context();
     screen->needs_redraw = true;
 
-    // 初始化页面缓冲区
+    // 初始化页面缓冲区（仅用于显示，不再用于BLE接收）
     if (!init_page_buffer()) {
         ESP_LOGE(TAG, "Failed to initialize page buffer");
         return;
     }
 
-    // 初始化蓝牙协议
+    // 初始化蓝牙协议（流式写入模式，无需外部缓冲）
     if (!ble_book_protocol_init()) {
         ESP_LOGE(TAG, "Failed to initialize BLE protocol");
         return;

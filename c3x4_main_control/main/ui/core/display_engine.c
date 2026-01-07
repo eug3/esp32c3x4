@@ -59,6 +59,9 @@ static sFONT* choose_ascii_font_by_cjk_height(void);
 static sFONT* choose_ascii_font_by_cjk_height_menu(void);
 static sFONT* choose_ascii_font_by_target_height(int target_height);
 
+// 电量显示相关
+static void draw_battery_to_framebuffer(void);
+
 /**********************
  *  STATIC FUNCTIONS
  **********************/
@@ -638,6 +641,14 @@ void display_engine_deinit(void)
     ESP_LOGI(TAG, "Display engine deinitialized");
 }
 
+void display_set_battery_callback(display_battery_read_t read_battery)
+{
+    lock_engine();
+    s_config.read_battery_pct = read_battery;
+    unlock_engine();
+    ESP_LOGI(TAG, "Battery callback %s", read_battery ? "set" : "cleared");
+}
+
 void display_clear(uint8_t color)
 {
     ESP_LOGI(TAG, "display_clear START: color=0x%02X", color);
@@ -679,6 +690,9 @@ void display_clear_region(int x, int y, int width, int height, uint8_t color)
 void display_refresh(refresh_mode_t mode)
 {
     lock_engine();
+
+    // 在刷新前绘制电量到帧缓存
+    draw_battery_to_framebuffer();
 
     ESP_LOGI(TAG, "Refreshing display (mode=%d)...", mode);
 
@@ -751,6 +765,9 @@ void display_refresh_region(int x, int y, int width, int height, refresh_mode_t 
     if (y + height > SCREEN_HEIGHT) height = SCREEN_HEIGHT - y;
 
     lock_engine();
+
+    // 在刷新前绘制电量到帧缓存
+    draw_battery_to_framebuffer();
 
     ESP_LOGI(TAG, "Refreshing region (logical): x=%d, y=%d, w=%d, h=%d (mode=%d)",
              x, y, width, height, mode);
@@ -1050,5 +1067,36 @@ void display_draw_bitmap_mask_1bpp(int x, int y, int width, int height,
 
     if (s_config.auto_refresh) {
         display_refresh(s_config.default_mode);
+    }
+}
+
+// 在帧缓存右上角绘制电量信息 "Battery: xxx"
+static void draw_battery_to_framebuffer(void)
+{
+    // 检查是否有电量读取回调
+    if (s_config.read_battery_pct == NULL) {
+        return;
+    }
+
+    // 读取电量值
+    uint8_t battery_pct = s_config.read_battery_pct();
+
+    // 格式化字符串 "Battery: xxx"（三位数字，不用百分号）
+    char bat_str[16];
+    snprintf(bat_str, sizeof(bat_str), "Battery: %03d", battery_pct);
+
+    // 使用菜单字体在右上角绘制
+    sFONT *font = display_get_menu_font();
+    int text_width = display_get_text_width_menu(bat_str);
+
+    // 计算位置（右上角）
+    int x = SCREEN_WIDTH - text_width - 10;
+    int y = 5;  // 顶部留一点边距
+
+    // 绘制文字到帧缓存
+    const int ascii_adv = (int)font->Width;
+    for (const char *p = bat_str; *p != '\0'; p++) {
+        Paint_DrawChar(x, y, *p, font, COLOR_BLACK, COLOR_WHITE);
+        x += ascii_adv;
     }
 }

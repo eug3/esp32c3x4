@@ -20,7 +20,9 @@
       "Bash(idf.py size:*)",
       "Bash(cat:*)",
       "Bash(idf.py:*)",
-      "Bash(source:*)"
+      "Bash(source:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ]
   }
 }

@@ -6,6 +6,7 @@
 #include "xt_eink_font_impl.h"
 #include "xt_eink_font.h"
 #include "font_cache.h"
+#include "font_partition.h"
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -343,28 +344,21 @@ static bool try_open_font(const char *path)
 
 bool xt_eink_font_init(void)
 {
-    if (s_font != NULL) {
-        return true;  // 已初始化
+    // 注意：避免重复初始化导致内存泄漏
+    // 但允许字体切换时重新加载
+    
+    // 初始化字体分区（优先级最高，无需 SD 卡）
+    if (font_partition_init()) {
+        ESP_LOGI(TAG, "Font partition initialized successfully");
+    } else {
+        ESP_LOGW(TAG, "Font partition not available, will use SD card");
     }
-
+    
     // 0) 先初始化菜单默认字体（必须固定为启动默认 19x25 字体，不受 NVS/用户字体影响）
     if (s_menu_default_font == NULL) {
+        // 只尝试标准路径，不尝试各种文件名变体
         const char *menu_font_paths[] = {
-            "/sdcard/fonts/msyh-14.25pt.19×25.bin",
-            "/sdcard/fonts/msyh-14.25pt.19x25.bin",
-            "/sdcard/fonts/MSYH-14.25PT.19X25.BIN",
-
-            "/sdcard/fonts/微软雅黑 14.25pt.19×25.bin",
-            "/sdcard/字体/微软雅黑 14.25pt.19×25.bin",
-
-            "/sdcard/fonts/msyh_14_25pt_19x25.bin",
-            "/sdcard/fonts/msyh_19x25.bin",
-            "/sdcard/fonts/msyh19x25.bin",
-            "/sdcard/fonts/MSYH1925.BIN",
-
-            "/fonts/msyh-14.bin",
-            "/sdcard/fonts/msyh-14.bin",
-            "/sdcard/字体/msyh-14.bin",
+            "/sdcard/fonts/msyh-14.25pt.19x25.bin",  // 标准路径
             NULL
         };
 
@@ -379,6 +373,7 @@ bool xt_eink_font_init(void)
             }
         }
 
+        // 如果标准路径不存在，扫描目录找最佳字体
         if (s_menu_default_font == NULL) {
             char best_path[192] = {0};
             uint32_t best_char_byte = 0;
@@ -398,6 +393,14 @@ bool xt_eink_font_init(void)
     // 1. 然后尝试从NVS加载用户选择的字体（仅影响阅读器字体）
     char saved_font_path[128] = {0};
     bool loaded = false;
+    
+    // 如果已经加载了用户字体且与菜单字体不同，需要先释放
+    if (s_font != NULL && s_font != s_menu_default_font) {
+        ESP_LOGI(TAG, "Releasing previous user font before reload");
+        xt_eink_font_close(s_font);
+        s_font = NULL;
+        memset(s_loaded_font_path, 0, sizeof(s_loaded_font_path));
+    }
     
     if (load_font_path_from_nvs(saved_font_path, sizeof(saved_font_path))) {
         if (try_open_font(saved_font_path)) {
@@ -686,4 +689,30 @@ bool xt_eink_font_reload(const char *path)
 
     ESP_LOGI(TAG, "Font reloaded: %s", path);
     return true;
+}
+
+void xt_eink_font_deinit(void)
+{
+    // 释放用户字体（如果与菜单字体不同）
+    if (s_font != NULL && s_font != s_menu_default_font) {
+        ESP_LOGI(TAG, "Closing user font: %s", s_loaded_font_path);
+        xt_eink_font_close(s_font);
+        s_font = NULL;
+    } else if (s_font != NULL) {
+        // 如果用户字体等于菜单字体，只清除引用不关闭
+        s_font = NULL;
+    }
+    
+    // 释放菜单默认字体
+    if (s_menu_default_font != NULL) {
+        ESP_LOGI(TAG, "Closing menu default font: %s", s_menu_font_path);
+        xt_eink_font_close(s_menu_default_font);
+        s_menu_default_font = NULL;
+    }
+    
+    // 清除路径缓存
+    memset(s_loaded_font_path, 0, sizeof(s_loaded_font_path));
+    memset(s_menu_font_path, 0, sizeof(s_menu_font_path));
+    
+    ESP_LOGI(TAG, "Font system deinitialized");
 }

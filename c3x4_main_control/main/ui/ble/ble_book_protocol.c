@@ -17,11 +17,12 @@ typedef struct {
     bool initialized;
     ble_page_ready_cb page_ready_cb;
     
-    // 当前接收状态
+    // 当前接收状态（流式写入）
     uint16_t current_book_id;
     uint16_t current_page_num;
     uint32_t received_bytes;
-    uint8_t *receive_buffer;  // 接收位图数据的临时缓冲区
+    FILE *current_file;       // 当前写入的文件句柄
+    char current_filename[64]; // 当前写入的文件路径
 } ble_protocol_state_t;
 
 static ble_protocol_state_t s_protocol_state = {
@@ -30,7 +31,8 @@ static ble_protocol_state_t s_protocol_state = {
     .current_book_id = 0,
     .current_page_num = 0,
     .received_bytes = 0,
-    .receive_buffer = NULL,
+    .current_file = NULL,
+    .current_filename = {0},
 };
 
 /**********************
@@ -38,37 +40,18 @@ static ble_protocol_state_t s_protocol_state = {
  **********************/
 
 /**
- * @brief 初始化接收缓冲区
+ * @brief 清空接收状态并关闭文件
  */
-static bool init_receive_buffer(void)
+static void clear_receive_state(void)
 {
-    if (s_protocol_state.receive_buffer != NULL) {
-        return true;  // 已初始化
+    if (s_protocol_state.current_file != NULL) {
+        fclose(s_protocol_state.current_file);
+        s_protocol_state.current_file = NULL;
     }
-
-    // 分配接收缓冲区
-    s_protocol_state.receive_buffer = (uint8_t *)heap_caps_malloc(BLE_BITMAP_SIZE, MALLOC_CAP_SPIRAM);
-    if (s_protocol_state.receive_buffer == NULL) {
-        s_protocol_state.receive_buffer = (uint8_t *)heap_caps_malloc(BLE_BITMAP_SIZE, MALLOC_CAP_8BIT);
-    }
-
-    if (s_protocol_state.receive_buffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate receive buffer (%u bytes)", BLE_BITMAP_SIZE);
-        return false;
-    }
-
-    ESP_LOGI(TAG, "Receive buffer allocated: %u bytes", BLE_BITMAP_SIZE);
-    return true;
-}
-
-/**
- * @brief 清空接收缓冲区
- */
-static void clear_receive_buffer(void)
-{
     s_protocol_state.received_bytes = 0;
     s_protocol_state.current_book_id = 0;
     s_protocol_state.current_page_num = 0;
+    memset(s_protocol_state.current_filename, 0, sizeof(s_protocol_state.current_filename));
 }
 
 /**********************
@@ -81,7 +64,7 @@ bool ble_book_protocol_init(void)
         return true;
     }
 
-    ESP_LOGI(TAG, "Initializing BLE book protocol...");
+    ESP_LOGI(TAG, "Initializing BLE book protocol (stream mode)...");
 
     // 初始化缓存管理器
     if (!ble_cache_init()) {
@@ -89,14 +72,8 @@ bool ble_book_protocol_init(void)
         return false;
     }
 
-    // 初始化接收缓冲区
-    if (!init_receive_buffer()) {
-        ble_cache_deinit();
-        return false;
-    }
-
     s_protocol_state.initialized = true;
-    ESP_LOGI(TAG, "BLE book protocol initialized");
+    ESP_LOGI(TAG, "BLE book protocol initialized (stream mode)");
     return true;
 }
 
@@ -108,16 +85,12 @@ void ble_book_protocol_deinit(void)
 
     ESP_LOGI(TAG, "Deinitializing BLE book protocol");
 
-    // 清理接收缓冲区
-    if (s_protocol_state.receive_buffer != NULL) {
-        heap_caps_free(s_protocol_state.receive_buffer);
-        s_protocol_state.receive_buffer = NULL;
-    }
+    // 关闭可能打开的文件
+    clear_receive_state();
 
     // 清理缓存管理器
     ble_cache_deinit();
 
-    clear_receive_buffer();
     s_protocol_state.initialized = false;
 }
 
@@ -167,69 +140,88 @@ bool ble_book_protocol_handle_data_chunk(const ble_data_pkt_header_t *header,
     if (header->page_num != s_protocol_state.current_page_num ||
         header->book_id != s_protocol_state.current_book_id) {
         
-        // 如果有前一个页面未完成，保存它
-        if (s_protocol_state.received_bytes > 0) {
-            ESP_LOGW(TAG, "Previous page not fully received, received=%u bytes",
-                     s_protocol_state.received_bytes);
+        // 关闭前一个文件（如果有）
+        if (s_protocol_state.current_file != NULL) {
+            ESP_LOGW(TAG, "Previous page not fully received, closing file");
+            fclose(s_protocol_state.current_file);
+            s_protocol_state.current_file = NULL;
         }
 
-        // 重置接收状态
-        clear_receive_buffer();
+        // 生成新文件路径
+        char filename[64];
+        snprintf(filename, sizeof(filename), "/littlefs/ble_pages/book_%04x_page_%05u.bin",
+                 header->book_id, header->page_num);
+        
+        // 打开文件准备写入
+        s_protocol_state.current_file = fopen(filename, "wb");
+        if (s_protocol_state.current_file == NULL) {
+            ESP_LOGE(TAG, "Failed to open file for writing: %s", filename);
+            return false;
+        }
+        
+        // 更新状态
         s_protocol_state.current_book_id = header->book_id;
         s_protocol_state.current_page_num = header->page_num;
-        ESP_LOGI(TAG, "Starting new page reception: book=%04x, page=%u",
-                 header->book_id, header->page_num);
+        s_protocol_state.received_bytes = 0;
+        strncpy(s_protocol_state.current_filename, filename, sizeof(s_protocol_state.current_filename) - 1);
+        
+        ESP_LOGI(TAG, "Starting stream write: book=%04x, page=%u -> %s",
+                 header->book_id, header->page_num, filename);
     }
 
-    // 验证数据块的偏移和大小
+    // 验证数据块的偏移
     if (chunk->offset != s_protocol_state.received_bytes) {
         ESP_LOGE(TAG, "Data offset mismatch: expected=%u, got=%u",
                  s_protocol_state.received_bytes, chunk->offset);
+        clear_receive_state();
         return false;
     }
 
     if (chunk->chunk_size > BLE_DATA_CHUNK_DATA_SIZE) {
         ESP_LOGE(TAG, "Invalid chunk size: %u", chunk->chunk_size);
+        clear_receive_state();
         return false;
     }
 
-    // 检查缓冲区是否足够
-    if (s_protocol_state.received_bytes + chunk->chunk_size > BLE_BITMAP_SIZE) {
-        ESP_LOGE(TAG, "Receive buffer overflow");
+    // 检查文件句柄
+    if (s_protocol_state.current_file == NULL) {
+        ESP_LOGE(TAG, "File handle is NULL");
         return false;
     }
 
-    // 复制数据到接收缓冲区
-    memcpy(s_protocol_state.receive_buffer + chunk->offset,
-           chunk->data, chunk->chunk_size);
+    // 流式写入数据到文件
+    size_t written = fwrite(chunk->data, 1, chunk->chunk_size, s_protocol_state.current_file);
+    if (written != chunk->chunk_size) {
+        ESP_LOGE(TAG, "File write failed: expected=%u, written=%u", chunk->chunk_size, written);
+        clear_receive_state();
+        return false;
+    }
+    
     s_protocol_state.received_bytes += chunk->chunk_size;
 
-    ESP_LOGD(TAG, "Received chunk: offset=%u, size=%u, total=%u/%u",
+    ESP_LOGD(TAG, "Streamed chunk: offset=%u, size=%u, total=%u/%u",
              chunk->offset, chunk->chunk_size,
              s_protocol_state.received_bytes, BLE_BITMAP_SIZE);
 
     // 检查是否接收完整
     if (s_protocol_state.received_bytes >= BLE_BITMAP_SIZE) {
-        // 完整页面已接收，保存到缓存
-        if (ble_cache_save_page(header->book_id, header->page_num,
-                                s_protocol_state.receive_buffer,
-                                BLE_BITMAP_SIZE)) {
-            ESP_LOGI(TAG, "Page saved to cache: book=%04x, page=%u",
-                     header->book_id, header->page_num);
+        // 关闭文件
+        fclose(s_protocol_state.current_file);
+        s_protocol_state.current_file = NULL;
+        
+        ESP_LOGI(TAG, "Page stream complete: book=%04x, page=%u (%u bytes)",
+                 s_protocol_state.current_book_id, s_protocol_state.current_page_num,
+                 s_protocol_state.received_bytes);
 
-            // 触发页面就绪回调
-            if (s_protocol_state.page_ready_cb != NULL) {
-                s_protocol_state.page_ready_cb(header->book_id, header->page_num);
-            }
-
-            // 清空接收缓冲区，准备接收下一页
-            clear_receive_buffer();
-            return true;
-        } else {
-            ESP_LOGE(TAG, "Failed to save page to cache");
-            clear_receive_buffer();
-            return false;
+        // 触发页面就绪回调
+        if (s_protocol_state.page_ready_cb != NULL) {
+            s_protocol_state.page_ready_cb(s_protocol_state.current_book_id,
+                                          s_protocol_state.current_page_num);
         }
+
+        // 清空状态，准备接收下一页
+        clear_receive_state();
+        return true;
     }
 
     return true;  // 继续接收

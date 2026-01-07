@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_bt.h"
+#include "esp_nimble_hci.h"
 #include "nimble/ble.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -217,8 +218,8 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
                 device_info.rssi = event->disc.rssi;
                 
                 // 尝试获取设备名称
-                uint8_t *data = event->disc.data;
-                uint8_t data_len = event->disc.data_len;
+                uint8_t *data = (uint8_t *)event->disc.data;
+                uint8_t data_len = event->disc.length_data;
                 uint8_t i = 0;
                 
                 while (i < data_len) {
@@ -243,7 +244,7 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
                 }
 
                 // Parse first advertised 128-bit service UUID (for dynamic UUID exchange).
-                parse_adv_for_uuid128(event->disc.data, event->disc.data_len, &device_info);
+                parse_adv_for_uuid128(event->disc.data, event->disc.length_data, &device_info);
                 
                 s_ble_state.device_found_cb(&device_info);
             }
@@ -254,7 +255,14 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "Device connected");
             s_ble_state.connected = true;
             s_ble_state.connected_handle = event->connect.conn_handle;
-            memcpy(s_ble_state.connected_addr, event->connect.peer_id_addr.val, 6);
+            {
+                struct ble_gap_conn_desc desc;
+                if (ble_gap_conn_find(event->connect.conn_handle, &desc) == 0) {
+                    memcpy(s_ble_state.connected_addr, desc.peer_id_addr.val, 6);
+                } else {
+                    memset(s_ble_state.connected_addr, 0, sizeof(s_ble_state.connected_addr));
+                }
+            }
             reset_gatt_state();
 
             // Start GATT discovery for the dynamically exchanged service UUID.
@@ -333,6 +341,12 @@ bool ble_manager_init(void)
     
     ESP_LOGI(TAG, "Initializing BLE manager...");
     
+    // 打印堆内存状态 - 初始化前
+    ESP_LOGI(TAG, "=== Heap before BLE init ===");
+    ESP_LOGI(TAG, "  Free heap: %lu bytes", esp_get_free_heap_size());
+    ESP_LOGI(TAG, "  Min free heap: %lu bytes", esp_get_minimum_free_heap_size());
+    ESP_LOGI(TAG, "  Largest free block: %lu bytes", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    
     // 初始化NVS flash
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -350,9 +364,54 @@ bool ble_manager_init(void)
         ESP_LOGE(TAG, "Failed to release classic BT memory");
         return false;
     }
+
+    // 初始化 BT 控制器并启用 BLE 模式
+    // 使用最小内存配置以适应 ESP32-C3 有限的 DRAM
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     
-    // 初始化NimBLE
-    ESP_ERROR_CHECK(nimble_port_init());
+    // 优化内存设置 - 减少 ACL 连接和事件缓冲
+    bt_cfg.bluetooth_mode = ESP_BT_MODE_BLE;
+    bt_cfg.ble_max_act = 1;               // 只支持1个活动连接
+    
+    ESP_LOGI(TAG, "Initializing BT controller with minimal memory config...");
+    ret = esp_bt_controller_init(&bt_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_bt_controller_init failed: %s (0x%x)", esp_err_to_name(ret), ret);
+        return false;
+    }
+    
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_bt_controller_enable failed: %s (0x%x)", esp_err_to_name(ret), ret);
+        esp_bt_controller_deinit();
+        return false;
+    }
+
+    ESP_LOGI(TAG, "BT controller enabled, initializing NimBLE host...");
+    
+    // 打印堆内存状态 - BT控制器启用后
+    ESP_LOGI(TAG, "=== Heap after BT controller enabled ===");
+    ESP_LOGI(TAG, "  Free heap: %lu bytes", esp_get_free_heap_size());
+    ESP_LOGI(TAG, "  Min free heap: %lu bytes", esp_get_minimum_free_heap_size());
+    ESP_LOGI(TAG, "  Largest free block: %lu bytes", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    
+    // 初始化 NimBLE host
+    ret = nimble_port_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "nimble_port_init failed: %s (0x%x)", esp_err_to_name(ret), ret);
+        ESP_LOGE(TAG, "This usually indicates insufficient memory or duplicate initialization");
+        ESP_LOGE(TAG, "  Free heap now: %lu bytes", esp_get_free_heap_size());
+        ESP_LOGE(TAG, "  Largest free block: %lu bytes", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        esp_bt_controller_disable();
+        esp_bt_controller_deinit();
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "=== Heap after NimBLE host init ===");
+    ESP_LOGI(TAG, "  Free heap: %lu bytes", esp_get_free_heap_size());
+    ESP_LOGI(TAG, "  Largest free block: %lu bytes", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    
+    ESP_LOGI(TAG, "NimBLE host initialized, configuring GAP/GATT services...");
     
     // 配置BLE GAP
     ble_svc_gap_init();
@@ -361,8 +420,7 @@ bool ble_manager_init(void)
     // 设置本地设备名称
     ble_svc_gap_device_name_set("Monster-BLE");
     
-    // 注册GAP事件处理
-    ble_gap_set_event_cb(ble_gap_event_handler, NULL);
+    // GAP 事件通过各 API 传入 handler（无需全局设置）
     
     // 启动NimBLE主机任务
     nimble_port_freertos_init(ble_host_task);
@@ -391,6 +449,8 @@ void ble_manager_deinit(void)
     
     // NimBLE 清理
     nimble_port_deinit();
+    esp_bt_controller_disable();
+    esp_bt_controller_deinit();
     
     s_ble_state.initialized = false;
     ESP_LOGI(TAG, "BLE manager deinitialized");
@@ -427,13 +487,12 @@ bool ble_manager_start_scan(uint32_t duration_ms)
     
     // 设置扫描参数
     struct ble_gap_disc_params disc_params = {
-        .type = BLE_GAP_DISC_TYPE_PASSIVE,
-        .filter = BLE_GAP_DISC_FILTER_NONE,
-        .passive_on_disc = false,
-        .limited = false,
-        .itvl = BLE_GAP_LIM_DISC_ITVL_MIN,
-        .window = BLE_GAP_LIM_DISC_WIN,
-        .filter_duplicates = false,
+        .filter_policy = 0,
+        .limited = 0,
+        .passive = 1,
+        .itvl = 0x0010,
+        .window = 0x0010,
+        .filter_duplicates = 0,
     };
     
     int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, duration_ms, &disc_params, 
