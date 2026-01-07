@@ -8,11 +8,7 @@
 #include "paginated_menu.h"
 #include "display_engine.h"
 #include "screen_manager.h"
-#include "jpeg_helper.h"
-#include "bmp_helper.h"
-#include "png_helper.h"
 #include "esp_log.h"
-#include "esp_heap_caps.h"
 #include <string.h>
 #include <strings.h>
 
@@ -46,49 +42,18 @@ static bool render_fullscreen_image(const char *full_path)
 {
     ESP_LOGI(TAG, "Preview: %s", full_path);
 
-    FILE *f = fopen(full_path, "rb");
-    if (!f) {
-        ESP_LOGE(TAG, "Open failed: %s", full_path);
-        return false;
-    }
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (size <= 0 || size > 8*1024*1024) { // 简单上限防护
-        fclose(f);
-        ESP_LOGE(TAG, "Invalid size: %ld", size);
-        return false;
-    }
-    uint8_t *buf = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
-    if (!buf) buf = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-    if (!buf) { fclose(f); return false; }
-    size_t rd = fread(buf, 1, size, f);
-    fclose(f);
-    if (rd != size) { free(buf); return false; }
-
+    // 使用统一的图片渲染API（解码→Cover模式缩放→居中→旋转→显示）
     display_clear(COLOR_WHITE);
+    bool ok = wallpaper_render_image_to_display(full_path);
 
-    const char *ext = strrchr(full_path, '.');
-    bool ok = false;
-    if (ext) {
-        ext++;
-        if (!strcasecmp(ext, "jpg") || !strcasecmp(ext, "jpeg")) {
-            ok = jpeg_helper_render_fullscreen(buf, size);
-        } else if (!strcasecmp(ext, "bmp")) {
-            ok = bmp_helper_render_fullscreen(buf, size);
-        } else if (!strcasecmp(ext, "png")) {
-            ok = png_helper_render_fullscreen(buf, size);
-        } else {
-            display_draw_text_menu(20, 200, "不支持的图片格式", COLOR_BLACK, COLOR_WHITE);
-            ok = true;
-        }
+    if (!ok) {
+        display_draw_text_menu(20, 200, "图片加载失败", COLOR_BLACK, COLOR_WHITE);
     }
 
     // 底部提示
     display_draw_text_menu(20, SCREEN_HEIGHT - 100, "左右: 切换  返回: 返回  确认: 设为壁纸", COLOR_BLACK, COLOR_WHITE);
     display_refresh(REFRESH_MODE_FULL);
 
-    free(buf);
     return ok;
 }
 

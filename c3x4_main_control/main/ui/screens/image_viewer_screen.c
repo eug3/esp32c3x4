@@ -7,8 +7,7 @@
 #include "display_engine.h"
 #include "screen_manager.h"
 #include "fonts.h"
-#include "jpeg_helper.h"
-#include "bmp_helper.h"
+#include "wallpaper_manager.h"  // 使用通用图片渲染API
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include <string.h>
@@ -198,83 +197,23 @@ static bool load_and_display_image(int index)
         return false;
     }
 
-    // 获取文件大小
-    fseek(f, 0, SEEK_END);
-    long file_size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    ESP_LOGI(TAG, "Image file size: %ld bytes", file_size);
-
-    if (file_size <= 0) {
-        ESP_LOGE(TAG, "Invalid file size: %ld", file_size);
-        fclose(f);
-        return false;
-    }
-
-    // 分配内存读取文件
-    uint8_t *image_data = (uint8_t *)heap_caps_malloc(file_size, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
-    if (image_data == NULL) {
-        // 尝试使用内部内存
-        image_data = (uint8_t *)heap_caps_malloc(file_size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-        if (image_data == NULL) {
-            ESP_LOGE(TAG, "Failed to allocate memory for image data (%ld bytes)", file_size);
-            fclose(f);
-            return false;
-        }
-    }
-
-    size_t read_size = fread(image_data, 1, file_size, f);
     fclose(f);
 
-    if (read_size != file_size) {
-        ESP_LOGE(TAG, "Failed to read complete file (read: %d, expected: %ld)",
-                 (int)read_size, file_size);
-        heap_caps_free(image_data);
-        return false;
-    }
-
-    // 清屏
-    display_clear(COLOR_WHITE);
-
-    // 根据文件扩展名选择解码方式
-    const char *ext = get_image_ext(s_viewer_state.current_file);
-    bool success = false;
-
-    if (ext != NULL && (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0)) {
-        // 使用 JPEG 解码器
-        ESP_LOGI(TAG, "Decoding JPEG image...");
-        success = jpeg_helper_render_fullscreen(image_data, read_size);
-    } else if (ext != NULL && strcasecmp(ext, "bmp") == 0) {
-        // 使用 BMP 解码器
-        ESP_LOGI(TAG, "Decoding BMP image...");
-        success = bmp_helper_render_fullscreen(image_data, read_size);
-    } else if (ext != NULL && strcasecmp(ext, "png") == 0) {
-        // PNG 格式说明: 需要集成 PNGdec 库
-        // PNGdec 是一个轻量级 PNG 解码器,适用于嵌入式系统
-        // 可以从 https://github.com/bitbank2/PNGdec 获取
-        // 集成步骤:
-        // 1. 下载 PNGdec.h 和 PNGdec.cpp 到项目
-        // 2. 实现 png_helper.h/c 类似 jpeg_helper
-        // 3. 在此调用 png_helper_render_fullscreen()
-        ESP_LOGE(TAG, "PNG format: 需要集成 PNGdec 库");
-        display_draw_text_menu(20, SCREEN_HEIGHT / 2 - 20, "PNG format",
-                               COLOR_BLACK, COLOR_WHITE);
-        display_draw_text_menu(20, SCREEN_HEIGHT / 2 + 20, "需要PNGdec库支持",
-                               COLOR_BLACK, COLOR_WHITE);
-    } else {
-        // 其他格式暂不支持
-        ESP_LOGE(TAG, "Unsupported image format: %s", ext ? ext : "unknown");
-        display_draw_text_menu(20, SCREEN_HEIGHT / 2, "Format not supported",
-                               COLOR_BLACK, COLOR_WHITE);
-    }
-
-    heap_caps_free(image_data);
+    // 使用统一的图片渲染API（等比缩放、居中、旋转）
+    ESP_LOGI(TAG, "Rendering image with wallpaper_render_image_to_display...");
+    bool success = wallpaper_render_image_to_display(full_path);
 
     if (!success) {
-        ESP_LOGE(TAG, "Failed to decode/display image");
+        ESP_LOGE(TAG, "Failed to render image");
+        display_clear(COLOR_WHITE);
+        display_draw_text_menu(20, SCREEN_HEIGHT / 2, "图片加载失败",
+                               COLOR_BLACK, COLOR_WHITE);
+        display_refresh(REFRESH_MODE_FULL);
         return false;
     }
 
+    // 刷新显示
+    display_refresh(REFRESH_MODE_FULL);
     ESP_LOGI(TAG, "Image displayed successfully");
     return true;
 }

@@ -135,7 +135,7 @@ static void ensure_xt_font_initialized(void)
 
 static sFONT* choose_ascii_font_by_target_height(int target_height)
 {
-    // 目标：英文不应高于中文行高。选择“Height <= target_height”的最大字体。
+    // 目标：按当前中文字体行高选取“高度最接近”的 ASCII 字号，尽量不超过目标高度。
     // 候选 ASCII 字体按高度递增。
     sFONT *candidates[] = {
         &Font8,
@@ -151,12 +151,23 @@ static sFONT* choose_ascii_font_by_target_height(int target_height)
     }
 
     sFONT *best = candidates[0];
-    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+    int best_diff = target_height - (int)best->Height;
+    if (best_diff < 0) {
+        best_diff = -best_diff;
+    }
+
+    for (size_t i = 1; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
         sFONT *f = candidates[i];
-        if ((int)f->Height <= target_height) {
+        int diff = (int)f->Height - target_height;
+        if (diff < 0) {
+            diff = -diff;
+        }
+
+        bool closer = diff < best_diff;
+        bool same_diff_prefer_smaller = (diff == best_diff) && (f->Height <= best->Height);
+        if (closer || same_diff_prefer_smaller) {
             best = f;
-        } else {
-            break;
+            best_diff = diff;
         }
     }
     return best;

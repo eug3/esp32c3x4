@@ -406,7 +406,17 @@ static bool read_glyph_from_file(xt_eink_font_t *font, uint32_t unicode, uint8_t
         return false;
     }
 
-    // 使用智能缓存系统（优先 LittleFS，未命中则 SD 卡）。
+    // 分区模式：直接从 Flash 分区读取，不使用缓存
+    if (font->_use_partition && font_partition_is_available()) {
+        size_t bytes_read = font_partition_read_glyph(unicode, bitmap, font->header.glyph_size);
+        if (bytes_read > 0) {
+            return true;
+        }
+        ESP_LOGE(TAG, "Font partition read failed for U+%04X", unicode);
+        return false;
+    }
+
+    // 普通文件模式：使用智能缓存系统（优先 LittleFS，未命中则 SD 卡）。
     // 缓存仅对“当前已 init 的用户字体”生效，且要求 glyph_size 匹配。
     if (font_cache_is_enabled() && font_cache_get_active_glyph_size() == font->header.glyph_size) {
         int bytes_read = font_cache_get_glyph(unicode, bitmap, font->header.glyph_size);
@@ -594,6 +604,71 @@ xt_eink_font_t *xt_eink_font_open(const char *path)
     return font;
 }
 
+xt_eink_font_t *xt_eink_font_open_partition(void)
+{
+    // 检查 Flash 分区是否可用
+    if (!font_partition_is_available()) {
+        ESP_LOGE(TAG, "Font partition is not available");
+        return NULL;
+    }
+
+    // 标准菜单字体规格：19×25
+    uint16_t w = 19;
+    uint16_t h = 25;
+    uint32_t width_byte = (w + 7u) / 8u;  // (19 + 7) / 8 = 3
+    uint32_t glyph_size = width_byte * h;  // 3 * 25 = 75
+    uint32_t file_size = glyph_size * XT_EINK_TOTAL_CHARS;  // 75 * 65536 = 4,915,200
+
+    // 获取分区大小进行验证
+    size_t part_size = 0;
+    size_t part_offset = 0;
+    font_partition_get_info(&part_size, &part_offset);
+    
+    if (part_size < file_size) {
+        ESP_LOGE(TAG, "Font partition too small: %lu bytes (need %lu bytes)",
+                 (unsigned long)part_size, (unsigned long)file_size);
+        return NULL;
+    }
+
+    // 分配上下文
+    xt_eink_font_t *font = (xt_eink_font_t *)malloc(sizeof(xt_eink_font_t));
+    if (font == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate font context for partition");
+        return NULL;
+    }
+
+    memset(font, 0, sizeof(xt_eink_font_t));
+
+    // 初始化上下文（来自 Flash 分区）
+    strncpy(font->file_path, "[flash_partition:font_data]", sizeof(font->file_path) - 1);
+    font->fp = NULL;  // 分区不使用文件指针
+    font->file_size = file_size;
+    font->_use_partition = true;  // 标记为使用分区模式
+    
+    memset(&font->header, 0, sizeof(font->header));
+    font->header.version = 0;
+    font->header.width = (uint8_t)w;
+    font->header.height = (uint8_t)h;
+    font->header.bpp = 1;
+    font->header.char_count = XT_EINK_TOTAL_CHARS;
+    font->header.first_char = 0;
+    font->header.last_char = 0xFFFF;
+    font->header.glyph_size = glyph_size;
+    font->header.file_size = file_size;
+
+    font->width = w;
+    font->height = h;
+    font->glyph_size = (uint16_t)glyph_size;
+    font->line_height = h;
+
+    ESP_LOGI(TAG, "Font opened from partition: flash://font_data");
+    ESP_LOGI(TAG, "  Size: %ux%u, bpp=%u", (unsigned int)w, (unsigned int)h, 1u);
+    ESP_LOGI(TAG, "  Chars: U+0000 - U+FFFF (%lu chars)", (unsigned long)XT_EINK_TOTAL_CHARS);
+    ESP_LOGI(TAG, "  Glyph size: %lu bytes", (unsigned long)glyph_size);
+
+    return font;
+}
+
 void xt_eink_font_close(xt_eink_font_t *font)
 {
     if (font == NULL) {
@@ -646,7 +721,12 @@ const xt_eink_font_glyph_dsc_t *xt_eink_font_get_glyph_dsc(xt_eink_font_t *font,
 
 const uint8_t *xt_eink_font_get_bitmap(xt_eink_font_t *font, uint32_t unicode)
 {
-    if (font == NULL || font->fp == NULL) {
+    if (font == NULL) {
+        return NULL;
+    }
+
+    // 分区模式允许 fp 为空
+    if (!font->_use_partition && font->fp == NULL) {
         return NULL;
     }
 
@@ -661,7 +741,7 @@ const uint8_t *xt_eink_font_get_bitmap(xt_eink_font_t *font, uint32_t unicode)
         return NULL;
     }
 
-    // 从文件读取字形
+    // 从分区或文件读取字形
     if (!read_glyph_from_file(font, unicode, g_glyph_buffer)) {
         return NULL;
     }

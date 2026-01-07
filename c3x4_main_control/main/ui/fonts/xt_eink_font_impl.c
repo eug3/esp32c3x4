@@ -37,6 +37,18 @@ static char s_loaded_font_path[128] = {0};
 // 字形缓冲区
 static uint8_t s_glyph_buffer[256];  // 最大字形大小
 
+static bool is_sdcard_available(void)
+{
+    struct stat st;
+    if (stat("/sdcard", &st) != 0) {
+        return false;
+    }
+    if (stat("/sdcard/fonts", &st) != 0) {
+        return false;
+    }
+    return true;
+}
+
 static uint32_t count_bits_set(const uint8_t *buf, size_t len)
 {
     if (buf == NULL) {
@@ -356,24 +368,37 @@ bool xt_eink_font_init(void)
     
     // 0) 先初始化菜单默认字体（必须固定为启动默认 19x25 字体，不受 NVS/用户字体影响）
     if (s_menu_default_font == NULL) {
-        // 只尝试标准路径，不尝试各种文件名变体
-        const char *menu_font_paths[] = {
-            "/sdcard/fonts/msyh-14.25pt.19x25.bin",  // 标准路径
-            NULL
-        };
-
-        for (int i = 0; menu_font_paths[i] != NULL; i++) {
-            xt_eink_font_t *menu_font = xt_eink_font_open(menu_font_paths[i]);
+        // 优先级 1：从 Flash 分区加载菜单字体（无需 SD 卡）
+        if (font_partition_is_available()) {
+            xt_eink_font_t *menu_font = xt_eink_font_open_partition();
             if (menu_font != NULL) {
                 s_menu_default_font = menu_font;
-                strncpy(s_menu_font_path, menu_font_paths[i], sizeof(s_menu_font_path) - 1);
+                strncpy(s_menu_font_path, "[font_data_partition]", sizeof(s_menu_font_path) - 1);
                 s_menu_font_path[sizeof(s_menu_font_path) - 1] = '\0';
-                ESP_LOGI(TAG, "Menu default font initialized: %s", s_menu_font_path);
-                break;
+                ESP_LOGI(TAG, "Menu default font initialized from Flash partition");
             }
         }
 
-        // 如果标准路径不存在，扫描目录找最佳字体
+        // 优先级 2：从 SD 卡标准路径加载（不尝试各种文件名变体）
+        if (s_menu_default_font == NULL) {
+            const char *menu_font_paths[] = {
+                "/sdcard/fonts/msyh-14.25pt.19x25.bin",  // 标准路径
+                NULL
+            };
+
+            for (int i = 0; menu_font_paths[i] != NULL; i++) {
+                xt_eink_font_t *menu_font = xt_eink_font_open(menu_font_paths[i]);
+                if (menu_font != NULL) {
+                    s_menu_default_font = menu_font;
+                    strncpy(s_menu_font_path, menu_font_paths[i], sizeof(s_menu_font_path) - 1);
+                    s_menu_font_path[sizeof(s_menu_font_path) - 1] = '\0';
+                    ESP_LOGI(TAG, "Menu default font initialized from SD card: %s", s_menu_font_path);
+                    break;
+                }
+            }
+        }
+
+        // 优先级 3：扫描 SD 卡目录找最佳字体（仅当分区和标准路径都不可用）
         if (s_menu_default_font == NULL) {
             char best_path[192] = {0};
             uint32_t best_char_byte = 0;
@@ -393,6 +418,17 @@ bool xt_eink_font_init(void)
     // 1. 然后尝试从NVS加载用户选择的字体（仅影响阅读器字体）
     char saved_font_path[128] = {0};
     bool loaded = false;
+
+    // 如果 SD 卡未就绪，直接使用菜单默认字体，避免无效的 SD 访问
+    if (!is_sdcard_available()) {
+        if (s_menu_default_font != NULL) {
+            s_font = s_menu_default_font;
+            strncpy(s_loaded_font_path, s_menu_font_path, sizeof(s_loaded_font_path) - 1);
+            s_loaded_font_path[sizeof(s_loaded_font_path) - 1] = '\0';
+            loaded = true;
+            ESP_LOGW(TAG, "SD card not available; use menu default font for reader");
+        }
+    }
     
     // 如果已经加载了用户字体且与菜单字体不同，需要先释放
     if (s_font != NULL && s_font != s_menu_default_font) {
@@ -402,7 +438,7 @@ bool xt_eink_font_init(void)
         memset(s_loaded_font_path, 0, sizeof(s_loaded_font_path));
     }
     
-    if (load_font_path_from_nvs(saved_font_path, sizeof(saved_font_path))) {
+    if (!loaded && load_font_path_from_nvs(saved_font_path, sizeof(saved_font_path))) {
         if (try_open_font(saved_font_path)) {
             loaded = true;
         } else {

@@ -70,7 +70,7 @@ typedef struct {
  */
 typedef struct {
     char file_path[256];           // 字体文件路径
-    FILE *fp;                      // 文件指针
+    FILE *fp;                      // 文件指针（分区模式下为 NULL）
     uint32_t file_size;            // 文件大小
 
     // 字体信息
@@ -79,6 +79,9 @@ typedef struct {
     uint16_t height;               // 字体高度
     uint16_t glyph_size;           // 每个字形大小（字节）
     uint16_t line_height;          // 行高（等于字体高度）
+
+    // 数据源模式
+    bool _use_partition;           // 是否使用 Flash 分区而非文件
 
     // 字形缓存
     xt_eink_glyph_cache_t cache[XT_EINK_GLYPH_CACHE_SIZE];
@@ -109,6 +112,16 @@ typedef struct {
  * @return 字体上下文指针，失败返回 NULL
  */
 xt_eink_font_t *xt_eink_font_open(const char *path);
+
+/**
+ * @brief 从 Flash 分区打开菜单字体
+ * 
+ * 此函数专门用于从 font_data 分区加载菜单字体，
+ * 避免依赖 SD 卡。当分区不可用时返回 NULL。
+ *
+ * @return 字体上下文指针（用于菜单），失败返回 NULL
+ */
+xt_eink_font_t *xt_eink_font_open_partition(void);
 
 /**
  * @brief 关闭 XTEink 字体

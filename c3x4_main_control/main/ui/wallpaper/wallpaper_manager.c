@@ -13,8 +13,6 @@
 #include "esp_vfs.h"
 #include "esp_vfs_fat.h"
 #include "esp_littlefs.h"
-#include "nvs_flash.h"
-#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <dirent.h>
@@ -23,8 +21,19 @@
 
 static const char *TAG = "WALLPAPER";
 
-// LittleFS 缓存路径
+// LittleFS 固定壁纸文件
 #define WALLPAPER_CACHE_DIR "/littlefs/wallpaper"
+#define WALLPAPER_SD_DIR "/sdcard/壁纸"
+#define WALLPAPER_RAW_FILE "wallpaper.raw"
+#define WALLPAPER_RAW_PATH WALLPAPER_CACHE_DIR "/" WALLPAPER_RAW_FILE
+
+// 使用逻辑尺寸（480x800，竖屏），Paint层会自动转换到物理800x480
+#define WALLPAPER_WIDTH 480
+#define WALLPAPER_HEIGHT 800
+// 保存的raw文件是物理格式800x480@1bpp，便于直接复制到帧缓冲
+#define WALLPAPER_PHYS_WIDTH 800
+#define WALLPAPER_PHYS_HEIGHT 480
+#define WALLPAPER_RAW_SIZE ((WALLPAPER_PHYS_WIDTH * WALLPAPER_PHYS_HEIGHT) / 8)  // 1bpp 48KB
 #define WALLPAPER_EXT_PNG ".png"
 #define WALLPAPER_EXT_JPG ".jpg"
 #define WALLPAPER_MAX_LIST 50
@@ -34,39 +43,6 @@ static const char *TAG = "WALLPAPER";
 
 // 状态
 static bool s_initialized = false;
-static char s_selected_wallpaper[64] = {0};
-static char s_selected_path[128] = {0};
-
-static const char *NVS_NAMESPACE = "wallpaper_settings";
-static const char *NVS_KEY_NAME = "selected_name";
-static const char *NVS_KEY_PATH = "selected_path";
-
-/**
- * @brief 灰度转 4-bit (0-15)
- */
-static uint8_t gray_to_4bit(uint8_t gray)
-{
-    return gray >> 4;  // 8-bit → 4-bit
-}
-
-/**
- * @brief 4-bit 转 8-bit
- */
-static uint8_t bit4_to_gray(uint8_t g4)
-{
-    return (g4 << 4) | (g4 >> 4 & 0x0F);
-}
-
-/**
- * @brief RGB565 转灰度 (8-bit)
- */
-static uint8_t rgb565_to_gray(uint16_t pixel)
-{
-    uint8_t r = (pixel >> 11) & 0x1F;
-    uint8_t g = (pixel >> 5) & 0x3F;
-    uint8_t b = pixel & 0x1F;
-    return (r * 38 + g * 75 + b * 15) >> 7;
-}
 
 /**
  * @brief 读取文件到内存
@@ -102,131 +78,16 @@ static uint8_t* read_file_to_mem(const char *path, size_t *out_size)
     return data;
 }
 
-/**
- * @brief 保存位图到 LittleFS
- * 格式：宽度(2B) + 高度(2B) + 位图数据(每像素4bit)
- */
-static bool save_bitmap_to_littlefs(const char *cache_path,
-                                    const uint8_t *bitmap,
-                                    uint16_t width,
-                                    uint16_t height)
-{
-    // 计算位图数据大小 (每行宽度按4bit计算，需要向上取整)
-    uint16_t row_bits = (width + 1) / 2 * 2;  // 确保是2的倍数
-    uint16_t row_bytes = row_bits / 2;
-    size_t data_size = row_bytes * height;
-    size_t total_size = 4 + data_size;  // 头 + 数据
-
-    // 分配内存
-    uint8_t *buffer = (uint8_t *)heap_caps_malloc(total_size, MALLOC_CAP_8BIT);
-    if (!buffer) {
-        ESP_LOGE(TAG, "Failed to allocate buffer: %zu bytes", total_size);
-        return false;
-    }
-
-    // 写入头 (宽度和高度，大端序)
-    buffer[0] = (width >> 8) & 0xFF;
-    buffer[1] = width & 0xFF;
-    buffer[2] = (height >> 8) & 0xFF;
-    buffer[3] = height & 0xFF;
-
-    // 转换并复制位图数据
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            uint8_t gray = bitmap[y * width + x];
-            uint8_t g4 = gray_to_4bit(gray);
-
-            if (x % 2 == 0) {
-                buffer[4 + y * row_bytes + x / 2] = g4;
-            } else {
-                buffer[4 + y * row_bytes + x / 2] |= (g4 << 4);
-            }
-        }
-    }
-
-    // 保存到文件
-    FILE *f = fopen(cache_path, "wb");
-    if (!f) {
-        ESP_LOGE(TAG, "Failed to create cache file: %s", cache_path);
-        free(buffer);
-        return false;
-    }
-
-    fwrite(buffer, 1, total_size, f);
-    fclose(f);
-
-    ESP_LOGI(TAG, "Saved bitmap: %dx%d -> %s (%zu bytes)", width, height, cache_path, total_size);
-
-    free(buffer);
-    return true;
-}
+// 之前的 4-bit 缓存方案已废弃；改为固定 1bpp 原始帧缓存文件
 
 /**
- * @brief 从 LittleFS 加载位图
+ * @brief 从物理帧缓冲直接提取1bpp位图 (直接复制，无需转换)
+ * 帧缓冲已经是800x480@1bpp格式，直接复制即可
  */
-static uint8_t* load_bitmap_from_littlefs(const char *cache_path,
-                                          uint16_t *out_width,
-                                          uint16_t *out_height)
+static void extract_1bpp_from_framebuffer(uint8_t *bmp_1bpp)
 {
-    FILE *f = fopen(cache_path, "rb");
-    if (!f) {
-        ESP_LOGE(TAG, "Failed to open cache: %s", cache_path);
-        return NULL;
-    }
-
-    // 读取头
-    uint8_t header[4];
-    if (fread(header, 1, 4, f) != 4) {
-        ESP_LOGE(TAG, "Failed to read header: %s", cache_path);
-        fclose(f);
-        return NULL;
-    }
-
-    uint16_t width = (header[0] << 8) | header[1];
-    uint16_t height = (header[2] << 8) | header[3];
-
-    // 计算数据大小
-    uint16_t row_bytes = (width + 1) / 2;
-    size_t data_size = row_bytes * height;
-
-    // 分配内存
-    uint8_t *bitmap = (uint8_t *)heap_caps_malloc(width * height, MALLOC_CAP_8BIT);
-    if (!bitmap) {
-        ESP_LOGE(TAG, "Failed to allocate bitmap: %dx%d", width, height);
-        fclose(f);
-        return NULL;
-    }
-
-    // 读取数据
-    uint8_t *row_data = (uint8_t *)heap_caps_malloc(row_bytes, MALLOC_CAP_8BIT);
-    if (!row_data) {
-        free(bitmap);
-        fclose(f);
-        return NULL;
-    }
-
-    for (int y = 0; y < height; y++) {
-        if (fread(row_data, 1, row_bytes, f) != row_bytes) {
-            ESP_LOGE(TAG, "Failed to read row %d", y);
-            free(row_data);
-            free(bitmap);
-            fclose(f);
-            return NULL;
-        }
-
-        for (int x = 0; x < width; x++) {
-            uint8_t g4 = (x % 2 == 0) ? (row_data[x / 2] & 0x0F) : (row_data[x / 2] >> 4);
-            bitmap[y * width + x] = bit4_to_gray(g4);
-        }
-    }
-
-    free(row_data);
-    fclose(f);
-
-    *out_width = width;
-    *out_height = height;
-
-    return bitmap;
+    const uint8_t *fb = display_get_framebuffer();
+    memcpy(bmp_1bpp, fb, WALLPAPER_RAW_SIZE);
 }
 
 /**
@@ -344,7 +205,7 @@ static int process_image_file(const char *src_path)
 /**
  * @brief 递归扫描目录
  */
-static int scan_directory(const char *dir_path, wallpaper_list_t *list)
+static int scan_directory(const char *dir_path, wallpaper_list_t *list, bool recursive)
 {
     DIR *dir = opendir(dir_path);
     if (!dir) {
@@ -380,10 +241,10 @@ static int scan_directory(const char *dir_path, wallpaper_list_t *list)
                     count++;
                 }
             }
-        } else if (S_ISDIR(st.st_mode)) {
+        } else if (recursive && S_ISDIR(st.st_mode)) {
             // 跳过 . 和 ..
             if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
-                count += scan_directory(path, list);
+                count += scan_directory(path, list, true);
             }
         }
     }
@@ -405,30 +266,13 @@ bool wallpaper_manager_init(void)
 
     ESP_LOGI(TAG, "Initializing wallpaper manager...");
 
-    // 确保缓存目录存在
+    // 确保壁纸目录存在
     struct stat st;
     if (stat(WALLPAPER_CACHE_DIR, &st) != 0) {
         if (mkdir(WALLPAPER_CACHE_DIR, 0755) != 0) {
             ESP_LOGE(TAG, "Failed to create cache directory");
             return false;
         }
-    }
-
-    // 从 NVS 读取已选壁纸
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
-    if (err == ESP_OK) {
-        size_t sz_name = sizeof(s_selected_wallpaper);
-        size_t sz_path = sizeof(s_selected_path);
-        esp_err_t e1 = nvs_get_str(handle, NVS_KEY_NAME, s_selected_wallpaper, &sz_name);
-        esp_err_t e2 = nvs_get_str(handle, NVS_KEY_PATH, s_selected_path, &sz_path);
-        nvs_close(handle);
-        ESP_LOGI(TAG, "NVS load name=%s path=%s (e1=%s e2=%s)",
-                 (e1==ESP_OK)?s_selected_wallpaper:"<none>",
-                 (e2==ESP_OK)?s_selected_path:"<none>",
-                 esp_err_to_name(e1), esp_err_to_name(e2));
-    } else {
-        ESP_LOGW(TAG, "NVS open failed: %s", esp_err_to_name(err));
     }
 
     s_initialized = true;
@@ -460,8 +304,8 @@ int wallpaper_scan_sdcard(wallpaper_list_t *list)
     }
     list->count = 0;
 
-    // 扫描 SD 卡根目录
-    int count = scan_directory("/sdcard", list);
+    // 仅扫描指定目录 /sdcard/壁纸，避免全盘遍历过慢
+    int count = scan_directory(WALLPAPER_SD_DIR, list, false);
     ESP_LOGI(TAG, "Found %d images on SD card", count);
 
     return count;
@@ -529,24 +373,8 @@ int wallpaper_get_cached_list(wallpaper_list_t *list)
 
 bool wallpaper_select(const char *name)
 {
-    if (!name || strlen(name) >= sizeof(s_selected_wallpaper)) {
-        return false;
-    }
-
-    strncpy(s_selected_wallpaper, name, sizeof(s_selected_wallpaper) - 1);
-    s_selected_wallpaper[sizeof(s_selected_wallpaper) - 1] = '\0';
-    // 保存到 NVS（仅名称）
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
-    if (err == ESP_OK) {
-        esp_err_t e1 = nvs_set_str(handle, NVS_KEY_NAME, s_selected_wallpaper);
-        if (e1 == ESP_OK) {
-            nvs_commit(handle);
-        }
-        nvs_close(handle);
-    }
-
-    ESP_LOGI(TAG, "Selected wallpaper: %s", name);
+    // 兼容旧接口：固定文件名，不再使用名称选择
+    (void)name;
     return true;
 }
 
@@ -554,124 +382,146 @@ bool wallpaper_select_path(const char *path)
 {
     if (!path || path[0] == '\0') return false;
 
-    // 提取文件名作为展示名（去扩展名）
-    const char *filename = strrchr(path, '/');
-    filename = filename ? filename + 1 : path;
-    const char *dot = strrchr(filename, '.');
-    size_t name_len = dot ? (size_t)(dot - filename) : strlen(filename);
-    if (name_len >= sizeof(s_selected_wallpaper)) name_len = sizeof(s_selected_wallpaper) - 1;
-    memcpy(s_selected_wallpaper, filename, name_len);
-    s_selected_wallpaper[name_len] = '\0';
-
-    strncpy(s_selected_path, path, sizeof(s_selected_path) - 1);
-    s_selected_path[sizeof(s_selected_path) - 1] = '\0';
-
-    // 保存到 NVS（名称 + 路径）
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
-    if (err == ESP_OK) {
-        esp_err_t e1 = nvs_set_str(handle, NVS_KEY_NAME, s_selected_wallpaper);
-        esp_err_t e2 = nvs_set_str(handle, NVS_KEY_PATH, s_selected_path);
-        if (e1 == ESP_OK && e2 == ESP_OK) {
-            nvs_commit(handle);
-        }
-        nvs_close(handle);
-        ESP_LOGI(TAG, "Selected wallpaper path saved: %s (%s)", s_selected_wallpaper, s_selected_path);
-        return true;
+    const char *ext = strrchr(path, '.');
+    if (!ext) {
+        ESP_LOGE(TAG, "Wallpaper path has no extension: %s", path);
+        return false;
     }
-    ESP_LOGE(TAG, "Failed to open NVS: %s", esp_err_to_name(err));
-    return false;
+
+    // 1. 读取图片文件
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "Open wallpaper path failed: %s", path);
+        return false;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 0 || size > 8*1024*1024) {
+        fclose(f);
+        ESP_LOGE(TAG, "Invalid wallpaper size: %ld", size);
+        return false;
+    }
+
+    uint8_t *buf = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
+    if (!buf) buf = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    if (!buf) { fclose(f); return false; }
+    size_t rd = fread(buf, 1, size, f);
+    fclose(f);
+    if (rd != (size_t)size) { free(buf); return false; }
+
+    // 2. 渲染到480x800逻辑坐标（Paint层会ROTATE_270转换到800x480物理）
+    display_clear(COLOR_WHITE);
+    bool ok = false;
+    ext++;  // skip dot
+    if (!strcasecmp(ext, "jpg") || !strcasecmp(ext, "jpeg")) {
+        ok = jpeg_helper_render(buf, size, 0, 0, WALLPAPER_WIDTH, WALLPAPER_HEIGHT, true);
+    } else if (!strcasecmp(ext, "bmp")) {
+        ok = bmp_helper_render(buf, size, 0, 0, WALLPAPER_WIDTH, WALLPAPER_HEIGHT, true);
+    } else if (!strcasecmp(ext, "png")) {
+        ok = png_helper_render(buf, size, 0, 0, WALLPAPER_WIDTH, WALLPAPER_HEIGHT, true);
+    } else {
+        ESP_LOGE(TAG, "Unsupported wallpaper format: %s", ext);
+    }
+    free(buf);
+
+    if (!ok) {
+        ESP_LOGE(TAG, "Render wallpaper failed: %s", path);
+        return false;
+    }
+
+    // 3. 从帧缓冲直接提取800x480@1bpp (48KB)
+    uint8_t *raw_bmp = (uint8_t*)heap_caps_malloc(WALLPAPER_RAW_SIZE, MALLOC_CAP_8BIT);
+    if (!raw_bmp) {
+        ESP_LOGE(TAG, "Failed to allocate wallpaper bitmap");
+        return false;
+    }
+    extract_1bpp_from_framebuffer(raw_bmp);
+
+    // 4. 保存到固定文件
+    FILE *out = fopen(WALLPAPER_RAW_PATH, "wb");
+    if (!out) {
+        free(raw_bmp);
+        ESP_LOGE(TAG, "Failed to open wallpaper file for write: %s", WALLPAPER_RAW_PATH);
+        return false;
+    }
+    size_t written = fwrite(raw_bmp, 1, WALLPAPER_RAW_SIZE, out);
+    fclose(out);
+    free(raw_bmp);
+    
+    if (written != WALLPAPER_RAW_SIZE) {
+        ESP_LOGE(TAG, "Failed to save wallpaper raw (%zu/%d)", written, WALLPAPER_RAW_SIZE);
+        return false;
+    }
+
+    // 6. 显示刚设置的壁纸
+    wallpaper_show();
+    ESP_LOGI(TAG, "Wallpaper saved to %s (%d bytes)", WALLPAPER_RAW_PATH, WALLPAPER_RAW_SIZE);
+    return true;
 }
 
 const char* wallpaper_get_selected(void)
 {
-    return s_selected_wallpaper[0] ? s_selected_wallpaper : NULL;
+    // 固定文件名，存在即视为已设置
+    struct stat st;
+    if (stat(WALLPAPER_RAW_PATH, &st) == 0 && st.st_size == WALLPAPER_RAW_SIZE) {
+        return WALLPAPER_RAW_FILE;
+    }
+    return NULL;
 }
 
 const char* wallpaper_get_selected_path(void)
 {
-    return s_selected_path[0] ? s_selected_path : NULL;
+    // 不再返回原始路径，固定存储
+    return NULL;
 }
 
 bool wallpaper_show(void)
 {
-    const char *name = wallpaper_get_selected();
-    const char *path = wallpaper_get_selected_path();
-    if (!name && !path) {
-        // 默认壁纸：全白
+    struct stat st;
+    if (stat(WALLPAPER_RAW_PATH, &st) != 0 || st.st_size != WALLPAPER_RAW_SIZE) {
         display_clear(COLOR_WHITE);
         display_refresh(REFRESH_MODE_FULL);
+        ESP_LOGW(TAG, "No wallpaper file, showing white background");
         return true;
     }
 
-    // 优先从缓存加载
-    if (name) {
-        char cache_path[128];
-        snprintf(cache_path, sizeof(cache_path), "%s/%s.bmp", WALLPAPER_CACHE_DIR, name);
-        uint16_t width, height;
-        uint8_t *bitmap = load_bitmap_from_littlefs(cache_path, &width, &height);
-        if (bitmap) {
-            for (int y = 0; y < height; y++) {
-                for (int x = 0; x < width; x++) {
-                    uint8_t gray = bitmap[y * width + x];
-                    display_draw_pixel(x, y, gray);
-                }
-            }
-            free(bitmap);
-            display_refresh(REFRESH_MODE_FULL);
-            ESP_LOGI(TAG, "Showing cached wallpaper: %s", name);
-            return true;
-        }
-    }
-
-    // 无缓存则直接从原图路径解码渲染
-    if (path) {
-        FILE *f = fopen(path, "rb");
-        if (!f) {
-            ESP_LOGE(TAG, "Open wallpaper path failed: %s", path);
-            return false;
-        }
-        fseek(f, 0, SEEK_END);
-        long size = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        if (size <= 0 || size > 8*1024*1024) {
-            fclose(f);
-            ESP_LOGE(TAG, "Invalid wallpaper size: %ld", size);
-            return false;
-        }
-        uint8_t *buf = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
-        if (!buf) buf = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-        if (!buf) { fclose(f); return false; }
-        size_t rd = fread(buf, 1, size, f);
-        fclose(f);
-        if (rd != size) { free(buf); return false; }
-
+    // 1. 加载800x480@1bpp raw
+    FILE *f = fopen(WALLPAPER_RAW_PATH, "rb");
+    if (!f) {
         display_clear(COLOR_WHITE);
-        const char *ext = strrchr(path, '.');
-        bool ok = false;
-        if (ext) {
-            ext++;
-            if (!strcasecmp(ext, "jpg") || !strcasecmp(ext, "jpeg")) {
-                ok = jpeg_helper_render_fullscreen(buf, size);
-            } else if (!strcasecmp(ext, "bmp")) {
-                ok = bmp_helper_render_fullscreen(buf, size);
-            } else if (!strcasecmp(ext, "png")) {
-                ok = png_helper_render_fullscreen(buf, size);
-            }
-        }
-        free(buf);
-        if (ok) {
-            display_refresh(REFRESH_MODE_FULL);
-            ESP_LOGI(TAG, "Showing wallpaper from original: %s", path);
-            return true;
-        }
-        ESP_LOGE(TAG, "Unsupported wallpaper format: %s", path);
+        display_refresh(REFRESH_MODE_FULL);
+        ESP_LOGE(TAG, "Failed to open wallpaper raw: %s", WALLPAPER_RAW_PATH);
         return false;
     }
 
-    // 走到这里说明既没有缓存也没有路径
-    display_clear(COLOR_WHITE);
+    uint8_t *raw_bmp = (uint8_t*)heap_caps_malloc(WALLPAPER_RAW_SIZE, MALLOC_CAP_8BIT);
+    if (!raw_bmp) {
+        fclose(f);
+        display_clear(COLOR_WHITE);
+        display_refresh(REFRESH_MODE_FULL);
+        ESP_LOGE(TAG, "Failed to allocate wallpaper buffer");
+        return false;
+    }
+
+    size_t rd = fread(raw_bmp, 1, WALLPAPER_RAW_SIZE, f);
+    fclose(f);
+    if (rd != WALLPAPER_RAW_SIZE) {
+        free(raw_bmp);
+        ESP_LOGE(TAG, "Wallpaper raw size mismatch: %zu", rd);
+        display_clear(COLOR_WHITE);
+        display_refresh(REFRESH_MODE_FULL);
+        return false;
+    }
+
+    // 2. 直接复制到帧缓冲（已经是800x480@1bpp格式）
+    uint8_t *fb = display_get_framebuffer();
+    memcpy(fb, raw_bmp, WALLPAPER_RAW_SIZE);
+    free(raw_bmp);
+
+    // 3. 刷新显示
     display_refresh(REFRESH_MODE_FULL);
+    ESP_LOGI(TAG, "Wallpaper displayed from %s", WALLPAPER_RAW_PATH);
     return true;
 }
 
@@ -683,40 +533,20 @@ bool wallpaper_clear(void)
 
 bool wallpaper_delete_cache(const char *name)
 {
-    if (!name) return false;
-
-    char cache_path[128];
-    snprintf(cache_path, sizeof(cache_path), "%s/%s.bmp", WALLPAPER_CACHE_DIR, name);
-
-    if (remove(cache_path) == 0) {
-        ESP_LOGI(TAG, "Deleted cache: %s", name);
+    (void)name;
+    if (remove(WALLPAPER_RAW_PATH) == 0) {
+        ESP_LOGI(TAG, "Deleted wallpaper raw");
         return true;
     }
-
-    ESP_LOGE(TAG, "Failed to delete cache: %s", name);
+    ESP_LOGW(TAG, "No wallpaper raw to delete");
     return false;
 }
 
 bool wallpaper_clear_all_cache(void)
 {
-    DIR *dir = opendir(WALLPAPER_CACHE_DIR);
-    if (!dir) return false;
-
-    int count = 0;
-    struct dirent *entry;
-
-    while ((entry = readdir(dir)) != NULL) {
-        if (strstr(entry->d_name, ".bmp")) {
-            char path[128];
-            int max_name3 = (int)sizeof(path) - (int)strlen(WALLPAPER_CACHE_DIR) - 2;
-            if (max_name3 < 0) max_name3 = 0;
-            snprintf(path, sizeof(path), "%s/%.*s", WALLPAPER_CACHE_DIR, max_name3, entry->d_name);
-            if (remove(path) == 0) count++;
-        }
+    if (remove(WALLPAPER_RAW_PATH) == 0) {
+        ESP_LOGI(TAG, "Cleared wallpaper raw");
     }
-
-    closedir(dir);
-    ESP_LOGI(TAG, "Cleared %d cached wallpapers", count);
     return true;
 }
 
@@ -728,4 +558,61 @@ void wallpaper_list_free(wallpaper_list_t *list)
         list->count = 0;
         list->capacity = 0;
     }
+}
+
+bool wallpaper_render_image_to_display(const char *image_path)
+{
+    if (!image_path || image_path[0] == '\0') return false;
+
+    const char *ext = strrchr(image_path, '.');
+    if (!ext) {
+        ESP_LOGE(TAG, "Image path has no extension: %s", image_path);
+        return false;
+    }
+
+    // 1. 读取图片文件
+    FILE *f = fopen(image_path, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "Open image path failed: %s", image_path);
+        return false;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 0 || size > 8*1024*1024) {
+        fclose(f);
+        ESP_LOGE(TAG, "Invalid image size: %ld", size);
+        return false;
+    }
+
+    uint8_t *buf = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
+    if (!buf) buf = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    if (!buf) { fclose(f); return false; }
+    size_t rd = fread(buf, 1, size, f);
+    fclose(f);
+    if (rd != (size_t)size) { free(buf); return false; }
+
+    // 2. 渲染到480x800逻辑坐标（Paint层会ROTATE_270转换到800x480物理）
+    display_clear(COLOR_WHITE);
+    bool ok = false;
+    ext++;  // skip dot
+    if (!strcasecmp(ext, "jpg") || !strcasecmp(ext, "jpeg")) {
+        ok = jpeg_helper_render(buf, size, 0, 0, WALLPAPER_WIDTH, WALLPAPER_HEIGHT, true);
+    } else if (!strcasecmp(ext, "bmp")) {
+        ok = bmp_helper_render(buf, size, 0, 0, WALLPAPER_WIDTH, WALLPAPER_HEIGHT, true);
+    } else if (!strcasecmp(ext, "png")) {
+        ok = png_helper_render(buf, size, 0, 0, WALLPAPER_WIDTH, WALLPAPER_HEIGHT, true);
+    } else {
+        ESP_LOGE(TAG, "Unsupported image format: %s", ext);
+    }
+    free(buf);
+
+    if (!ok) {
+        ESP_LOGE(TAG, "Render image failed: %s", image_path);
+        return false;
+    }
+
+    // 帧缓冲已经是800x480@1bpp格式，直接刷新即可
+    ESP_LOGI(TAG, "Image rendered to display: %s", image_path);
+    return true;
 }

@@ -106,10 +106,10 @@ bool bmp_helper_render(const uint8_t *bmp_data, size_t bmp_data_size,
 
     ESP_LOGI(TAG, "BMP: %dx%d, bits: %d, top_down: %d", src_width, src_height, bit_count, top_down);
 
-    // 计算缩放比例 (保持宽高比)
+    // 计算缩放比例 (Cover模式：至少一边铺满，居中裁剪)
     float scale_w = (float)width / (float)src_width;
     float scale_h = (float)height / (float)src_height;
-    float scale = (scale_w < scale_h) ? scale_w : scale_h;
+    float scale = (scale_w > scale_h) ? scale_w : scale_h;  // Cover模式：选择较大比例
 
     // 如果图片比目标区域小，不放大
     if (scale > 1.0f) {
@@ -120,7 +120,7 @@ bool bmp_helper_render(const uint8_t *bmp_data, size_t bmp_data_size,
     int actual_width = (int)(src_width * scale);
     int actual_height = (int)(src_height * scale);
 
-    // 计算居中偏移
+    // 计算居中偏移（Cover模式：可能超出边界，会被裁剪）
     int offset_x = x + (width - actual_width) / 2;
     int offset_y = y + (height - actual_height) / 2;
 

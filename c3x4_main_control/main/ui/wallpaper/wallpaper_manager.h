@@ -120,4 +120,14 @@ bool wallpaper_clear_all_cache(void);
  */
 void wallpaper_list_free(wallpaper_list_t *list);
 
+/**
+ * @brief 渲染图片到帧缓冲（通用接口，供图片查看器复用）
+ * 
+ * 功能：解码→等比缩放到480x800（cover模式，至少一边铺满）→居中对齐→旋转90度到800x480帧缓冲
+ * 
+ * @param image_path 图片文件路径（支持jpg/png/bmp）
+ * @return true 成功，false 失败
+ */
+bool wallpaper_render_image_to_display(const char *image_path);
+
 #endif // WALLPAPER_MANAGER_H

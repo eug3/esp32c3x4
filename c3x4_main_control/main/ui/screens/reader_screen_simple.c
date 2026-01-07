@@ -787,9 +787,7 @@ static void display_current_page(void)
                  s_reader_state.current_page, s_reader_state.total_pages);
     }
 
-    int page_info_width = display_get_text_width_font(page_info, ui_font);
-    display_draw_text_font(SCREEN_WIDTH - page_info_width - 10, 5,
-                           page_info, ui_font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_font(10, 5, page_info, ui_font, COLOR_BLACK, COLOR_WHITE);
 
     // 显示文本内容
     if (s_reader_state.type == READER_TYPE_TXT) {

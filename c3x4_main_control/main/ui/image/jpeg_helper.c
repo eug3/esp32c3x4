@@ -103,19 +103,17 @@ static int jpeg_output_func(JDEC *jdec, void *bitmap, JRECT *rect)
             // 阈值转换为黑白
             uint8_t bw = (gray < 128) ? 0 : 1;
 
-            // 计算目标坐标
+            // 计算480x800逻辑坐标
             const int dest_x = context->dest_x + (int)(src_x * context->x_scale);
 
-            // 直接写入 framebuffer（物理坐标，800x480，ROTATE_270 + 180度旋转）
-            // 逻辑坐标 (dest_x, dest_y) -> 物理坐标需要转换
-            // 180度旋转: logical(x,y) -> logical'(799-x, 479-y)
-            // ROTATE_270: logical'(x',y') -> physical(479-y', x')
-            // 合并: physical_x = y, physical_y = 799 - x
-            const int phys_x = dest_y;
-            const int phys_y = 799 - dest_x;
+            // 边界检查（480x800逻辑）
+            if (dest_x >= 0 && dest_x < 480 && dest_y >= 0 && dest_y < 800) {
+                // 转换到800x480物理坐标（ROTATE_270: X_phys=Y_logic, Y_phys=479-X_logic）
+                const int phys_x = dest_y;
+                const int phys_y = 479 - dest_x;
 
-            if (phys_x >= 0 && phys_x < 800 && phys_y >= 0 && phys_y < 480) {
-                const uint32_t byte_idx = phys_y * 100 + (phys_x / 8);
+                // 写入800x480物理帧缓冲
+                const uint32_t byte_idx = phys_y * 100 + (phys_x / 8);  // 100 = 800/8
                 const uint8_t bit_mask = 0x80 >> (phys_x % 8);
 
                 if (bw == 0) {
@@ -266,10 +264,10 @@ bool jpeg_helper_render(const uint8_t *jpeg_data, size_t jpeg_data_size,
 
     ESP_LOGI(TAG, "JPEG original size: %dx%d", dec.width, dec.height);
 
-    // 计算缩放比例 (保持宽高比)
+    // 计算缩放比例 (Cover模式：至少一边铺满，居中裁剪)
     float scale_w = (float)width / (float)dec.width;
     float scale_h = (float)height / (float)dec.height;
-    float scale = (scale_w < scale_h) ? scale_w : scale_h;  // 选择较小的比例
+    float scale = (scale_w > scale_h) ? scale_w : scale_h;  // Cover模式：选择较大比例
 
     // 如果图片比目标区域小，不放大 (保持原尺寸居中)
     if (scale > 1.0f) {
@@ -283,7 +281,7 @@ bool jpeg_helper_render(const uint8_t *jpeg_data, size_t jpeg_data_size,
     int actual_width = (int)(dec.width * scale);
     int actual_height = (int)(dec.height * scale);
 
-    // 计算居中偏移
+    // 计算居中偏移（Cover模式：可能超出边界，会被裁剪）
     int offset_x = x + (width - actual_width) / 2;
     int offset_y = y + (height - actual_height) / 2;
 
