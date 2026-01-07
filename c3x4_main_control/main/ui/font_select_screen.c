@@ -1,6 +1,6 @@
 /**
  * @file font_select_screen.c
- * @brief 字体选择屏幕实现
+ * @brief 字体选择屏幕实现 - 使用 paginated_menu 组件
  */
 
 #include "font_select_screen.h"
@@ -8,7 +8,7 @@
 #include "xt_eink_font_impl.h"
 #include "display_engine.h"
 #include "ui_region_manager.h"
-#include "GUI_Paint.h"
+#include "paginated_menu.h"
 #include "screen_manager.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -20,18 +20,9 @@ static const char *NVS_NAMESPACE = "font_settings";
 static const char *NVS_KEY_FONT_PATH = "font_path";
 
 static screen_t g_font_select_screen = {0};
+static paginated_menu_t s_menu = {0};
 
-// 字体列表状态
-static struct {
-    font_info_t fonts[FONT_SELECTOR_MAX_FONTS];
-    int font_count;
-    int selected_index;
-    int display_offset;
-} s_state = {0};
-
-static screen_context_t *s_context = NULL;
-
-// 字体选项：系统默认 + 扫描到的字体
+// 字体选项
 typedef struct {
     char path[128];
     char name[64];
@@ -40,12 +31,35 @@ typedef struct {
 
 static font_option_t s_options[FONT_SELECTOR_MAX_FONTS + 1];
 static int s_option_count = 0;
+static screen_context_t *s_context = NULL;
+
+/**********************
+ * PRIVATE FUNCTIONS
+ **********************/
+
+/**
+ * @brief 菜单项获取回调
+ */
+static bool font_menu_item_getter(int index, char *out_text, int out_text_size, bool *out_is_selected)
+{
+    if (index < 0 || index >= s_option_count) {
+        return false;
+    }
+
+    strncpy(out_text, s_options[index].name, out_text_size - 1);
+    out_text[out_text_size - 1] = '\0';
+
+    int selected_index = paginated_menu_get_selected_index(&s_menu);
+    *out_is_selected = (index == selected_index);
+
+    return true;
+}
 
 static void load_font_options(void)
 {
     s_option_count = 0;
 
-    // 第一个选项：系统默认（如果当前没有设置自定义字体）
+    // 第一个选项：系统默认
     const char *current_path = xt_eink_font_get_current_path();
     strncpy(s_options[0].path, "default", sizeof(s_options[0].path) - 1);
     s_options[0].path[sizeof(s_options[0].path) - 1] = '\0';
@@ -55,11 +69,12 @@ static void load_font_options(void)
     s_option_count = 1;
 
     // 扫描SD卡字体
-    s_state.font_count = font_selector_scan_fonts(s_state.fonts, FONT_SELECTOR_MAX_FONTS);
+    font_info_t fonts[FONT_SELECTOR_MAX_FONTS];
+    int font_count = font_selector_scan_fonts(fonts, FONT_SELECTOR_MAX_FONTS);
 
     // 添加扫描到的字体
-    for (int i = 0; i < s_state.font_count && s_option_count < FONT_SELECTOR_MAX_FONTS + 1; i++) {
-        font_info_t *font = &s_state.fonts[i];
+    for (int i = 0; i < font_count && s_option_count < FONT_SELECTOR_MAX_FONTS + 1; i++) {
+        font_info_t *font = &fonts[i];
         font_option_t *opt = &s_options[s_option_count];
 
         strncpy(opt->path, font->path, sizeof(opt->path) - 1);
@@ -82,42 +97,21 @@ static void load_font_options(void)
         s_option_count++;
     }
 
+    // 设置总条目数
+    paginated_menu_set_total_count(&s_menu, s_option_count);
+
     // 找到当前选中的索引
-    s_state.selected_index = 0;
+    int selected_index = 0;
     if (current_path != NULL) {
         for (int i = 0; i < s_option_count; i++) {
             if (!s_options[i].is_default && strcmp(s_options[i].path, current_path) == 0) {
-                s_state.selected_index = i;
+                selected_index = i;
                 break;
             }
         }
     }
 
-    // 计算显示偏移
-    s_state.display_offset = 0;
-    if (s_state.selected_index >= 4) {
-        s_state.display_offset = s_state.selected_index - 4;
-    }
-}
-
-static void draw_font_item(int index, bool is_selected)
-{
-    int item_height = 50;
-    int start_y = 80;
-    int item_y = start_y + index * item_height;
-
-    int menu_width = 400;
-    int menu_x = (SCREEN_WIDTH - menu_width) / 2;
-
-    if (is_selected) {
-        display_draw_rect(menu_x - 10, item_y - 5, menu_width + 20, item_height - 10,
-                         COLOR_BLACK, true);
-        display_draw_text_menu(menu_x, item_y + 10, s_options[index].name, COLOR_WHITE, COLOR_BLACK);
-    } else {
-        display_draw_rect(menu_x - 10, item_y - 5, menu_width + 20, item_height - 10,
-                         COLOR_BLACK, false);
-        display_draw_text_menu(menu_x, item_y + 10, s_options[index].name, COLOR_BLACK, COLOR_WHITE);
-    }
+    paginated_menu_set_selected_index(&s_menu, selected_index);
 }
 
 static void save_font_to_nvs(const char *path)
@@ -130,7 +124,6 @@ static void save_font_to_nvs(const char *path)
     }
 
     if (strcmp(path, "default") == 0) {
-        // 清除字体设置，使用系统默认
         err = nvs_erase_key(handle, NVS_KEY_FONT_PATH);
     } else {
         err = nvs_set_str(handle, NVS_KEY_FONT_PATH, path);
@@ -152,38 +145,24 @@ static void save_font_to_nvs(const char *path)
 
 static void show_restart_dialog(void)
 {
-    // 绘制确认对话框
     int dialog_w = 300;
     int dialog_h = 120;
     int dialog_x = (SCREEN_WIDTH - dialog_w) / 2;
     int dialog_y = (SCREEN_HEIGHT - dialog_h) / 2;
 
-    // 背景
     display_clear_region(dialog_x, dialog_y, dialog_w, dialog_h, COLOR_WHITE);
     display_draw_rect(dialog_x, dialog_y, dialog_w, dialog_h, COLOR_BLACK, true);
 
-    // 标题
     display_draw_text_menu(dialog_x + 20, dialog_y + 20, "提示", COLOR_WHITE, COLOR_BLACK);
-
-    // 消息
     display_draw_text_menu(dialog_x + 20, dialog_y + 50, "重启后生效", COLOR_WHITE, COLOR_BLACK);
-
-    // 选项
     display_draw_text_menu(dialog_x + 20, dialog_y + 85, "确认: 重启  返回: 取消", COLOR_WHITE, COLOR_BLACK);
 
     display_refresh(REFRESH_MODE_PARTIAL);
 }
 
-static void __attribute__((unused)) restart_device(void)
-{
-    ESP_LOGI(TAG, "Restarting device...");
-    display_draw_text_menu(100, 300, "正在重启...",
-                          COLOR_BLACK, COLOR_WHITE);
-    display_refresh(REFRESH_MODE_FULL);
-
-    vTaskDelay(pdMS_TO_TICKS(500));
-    esp_restart();
-}
+/**********************
+ * SCREEN CALLBACKS
+ **********************/
 
 static void on_show(screen_t *screen)
 {
@@ -205,7 +184,6 @@ static void on_draw(screen_t *screen)
         return;
     }
 
-    // 清屏
     display_clear(COLOR_WHITE);
 
     // 标题
@@ -224,30 +202,11 @@ static void on_draw(screen_t *screen)
         display_draw_text_menu(20, 45, "当前: 系统默认", COLOR_BLACK, COLOR_WHITE);
     }
 
-    // 绘制字体列表
-    int visible_count = (s_option_count > 6) ? 6 : s_option_count;
-    for (int i = 0; i < visible_count; i++) {
-        int idx = s_state.display_offset + i;
-        if (idx < s_option_count) {
-            bool is_selected = (idx == s_state.selected_index);
-            draw_font_item(i, is_selected);
-        }
-    }
+    // 绘制菜单
+    paginated_menu_draw(&s_menu);
 
     // 底部提示
-    display_draw_text_menu(20, SCREEN_HEIGHT - 60, "上下: 选择  确认: 确认  返回: 返回",
-                           COLOR_BLACK, COLOR_WHITE);
-
-    // 如果选项太多，显示滚动提示
-    if (s_option_count > 6) {
-        char scroll_hint[32];
-        int total_pages = (s_option_count + 5) / 6;
-        int current_page = s_state.display_offset / 6 + 1;
-        snprintf(scroll_hint, sizeof(scroll_hint), "%d/%d", current_page, total_pages);
-        int hint_width = display_get_text_width_menu(scroll_hint);
-        display_draw_text_menu(SCREEN_WIDTH - hint_width - 20, SCREEN_HEIGHT - 60,
-                               scroll_hint, COLOR_BLACK, COLOR_WHITE);
-    }
+    paginated_menu_draw_footer_hint(&s_menu, "上下: 选择  确认: 确认  返回: 返回", 20, SCREEN_HEIGHT - 60);
 }
 
 static void on_event(screen_t *screen, button_t btn, button_event_t event)
@@ -256,100 +215,74 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
         return;
     }
 
-    int old_index = s_state.selected_index;
-    int new_index = old_index;
+    // 处理导航按钮（在当前页内移动）
+    if (btn == BTN_LEFT || btn == BTN_VOLUME_UP ||
+        btn == BTN_RIGHT || btn == BTN_VOLUME_DOWN) {
 
+        int old_index = paginated_menu_get_selected_index(&s_menu);
+        if (paginated_menu_handle_button(&s_menu, btn, NULL, NULL)) {
+            // 索引改变，重绘整屏
+            screen->needs_redraw = true;
+        }
+        return;
+    }
+
+    // 处理功能按钮
     switch (btn) {
-        case BTN_LEFT:
-        case BTN_VOLUME_UP:
-            // 向上
-            if (new_index > 0) {
-                new_index--;
+        case BTN_CONFIRM: {
+            int selected = paginated_menu_get_selected_index(&s_menu);
+            font_option_t *opt = &s_options[selected];
+            ESP_LOGI(TAG, "Selected font: %s (%s)", opt->name, opt->path);
+
+            if (opt->is_default) {
+                save_font_to_nvs("default");
+            } else {
+                save_font_to_nvs(opt->path);
             }
+
+            show_restart_dialog();
             break;
-
-        case BTN_RIGHT:
-        case BTN_VOLUME_DOWN:
-            // 向下
-            if (new_index < s_option_count - 1) {
-                new_index++;
-            }
-            break;
-
-        case BTN_CONFIRM:
-            // 确认选择
-            {
-                font_option_t *opt = &s_options[s_state.selected_index];
-                ESP_LOGI(TAG, "Selected font: %s (%s)", opt->name, opt->path);
-
-                if (opt->is_default) {
-                    // 使用系统默认
-                    save_font_to_nvs("default");
-                } else {
-                    // 使用自定义字体
-                    save_font_to_nvs(opt->path);
-                }
-
-                // 显示重启对话框
-                show_restart_dialog();
-            }
-            return;
+        }
 
         case BTN_BACK:
-            // 返回
             screen_manager_back();
-            return;
-
-        case BTN_NONE:
-        case BTN_POWER:
-            // 忽略这些按钮
             break;
 
         default:
-            // 其他按钮忽略
             break;
     }
-
-    // 更新选中项
-    if (new_index != old_index) {
-        s_state.selected_index = new_index;
-
-        // 更新显示偏移
-        if (new_index < s_state.display_offset) {
-            s_state.display_offset = new_index;
-        } else if (new_index >= s_state.display_offset + 6) {
-            s_state.display_offset = new_index - 5;
-        }
-
-        // 只刷新列表区域
-        int item_height = 50;
-        int start_y = 80;
-        int old_item_y = start_y + (old_index - s_state.display_offset) * item_height;
-        int new_item_y = start_y + (new_index - s_state.display_offset) * item_height;
-
-        display_clear_dirty();
-
-        // 清除并重绘旧项
-        if (old_index >= s_state.display_offset && old_index < s_state.display_offset + 6) {
-            display_clear_region(0, old_item_y - 5, SCREEN_WIDTH, item_height, COLOR_WHITE);
-            draw_font_item(old_index - s_state.display_offset, false);
-            display_mark_dirty(0, old_item_y - 5, SCREEN_WIDTH, item_height);
-        }
-
-        // 清除并重绘新项
-        if (new_index >= s_state.display_offset && new_index < s_state.display_offset + 6) {
-            display_clear_region(0, new_item_y - 5, SCREEN_WIDTH, item_height, COLOR_WHITE);
-            draw_font_item(new_index - s_state.display_offset, true);
-            display_mark_dirty(0, new_item_y - 5, SCREEN_WIDTH, item_height);
-        }
-
-        display_refresh(REFRESH_MODE_PARTIAL);
-    }
 }
+
+/**********************
+ * PUBLIC API
+ **********************/
 
 void font_select_screen_init(void)
 {
     ESP_LOGI(TAG, "Initializing font select screen");
+
+    // 初始化菜单
+    paginated_menu_config_t config = {
+        .start_y = 80,
+        .item_height = 50,
+        .bottom_margin = 80,
+        .menu_width = 400,
+        .text_offset_y = 10,
+        .items_per_page = 10,
+        .item_getter = font_menu_item_getter,
+        .item_drawer = NULL,  // 使用默认绘制器
+        .user_data = NULL,
+        .padding_x = 10,
+        .padding_y = 5,
+        .show_page_hint = true,
+        .page_hint_x = -1,
+        .page_hint_y = -1
+    };
+
+    if (!paginated_menu_init(&s_menu, &config)) {
+        ESP_LOGE(TAG, "Failed to initialize menu");
+        return;
+    }
 
     g_font_select_screen.name = "font_select";
     g_font_select_screen.user_data = NULL;

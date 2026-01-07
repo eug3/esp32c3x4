@@ -5,6 +5,8 @@
 
 #include "font_cache.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -400,6 +402,11 @@ static bool generate_cache(const char *sd_font_path)
             break;
         }
         written++;
+
+        // 定期让出 CPU，允许 UI 线程更新动画
+        if (i % 50 == 0) {
+            vTaskDelay(1);
+        }
     }
 
     free(glyph_buffer);

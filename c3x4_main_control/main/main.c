@@ -37,6 +37,7 @@
 #include "input_handler.h"
 #include "font_select_screen.h"
 #include "boot_animation.h"
+#include "boot_screen.h"
 
 // ============================================================================
 // Xteink X4 引脚定义 - 参考 examples/xteink-x4-sample
@@ -563,6 +564,7 @@ void app_main(void)
     screen_manager_init(&context);
 
     // 注册屏幕
+    boot_screen_init();  // 初始化启动屏幕
     home_screen_init();
     settings_screen_simple_init();
     file_browser_screen_init();
@@ -570,6 +572,7 @@ void app_main(void)
     reader_screen_init();  // 初始化阅读器
     // ble_reader_screen_init();  // 初始化蓝牙读书屏幕 (BLE API incompatible with IDF v5.5.2)
     font_select_screen_init();  // 初始化字体选择屏幕
+    screen_manager_register(boot_screen_get_instance());  // 注册启动屏幕
     screen_manager_register(home_screen_get_instance());
     screen_manager_register(settings_screen_simple_get_instance());
     screen_manager_register(file_browser_screen_get_instance());
@@ -586,8 +589,22 @@ void app_main(void)
     // 注意：input_poll 里可能触发屏幕切换/目录扫描等较深调用栈，给更大的栈以避免 stack protection fault
     xTaskCreate(input_poll_task, "input_poll", 8192, NULL, 5, NULL);
 
-    // 显示主屏幕（放到所有初始化完成后再显示）
-    ESP_LOGI("MAIN", "Showing home screen...");
+    // 先显示启动屏幕
+    ESP_LOGI("MAIN", "Showing boot screen...");
+    boot_screen_set_status("Initializing...");
+    screen_manager_show("boot");
+
+    // 稍等一下让启动屏幕显示
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // 后台继续初始化，启动屏幕会通过持续重绘显示动画
+    ESP_LOGI("MAIN", "Continuing initialization in background...");
+
+    // 初始化完成后切换到主屏幕
+    boot_screen_complete();
+    vTaskDelay(pdMS_TO_TICKS(500));  // 让"Starting..."信息显示一会儿
+
+    ESP_LOGI("MAIN", "Switching to home screen...");
     screen_manager_show("home");
 
     ESP_LOGI("MAIN", "System initialized successfully.");
