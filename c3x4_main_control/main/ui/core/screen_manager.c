@@ -290,16 +290,7 @@ bool screen_manager_handle_event(button_t btn, button_event_t event)
         return false;
     }
 
-    // 全局处理：电源键的双击/长按事件
-    if (btn == BTN_POWER) {
-        if (event == BTN_EVENT_DOUBLE_CLICK) {
-            power_enter_light_sleep();
-            return true;
-        } else if (event == BTN_EVENT_LONG_PRESSED) {
-            power_enter_deep_sleep();
-            return true; // 不会返回（进入深度休眠）
-        }
-    }
+    // 提示：电源键的单击/双击/长按在各屏幕内自行处理，避免重复触发
 
     if (g_mgr.current_screen->on_event != NULL) {
         g_mgr.current_screen->on_event(g_mgr.current_screen, btn, event);

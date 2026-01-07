@@ -17,6 +17,7 @@
 #include "EPD_4in26.h"
 #include "DEV_Config.h"
 #include "wallpaper_manager.h"
+#include "power_manager.h"
 #include "gb18030_conv.h"
 #include <string.h>
 #include <stdio.h>
@@ -1112,6 +1113,9 @@ static void enter_light_sleep(void)
     // 保存阅读进度
     save_reading_progress();
 
+    // 更新电源状态
+    power_set_state(POWER_STATE_LIGHT_SLEEP);
+
     // 显示壁纸
     wallpaper_show();
 
@@ -1126,8 +1130,8 @@ static void exit_light_sleep(void)
     ESP_LOGI(TAG, "Exiting light sleep...");
     s_light_sleep_active = false;
 
-    // 清除壁纸显示
-    wallpaper_clear();
+    // 更新电源状态
+    power_exit_light_sleep();
 
     // 重新显示当前页
     display_current_page();
@@ -1152,25 +1156,64 @@ static void enter_deep_sleep(void)
     esp_deep_sleep_start();
 }
 
+// 真实硬件轻度休眠：显示壁纸 -> 配置GPIO唤醒 -> esp_light_sleep_start -> 唤醒后恢复页面
+static void enter_real_light_sleep(void)
+{
+    ESP_LOGI(TAG, "Entering REAL light sleep (hardware) ...");
+
+    // 若当前不在软休眠，先进入软休眠外观（显示壁纸，状态=LIGHT_SLEEP）
+    if (!s_light_sleep_active) {
+        s_light_sleep_active = true;
+        save_reading_progress();
+        power_set_state(POWER_STATE_LIGHT_SLEEP);
+        wallpaper_show();
+        display_refresh(REFRESH_MODE_FULL);
+    }
+
+    // 配置 GPIO 唤醒（电源键低电平）
+    gpio_wakeup_enable(BTN_POWER_GPIO, GPIO_INTR_LOW_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+
+    // 进入硬件 light sleep，代码在此阻塞，直到按电源键唤醒
+    esp_light_sleep_start();
+
+    ESP_LOGI(TAG, "Woke from REAL light sleep");
+
+    // 唤醒后恢复到阅读页面
+    exit_light_sleep();
+}
+
 static void on_event(screen_t *screen, button_t btn, button_event_t event)
 {
-    // 轻度休眠时，任意键唤醒
+    // 轻度休眠时，仅响应电源键的单击和双击事件
     if (s_light_sleep_active) {
-        if (event == BTN_EVENT_PRESSED) {
-            ESP_LOGI(TAG, "Waking from light sleep...");
-            exit_light_sleep();
+        if (btn == BTN_POWER) {
+            if (event == BTN_EVENT_PRESSED) {
+                // 单击电源键退出轻度休眠
+                ESP_LOGI(TAG, "Exiting light sleep (single click)...");
+                exit_light_sleep();
+            } else if (event == BTN_EVENT_DOUBLE_CLICK) {
+                // 双击电源键：进入真实硬件轻度休眠（唤醒不重启）
+                ESP_LOGI(TAG, "Double click in light sleep - REAL light sleep...");
+                enter_real_light_sleep();
+            }
         }
         return;
     }
 
     // 检查是否是电源按钮
     if (btn == BTN_POWER) {
-        if (event == BTN_EVENT_DOUBLE_CLICK) {
-            // 双击电源键：轻度休眠
+        if (event == BTN_EVENT_PRESSED) {
+            // 单击电源键：显示壁纸（软休眠外观，继续运行）
             enter_light_sleep();
+        } else if (event == BTN_EVENT_DOUBLE_CLICK) {
+            // 双击电源键：进入真实硬件轻度休眠（唤醒不重启）
+            enter_real_light_sleep();
         } else if (event == BTN_EVENT_LONG_PRESSED) {
-            // 长按电源键：深度休眠
-            enter_deep_sleep();
+            // 长按电源键：重启系统
+            ESP_LOGI(TAG, "Long press - restarting system...");
+            save_reading_progress();
+            esp_restart();
         }
         return;
     }

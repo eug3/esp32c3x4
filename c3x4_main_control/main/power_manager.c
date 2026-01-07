@@ -18,23 +18,39 @@
 
 static const char *TAG = "POWER_MGR";
 
+// 全局电源状态
+static power_state_t s_power_state = POWER_STATE_NORMAL;
+
+power_state_t power_get_state(void)
+{
+    return s_power_state;
+}
+
+void power_set_state(power_state_t state)
+{
+    s_power_state = state;
+    ESP_LOGI(TAG, "Power state changed to: %d", (int)state);
+}
+
+void power_exit_light_sleep(void)
+{
+    ESP_LOGI(TAG, "Exiting light sleep...");
+    s_power_state = POWER_STATE_NORMAL;
+}
+
 void power_enter_light_sleep(void)
 {
-    ESP_LOGI(TAG, "Entering light sleep (show wallpaper, wake on power key)...");
+    ESP_LOGI(TAG, "Entering light sleep mode (show wallpaper, continue running)...");
+    s_power_state = POWER_STATE_LIGHT_SLEEP;
 
     // 显示当前壁纸（若未选择则清屏）
     wallpaper_show();
 
-    // 配置 GPIO 唤醒（ESP-IDF: light sleep 走 gpio_wakeup_enable + esp_sleep_enable_gpio_wakeup）
-    // NOTE: 由于其他按键采用 ADC 电阻分压，无法作为 GPIO 唤醒源，实际仅电源键可唤醒。
-    gpio_wakeup_enable(BTN_GPIO3, GPIO_INTR_LOW_LEVEL);
-    esp_sleep_enable_gpio_wakeup();
-
-    // 进入轻度休眠
-    esp_light_sleep_start();
-
-    // 唤醒后，恢复必要外设（ePaper 保持画面，无需立即全刷）
-    ESP_LOGI(TAG, "Woke from light sleep");
+    // 注意：这里不调用 esp_light_sleep_start()，因为那会暂停所有代码执行，
+    // 包括按键轮询循环，导致无法检测双击事件。
+    // 我们只是切换到"壁纸显示状态"，主循环继续运行以响应按键。
+    
+    ESP_LOGI(TAG, "Light sleep mode active (wallpaper shown, waiting for double-click)");
 }
 
 void power_enter_deep_sleep(void)
