@@ -739,3 +739,128 @@ void txt_reader_cleanup(txt_reader_t *reader) {
 
     ESP_LOGI(TAG, "TXT reader cleaned up");
 }
+
+// NVS key for last read info
+#define NVS_KEY_LAST_READ "last_read"
+
+bool txt_reader_save_last_read(const char *file_path, int32_t file_position, int page_number) {
+    if (file_path == NULL || file_path[0] == '\0') {
+        return false;
+    }
+
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS: %d", err);
+        return false;
+    }
+
+    // Extract book name from path
+    const char *filename = strrchr(file_path, '/');
+    filename = (filename != NULL) ? (filename + 1) : file_path;
+
+    // Save file path
+    err = nvs_set_str(nvs_handle, NVS_KEY_LAST_READ "_path", file_path);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save file path: %d", err);
+        nvs_close(nvs_handle);
+        return false;
+    }
+
+    // Save file position
+    err = nvs_set_i32(nvs_handle, NVS_KEY_LAST_READ "_pos", file_position);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save position: %d", err);
+        nvs_close(nvs_handle);
+        return false;
+    }
+
+    // Save page number
+    err = nvs_set_i32(nvs_handle, NVS_KEY_LAST_READ "_page", page_number);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save page: %d", err);
+        nvs_close(nvs_handle);
+        return false;
+    }
+
+    // Commit
+    err = nvs_commit(nvs_handle);
+    nvs_close(nvs_handle);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Saved last read: %s (pos=%ld, page=%d)", filename, (long)file_position, page_number);
+        return true;
+    }
+
+    ESP_LOGE(TAG, "Failed to commit: %d", err);
+    return false;
+}
+
+last_read_info_t txt_reader_get_last_read(void) {
+    last_read_info_t info = {0};
+    info.valid = false;
+
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "No last read info (NVS open failed: %d)", err);
+        return info;
+    }
+
+    // Get file path
+    char file_path[256] = {0};
+    size_t len = sizeof(file_path);
+    err = nvs_get_str(nvs_handle, NVS_KEY_LAST_READ "_path", file_path, &len);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "No last read path found");
+        nvs_close(nvs_handle);
+        return info;
+    }
+
+    // Get file position
+    int32_t pos = 0;
+    err = nvs_get_i32(nvs_handle, NVS_KEY_LAST_READ "_pos", &pos);
+    if (err != ESP_OK) {
+        pos = 0;
+    }
+
+    // Get page number
+    int32_t page = 0;
+    err = nvs_get_i32(nvs_handle, NVS_KEY_LAST_READ "_page", &page);
+    if (err != ESP_OK) {
+        page = 0;
+    }
+
+    nvs_close(nvs_handle);
+
+    // Extract book name
+    const char *filename = strrchr(file_path, '/');
+    filename = (filename != NULL) ? (filename + 1) : file_path;
+
+    strncpy(info.file_path, file_path, sizeof(info.file_path) - 1);
+    info.file_path[sizeof(info.file_path) - 1] = '\0';
+    strncpy(info.book_name, filename, sizeof(info.book_name) - 1);
+    info.book_name[sizeof(info.book_name) - 1] = '\0';
+    info.file_position = pos;
+    info.page_number = page;
+    info.valid = true;
+
+    ESP_LOGI(TAG, "Got last read: %s (page=%d)", info.book_name, info.page_number);
+    return info;
+}
+
+void txt_reader_clear_last_read(void) {
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        return;
+    }
+
+    nvs_erase_key(nvs_handle, NVS_KEY_LAST_READ "_path");
+    nvs_erase_key(nvs_handle, NVS_KEY_LAST_READ "_pos");
+    nvs_erase_key(nvs_handle, NVS_KEY_LAST_READ "_page");
+    nvs_commit(nvs_handle);
+    nvs_close(nvs_handle);
+
+    ESP_LOGI(TAG, "Cleared last read info");
+}

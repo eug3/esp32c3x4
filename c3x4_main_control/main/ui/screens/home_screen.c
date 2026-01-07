@@ -9,6 +9,7 @@
 #include "GUI_Paint.h"
 #include "fonts.h"
 #include "xt_eink_font_impl.h"
+#include "txt_reader.h"
 #include "esp_log.h"
 #include <string.h>
 
@@ -22,7 +23,7 @@ static struct {
     menu_item_t selected_item;     // 当前选中的菜单项
     int display_offset;            // 显示偏移（用于滚动）
 } s_menu_state = {
-    .selected_item = MENU_ITEM_FILE_BROWSER,
+    .selected_item = MENU_ITEM_LAST_READ,
     .display_offset = 0,
 };
 
@@ -36,6 +37,7 @@ typedef struct {
 } menu_info_t;
 
 static const menu_info_t s_menu_items[MENU_ITEM_COUNT] = {
+    [MENU_ITEM_LAST_READ] = { .label = "上次阅读", .icon = NULL },
     [MENU_ITEM_FILE_BROWSER] = { .label = "文件", .icon = NULL },
     [MENU_ITEM_BLE_READER] = { .label = "蓝牙读书", .icon = NULL },
     [MENU_ITEM_SETTINGS]       = { .label = "设置", .icon = NULL },
@@ -200,6 +202,9 @@ static void on_draw(screen_t *screen)
     int menu_width = 400;
     int menu_x = (SCREEN_WIDTH - menu_width) / 2;
 
+    // 获取上次阅读信息
+    last_read_info_t last_read = txt_reader_get_last_read();
+
     for (int i = 0; i < MENU_ITEM_COUNT; i++) {
         int item_y = menu_start_y + i * menu_item_height;
         bool is_selected = (i == s_menu_state.selected_item);
@@ -208,15 +213,29 @@ static void on_draw(screen_t *screen)
             text_y = item_y - 5;
         }
 
+        // 确定菜单项文字
+        const char *item_text = s_menu_items[i].label;
+        char last_read_text[256] = {0};
+
+        if (i == MENU_ITEM_LAST_READ) {
+            // 上次阅读项显示书名
+            if (last_read.valid) {
+                snprintf(last_read_text, sizeof(last_read_text), "上次阅读：%s", last_read.book_name);
+            } else {
+                snprintf(last_read_text, sizeof(last_read_text), "上次阅读（无）");
+            }
+            item_text = last_read_text;
+        }
+
         // 绘制菜单项背景
         if (is_selected) {
             display_draw_rect(menu_x - 10, item_y - 5, menu_width + 20, menu_item_height - 10,
                              COLOR_BLACK, true);
-            display_draw_text_menu(menu_x, text_y, s_menu_items[i].label, COLOR_WHITE, COLOR_BLACK);
+            display_draw_text_menu(menu_x, text_y, item_text, COLOR_WHITE, COLOR_BLACK);
         } else {
             display_draw_rect(menu_x - 10, item_y - 5, menu_width + 20, menu_item_height - 10,
                              COLOR_BLACK, false);
-            display_draw_text_menu(menu_x, text_y, s_menu_items[i].label, COLOR_BLACK, COLOR_WHITE);
+            display_draw_text_menu(menu_x, text_y, item_text, COLOR_BLACK, COLOR_WHITE);
         }
     }
 
@@ -458,6 +477,17 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
         case BTN_CONFIRM:
             // 确认选择
             switch (s_menu_state.selected_item) {
+                case MENU_ITEM_LAST_READ: {
+                    // 上次阅读：直接打开书籍
+                    last_read_info_t last_read = txt_reader_get_last_read();
+                    if (last_read.valid) {
+                        ESP_LOGI(TAG, "Opening last read book: %s", last_read.file_path);
+                        screen_manager_show_reader(last_read.file_path);
+                    } else {
+                        ESP_LOGW(TAG, "No last read book available");
+                    }
+                    break;
+                }
                 case MENU_ITEM_FILE_BROWSER:
                     screen_manager_show_file_browser();
                     break;
@@ -545,9 +575,9 @@ void home_screen_init(void)
     g_home_screen.needs_redraw = false;
 
     // 重置菜单状态
-    s_menu_state.selected_item = MENU_ITEM_FILE_BROWSER;
+    s_menu_state.selected_item = MENU_ITEM_LAST_READ;
     s_menu_state.display_offset = 0;
-    
+
     ESP_LOGI(TAG, "Home screen initialized");
 }
 

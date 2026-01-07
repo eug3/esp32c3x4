@@ -41,7 +41,11 @@ typedef enum {
     BTN_EVENT_RELEASED,     // 释放
     BTN_EVENT_LONG_PRESSED, // 长按
     BTN_EVENT_REPEAT,       // 重复
+    BTN_EVENT_DOUBLE_CLICK, // 双击
 } button_event_t;
+
+// 双击时间间隔（ms）
+#define BTN_DOUBLE_CLICK_TIME   300
 
 // 防抖时间（ms）
 #define BTN_DEBOUNCE_TIME      50

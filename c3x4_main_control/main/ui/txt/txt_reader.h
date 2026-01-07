@@ -132,6 +132,37 @@ txt_encoding_t txt_reader_detect_encoding(const char *file_path);
  */
 void txt_reader_cleanup(txt_reader_t *reader);
 
+/**
+ * @brief 上次阅读信息结构
+ */
+typedef struct {
+    char file_path[256];      // 文件路径
+    char book_name[128];      // 书名（文件名或从文件解析）
+    int32_t file_position;    // 阅读位置
+    int page_number;          // 页码
+    bool valid;               // 是否有效
+} last_read_info_t;
+
+/**
+ * @brief 保存上次阅读信息（全局记录）
+ * @param file_path 文件路径
+ * @param file_position 阅读位置
+ * @param page_number 页码
+ * @return true 成功，false 失败
+ */
+bool txt_reader_save_last_read(const char *file_path, int32_t file_position, int page_number);
+
+/**
+ * @brief 获取上次阅读信息
+ * @return 上次阅读信息
+ */
+last_read_info_t txt_reader_get_last_read(void);
+
+/**
+ * @brief 清除上次阅读记录
+ */
+void txt_reader_clear_last_read(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -10,15 +10,22 @@
 #include "fonts.h"
 #include "txt_reader.h"
 #include "epub_parser.h"
-#include "epub_html.h"
 #include "xt_eink_font_impl.h"
 #include "esp_log.h"
+#include "esp_sleep.h"
+#include "driver/gpio.h"
+#include "EPD_4in26.h"
+#include "DEV_Config.h"
+#include "wallpaper_manager.h"
 #include "gb18030_conv.h"
 #include <string.h>
 #include <stdio.h>
 #include <sys/stat.h>
 
 static const char *TAG = "READER_SCREEN";
+
+// 电源按钮引脚
+#define BTN_POWER_GPIO GPIO_NUM_3
 
 // Line buffer size for text rendering
 #define MAX_LINE_BUFFER_SIZE 512
@@ -1057,6 +1064,25 @@ static void on_hide(screen_t *screen)
     // 保存阅读进度
     save_reading_progress();
 
+    // 保存上次阅读信息
+    if (s_reader_state.is_loaded && s_reader_state.file_path[0] != '\0') {
+        int32_t pos = 0;
+        int page = 0;
+
+        if (s_reader_state.type == READER_TYPE_TXT && s_reader_state.txt_cache.ready) {
+            pos = s_reader_state.txt_cache.src_pos[s_reader_state.txt_cache.cursor];
+            page = s_reader_state.current_page;
+        } else if (s_reader_state.type == READER_TYPE_EPUB) {
+            // EPUB 使用章节号作为位置标识
+            pos = (int32_t)(s_reader_state.current_page - 1);
+            page = s_reader_state.current_page;
+        }
+
+        txt_reader_save_last_read(s_reader_state.file_path, pos, page);
+        ESP_LOGI(TAG, "Saved last read: %s (pos=%ld, page=%d)",
+                 s_reader_state.file_path, (long)pos, page);
+    }
+
     // 清理资源
     if (s_reader_state.type == READER_TYPE_TXT) {
         txt_cache_close();
@@ -1075,8 +1101,82 @@ static void on_draw(screen_t *screen)
     // 显示已在 on_show 中完成
 }
 
+// 轻度休眠状态
+static bool s_light_sleep_active = false;
+
+static void enter_light_sleep(void)
+{
+    if (s_light_sleep_active) return;
+
+    ESP_LOGI(TAG, "Entering light sleep (show wallpaper)...");
+    s_light_sleep_active = true;
+
+    // 保存阅读进度
+    save_reading_progress();
+
+    // 显示壁纸
+    wallpaper_show();
+
+    // 刷新显示
+    display_refresh(REFRESH_MODE_FULL);
+}
+
+static void exit_light_sleep(void)
+{
+    if (!s_light_sleep_active) return;
+
+    ESP_LOGI(TAG, "Exiting light sleep...");
+    s_light_sleep_active = false;
+
+    // 清除壁纸显示
+    wallpaper_clear();
+
+    // 重新显示当前页
+    display_current_page();
+    display_refresh(REFRESH_MODE_FULL);
+}
+
+static void enter_deep_sleep(void)
+{
+    ESP_LOGI(TAG, "Entering deep sleep...");
+
+    // 保存阅读进度
+    save_reading_progress();
+
+    // EPD 进入休眠模式
+    EPD_4in26_Sleep();
+    DEV_Delay_ms(100);
+
+    // 配置电源按钮唤醒
+    esp_deep_sleep_enable_gpio_wakeup(BTN_POWER_GPIO, ESP_GPIO_WAKEUP_GPIO_LOW);
+
+    // ESP32 进入深度睡眠
+    esp_deep_sleep_start();
+}
+
 static void on_event(screen_t *screen, button_t btn, button_event_t event)
 {
+    // 轻度休眠时，任意键唤醒
+    if (s_light_sleep_active) {
+        if (event == BTN_EVENT_PRESSED) {
+            ESP_LOGI(TAG, "Waking from light sleep...");
+            exit_light_sleep();
+        }
+        return;
+    }
+
+    // 检查是否是电源按钮
+    if (btn == BTN_POWER) {
+        if (event == BTN_EVENT_DOUBLE_CLICK) {
+            // 双击电源键：轻度休眠
+            enter_light_sleep();
+        } else if (event == BTN_EVENT_LONG_PRESSED) {
+            // 长按电源键：深度休眠
+            enter_deep_sleep();
+        }
+        return;
+    }
+
     if (event != BTN_EVENT_PRESSED) {
         return;
     }
@@ -1103,16 +1203,13 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
             screen_manager_back();
             break;
 
-        //case BTN_ENTER:
-            // 暂不处理
-        //    break;
         default:
             break;
     }
 }
 
 /**********************
- * GLOBAL FUNCTIONS
+ *  STATIC FUNCTIONS
  **********************/
 
 void reader_screen_init(void)

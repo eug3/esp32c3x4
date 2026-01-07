@@ -9,6 +9,7 @@
 #include "screen_manager.h"
 #include "fonts.h"
 #include "xt_eink_font_impl.h"
+#include "wallpaper_manager.h"
 #include "esp_log.h"
 #include <string.h>
 
@@ -18,12 +19,14 @@ static paginated_menu_t s_menu = {0};
 
 // 设置菜单项
 typedef enum {
-    SETTING_ITEM_FONT = 0,
+    SETTING_ITEM_WALLPAPER = 0,
+    SETTING_ITEM_FONT,
     SETTING_ITEM_ABOUT,
     SETTING_ITEM_COUNT
 } setting_item_t;
 
 static const char *s_setting_labels[SETTING_ITEM_COUNT] = {
+    [SETTING_ITEM_WALLPAPER] = "壁纸管理",
     [SETTING_ITEM_FONT] = "字体设置",
     [SETTING_ITEM_ABOUT] = "关于",
 };
@@ -116,6 +119,10 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
         case BTN_CONFIRM: {
             int selected = paginated_menu_get_selected_index(&s_menu);
             switch (selected) {
+                case SETTING_ITEM_WALLPAPER:
+                    // 进入壁纸管理屏幕（列表 + 预览 + 选择）
+                    screen_manager_show("wallpaper");
+                    break;
                 case SETTING_ITEM_FONT:
                     screen_manager_show_font_select();
                     break;

@@ -38,6 +38,8 @@
 #include "font_select_screen.h"
 #include "boot_animation.h"
 #include "boot_screen.h"
+#include "wallpaper_manager.h"
+#include "wallpaper_screen.h"
 
 // ============================================================================
 // Xteink X4 引脚定义 - 参考 examples/xteink-x4-sample
@@ -567,6 +569,7 @@ void app_main(void)
     boot_screen_init();  // 初始化启动屏幕
     home_screen_init();
     settings_screen_simple_init();
+    wallpaper_screen_init();
     file_browser_screen_init();
     image_viewer_screen_init();  // 初始化图片浏览器
     reader_screen_init();  // 初始化阅读器
@@ -575,6 +578,7 @@ void app_main(void)
     screen_manager_register(boot_screen_get_instance());  // 注册启动屏幕
     screen_manager_register(home_screen_get_instance());
     screen_manager_register(settings_screen_simple_get_instance());
+    screen_manager_register(wallpaper_screen_get_instance());
     screen_manager_register(file_browser_screen_get_instance());
     screen_manager_register(image_viewer_screen_get_instance());  // 注册图片浏览器
     screen_manager_register(reader_screen_get_instance());  // 注册阅读器
@@ -606,6 +610,12 @@ void app_main(void)
 
     ESP_LOGI("MAIN", "Switching to home screen...");
     screen_manager_show("home");
+
+    // ============================================================================
+    // 初始化壁纸管理器
+    // ============================================================================
+    ESP_LOGI("MAIN", "Initializing wallpaper manager...");
+    wallpaper_manager_init();
 
     ESP_LOGI("MAIN", "System initialized successfully.");
 }

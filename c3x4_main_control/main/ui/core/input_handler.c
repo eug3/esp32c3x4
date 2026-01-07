@@ -41,9 +41,11 @@ static struct {
     button_t last_btn;
     int64_t press_time;
     int64_t last_event_time;
+    int64_t last_release_time;  // 上次释放时间，用于双击检测
     bool is_pressed;
     bool is_long_pressed;
     int repeat_count;
+    button_t last_released_btn;  // 上次释放的按钮
 } s_btn_state = {0};
 
 /**********************
@@ -210,7 +212,25 @@ void input_handler_poll(void)
         // 没有按键按下
         if (s_btn_state.is_pressed) {
             // 按键释放
-            trigger_callback(s_btn_state.last_btn, BTN_EVENT_RELEASED);
+            int64_t release_time = get_time_ms();
+            button_t released_btn = s_btn_state.last_btn;
+
+            // 双击检测：检查是否在 BTN_DOUBLE_CLICK_TIME 内第二次按下同一种按钮
+            if (release_time - s_btn_state.last_release_time <= BTN_DOUBLE_CLICK_TIME &&
+                released_btn == s_btn_state.last_released_btn &&
+                !s_btn_state.is_long_pressed) {
+                // 双击触发
+                trigger_callback(released_btn, BTN_EVENT_DOUBLE_CLICK);
+                // 重置双击状态，避免再次触发
+                s_btn_state.last_release_time = 0;
+                s_btn_state.last_released_btn = BTN_NONE;
+            } else {
+                // 正常释放事件
+                trigger_callback(released_btn, BTN_EVENT_RELEASED);
+                // 记录释放的按钮和时间
+                s_btn_state.last_release_time = release_time;
+                s_btn_state.last_released_btn = released_btn;
+            }
 
             // 重置状态
             s_btn_state.is_pressed = false;
@@ -286,12 +306,13 @@ const char* input_handler_get_button_name(button_t btn)
 const char* input_handler_get_event_name(button_event_t event)
 {
     switch (event) {
-        case BTN_EVENT_NONE:        return "NONE";
-        case BTN_EVENT_PRESSED:     return "PRESSED";
-        case BTN_EVENT_RELEASED:    return "RELEASED";
+        case BTN_EVENT_NONE:         return "NONE";
+        case BTN_EVENT_PRESSED:      return "PRESSED";
+        case BTN_EVENT_RELEASED:     return "RELEASED";
         case BTN_EVENT_LONG_PRESSED: return "LONG_PRESSED";
-        case BTN_EVENT_REPEAT:      return "REPEAT";
-        default:                    return "Unknown";
+        case BTN_EVENT_REPEAT:       return "REPEAT";
+        case BTN_EVENT_DOUBLE_CLICK: return "DOUBLE_CLICK";
+        default:                     return "Unknown";
     }
 }
 

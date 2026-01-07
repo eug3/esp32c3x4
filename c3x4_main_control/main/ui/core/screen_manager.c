@@ -5,6 +5,7 @@
 
 #include "screen_manager.h"
 #include "display_engine.h"
+#include "power_manager.h"
 #include "esp_log.h"
 #include <string.h>
 
@@ -287,6 +288,17 @@ bool screen_manager_handle_event(button_t btn, button_event_t event)
 {
     if (g_mgr.current_screen == NULL) {
         return false;
+    }
+
+    // 全局处理：电源键的双击/长按事件
+    if (btn == BTN_POWER) {
+        if (event == BTN_EVENT_DOUBLE_CLICK) {
+            power_enter_light_sleep();
+            return true;
+        } else if (event == BTN_EVENT_LONG_PRESSED) {
+            power_enter_deep_sleep();
+            return true; // 不会返回（进入深度休眠）
+        }
     }
 
     if (g_mgr.current_screen->on_event != NULL) {

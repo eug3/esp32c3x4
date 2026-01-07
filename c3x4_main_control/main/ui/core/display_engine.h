@@ -17,6 +17,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*********************
  *      DEFINES
  *********************/
@@ -245,5 +249,9 @@ uint8_t* display_get_framebuffer(void);
 void display_draw_bitmap_mask_1bpp(int x, int y, int width, int height,
                                   const uint8_t *bits, int stride_bytes,
                                   uint8_t color);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // DISPLAY_ENGINE_H
