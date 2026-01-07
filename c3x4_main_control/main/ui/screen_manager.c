@@ -291,6 +291,10 @@ bool screen_manager_handle_event(button_t btn, button_event_t event)
 
     if (g_mgr.current_screen->on_event != NULL) {
         g_mgr.current_screen->on_event(g_mgr.current_screen, btn, event);
+        // 事件处理后检查是否需要重绘
+        if (g_mgr.current_screen->needs_redraw) {
+            screen_manager_draw();
+        }
         return true;  // 事件已处理
     }
 

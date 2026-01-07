@@ -17,7 +17,10 @@
       "Bash(py:*)",
       "Bash(ninja)",
       "Bash(cmake --build:*)",
-      "Bash(idf.py size:*)"
+      "Bash(idf.py size:*)",
+      "Bash(cat:*)",
+      "Bash(idf.py:*)",
+      "Bash(source:*)"
     ]
   }
 }

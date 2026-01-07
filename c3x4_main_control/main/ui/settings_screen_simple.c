@@ -77,6 +77,8 @@ static void on_draw(screen_t *screen)
 
     // 底部提示
     paginated_menu_draw_footer_hint(&s_menu, "上下: 选择  确认: 进入  返回: 返回", 20, SCREEN_HEIGHT - 60);
+
+    display_refresh(REFRESH_MODE_PARTIAL);
 }
 
 static void on_event(screen_t *screen, button_t btn, button_event_t event)
@@ -85,16 +87,29 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
         return;
     }
 
-    // 处理导航按钮（在当前页内移动）
-    if (btn == BTN_LEFT || btn == BTN_VOLUME_UP ||
-        btn == BTN_RIGHT || btn == BTN_VOLUME_DOWN) {
+    // 处理导航按钮
+    // 对于只有单页的菜单：LEFT/RIGHT 和 VOLUME_UP/DOWN 都用于上下导航
+    // 对于多页菜单：LEFT/RIGHT 用于翻页，VOLUME_UP/DOWN 用于页内导航
+    if (btn == BTN_LEFT || btn == BTN_RIGHT ||
+        btn == BTN_VOLUME_UP || btn == BTN_VOLUME_DOWN) {
 
-        if (paginated_menu_handle_button(&s_menu, btn, NULL, NULL)) {
-            // 索引改变，重绘整屏
+        // 先尝试普通的菜单处理
+        bool changed = paginated_menu_handle_button(&s_menu, btn, NULL, NULL);
+        
+        // 如果没有改变且是翻页按钮，尝试在单页菜单中进行上下导航
+        if (!changed && (btn == BTN_LEFT || btn == BTN_RIGHT)) {
+            // 对于单页菜单，LEFT/RIGHT 也应该作为上下导航使用
+            int delta = (btn == BTN_LEFT) ? -1 : 1;
+            changed = paginated_menu_move_selection(&s_menu, delta);
+        }
+        
+        if (changed) {
+            // 状态改变，重绘整屏
             screen->needs_redraw = true;
         }
-        return;
+        return;  // 导航按钮已处理
     }
+
 
     // 处理功能按钮
     switch (btn) {

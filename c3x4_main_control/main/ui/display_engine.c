@@ -976,7 +976,8 @@ int display_get_text_width_menu(const char *text)
         return measure_text_width_utf8_menu(text, font);
     }
 
-    return (int)strlen(text) * (int)font->Width;
+    // 修复: 对包含中文的文本，使用 UTF-8 宽度计算，不能使用字节数
+    return measure_text_width_utf8_menu(text, font);
 }
 
 int display_get_text_height_font(sFONT *font)
