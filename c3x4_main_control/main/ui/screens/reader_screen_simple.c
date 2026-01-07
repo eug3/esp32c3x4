@@ -61,8 +61,9 @@ static struct {
     char file_path[256];
     txt_reader_t txt_reader;
     epub_reader_t epub_reader;  // EPUB 阅读器实例
-    char epub_html[4096];        // EPUB 章节原始 HTML/XHTML
-    char current_text[4096];     // 当前页文本
+    // 优化：动态分配大缓冲区，节省 .bss 内存
+    char *epub_html;             // EPUB 章节原始 HTML/XHTML (动态分配 4KB)
+    char *current_text;          // 当前页文本 (动态分配 4KB)
     int current_page;
     int total_pages;
     int chars_per_page;
@@ -1257,6 +1258,20 @@ void reader_screen_init(void)
 {
     ESP_LOGI(TAG, "Initializing reader screen");
 
+    // 分配大缓冲区（仅在需要时占用内存）
+    if (s_reader_state.epub_html == NULL) {
+        s_reader_state.epub_html = malloc(4096);
+        if (s_reader_state.epub_html == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate epub_html buffer!");
+        }
+    }
+    if (s_reader_state.current_text == NULL) {
+        s_reader_state.current_text = malloc(4096);
+        if (s_reader_state.current_text == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate current_text buffer!");
+        }
+    }
+
     g_reader_screen.name = "reader";
     g_reader_screen.user_data = NULL;
     g_reader_screen.on_show = on_show;
@@ -1265,6 +1280,25 @@ void reader_screen_init(void)
     g_reader_screen.on_event = on_event;
     g_reader_screen.is_visible = false;
     g_reader_screen.needs_redraw = false;
+}
+
+void reader_screen_deinit(void)
+{
+    ESP_LOGI(TAG, "Deinitializing reader screen");
+    
+    // 释放分配的大缓冲区
+    if (s_reader_state.epub_html != NULL) {
+        free(s_reader_state.epub_html);
+        s_reader_state.epub_html = NULL;
+    }
+    if (s_reader_state.current_text != NULL) {
+        free(s_reader_state.current_text);
+        s_reader_state.current_text = NULL;
+    }
+    
+    // 重置状态
+    s_reader_state.type = READER_TYPE_NONE;
+    s_reader_state.is_loaded = false;
 }
 
 screen_t* reader_screen_get_instance(void)

@@ -424,7 +424,7 @@ static void input_poll_task(void *arg)
 
 void app_main(void)
 {
-    printf("ESP32 BLE and WiFi System Starting...\n");
+    printf("Monster For Pan EPD Starting...\n");
 
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();

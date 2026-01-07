@@ -28,8 +28,7 @@ typedef struct {
     uint8_t connected_device[6];        // 已连接的设备地址
     bool device_connected;              // 设备是否已连接
     
-    // 位图缓冲区
-    uint8_t *page_buffer;               // 当前页面的位图数据（48KB）
+    // 状态标志
     bool page_loaded;                   // 当前页面是否已加载
     
     // 预加载状态
@@ -43,7 +42,6 @@ static ble_reader_state_internal_t s_ble_state = {
     .current_page = 0,
     .total_pages = 0,
     .device_connected = false,
-    .page_buffer = NULL,
     .page_loaded = false,
     .preload_requested = false,
     .preload_start_page = 0,
@@ -75,45 +73,34 @@ static void on_preload_needed(uint16_t book_id, uint16_t start_page, uint8_t pag
  **********************/
 
 /**
- * @brief 初始化页面缓冲区
+ * @brief 初始化页面缓冲区（延迟分配）
  */
 static bool init_page_buffer(void)
 {
-    if (s_ble_state.page_buffer != NULL) {
-        return true;
-    }
-
-    // 分配位图缓冲区（48KB）
-    s_ble_state.page_buffer = (uint8_t *)heap_caps_malloc(BLE_BITMAP_SIZE, MALLOC_CAP_SPIRAM);
-    if (s_ble_state.page_buffer == NULL) {
-        s_ble_state.page_buffer = (uint8_t *)heap_caps_malloc(BLE_BITMAP_SIZE, MALLOC_CAP_8BIT);
-    }
-
-    if (s_ble_state.page_buffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate page buffer");
-        return false;
-    }
-
-    ESP_LOGI(TAG, "Page buffer allocated: %u bytes", BLE_BITMAP_SIZE);
+    // 页面缓冲区现在按需分配，不预先分配
+    ESP_LOGI(TAG, "Page buffer will be allocated on-demand during display");
     return true;
 }
 
 /**
- * @brief 加载页面到显示缓冲区
+ * @brief 标记页面已加载（实际数据在littlefs中，不预加载）
  */
 static bool load_current_page(void)
 {
     if (s_ble_state.current_book_id == 0) {
+        s_ble_state.page_loaded = false;
         return false;
     }
 
-    // 尝试从缓存加载
-    uint32_t read_size = ble_cache_load_page(s_ble_state.current_book_id,
-                                             s_ble_state.current_page,
-                                             s_ble_state.page_buffer,
-                                             BLE_BITMAP_SIZE);
-
-    if (read_size == BLE_BITMAP_SIZE) {
+    // 检查页面缓存是否存在（仅检查，不加载到内存）
+    // 页面数据存储在littlefs中，on_draw时按需读取
+    char filename[64];
+    snprintf(filename, sizeof(filename), "/littlefs/ble_pages/book_%04x_page_%05u.bin",
+             s_ble_state.current_book_id, s_ble_state.current_page);
+    
+    FILE *f = fopen(filename, "rb");
+    if (f != NULL) {
+        fclose(f);
         s_ble_state.page_loaded = true;
         
         // 更新阅读位置，触发预加载检查
@@ -122,7 +109,7 @@ static bool load_current_page(void)
         return true;
     }
 
-    ESP_LOGW(TAG, "Failed to load page: book=%04x, page=%u",
+    ESP_LOGW(TAG, "Page file not found: book=%04x, page=%u",
              s_ble_state.current_book_id, s_ble_state.current_page);
     s_ble_state.page_loaded = false;
     return false;
@@ -142,18 +129,10 @@ static void ble_device_found_callback(const ble_device_info_t *device)
              device->addr[0], device->addr[1], device->addr[2],
              device->addr[3], device->addr[4], device->addr[5],
              device->rssi);
-
-    // 动态 UUID 交换：只连接“明确广播了服务 UUID”的设备，避免误连。
-    if (!device->has_service_uuid128) {
-        return;
-    }
-
-    // 自动连接到强信号设备
-    if (device->rssi > -70) {
-        ESP_LOGI(TAG, "Attempting to connect to: %s", device->name);
-        ble_manager_set_target_service_uuid128_le(device->service_uuid128_le);
-        ble_reader_screen_connect_device(device->addr);
-    }
+    // 服务器模式：EPD 设备不扫描，等待手机连接
+    // 此回调不应触发
+    ESP_LOGW(TAG, "Unexpected device found callback in server mode");
+    (void)device;
 }
 
 /**
@@ -304,23 +283,35 @@ static void on_draw(screen_t *screen)
     display_draw_text_menu(20, status_y, status_str, COLOR_BLACK, COLOR_WHITE);
 
     // 绘制页面内容
-    if (s_ble_state.page_loaded && s_ble_state.page_buffer != NULL) {
-        // 位图数据应该是预格式化的原始像素数据（8位灰度或1位黑白）
-        // 帧缓冲大小: 480 * 800 / 8 = 48000 字节（1位）或 480 * 800 = 384000（8位）
-        // 位图大小: 48KB = 49152 字节
-        // 假设位图是 1 位黑白格式，覆盖整个屏幕
+    if (s_ble_state.page_loaded) {
+        // 从littlefs读取页面位图并显示
+        char filename[64];
+        snprintf(filename, sizeof(filename), "/littlefs/ble_pages/book_%04x_page_%05u.bin",
+                 s_ble_state.current_book_id, s_ble_state.current_page);
         
-        uint8_t *framebuffer = display_get_framebuffer();
-        if (framebuffer != NULL) {
-            // 直接拷贝位图数据到帧缓冲
-            // 注意：实际映射取决于位图格式和硬件配置
-            uint16_t copy_len = (SCREEN_WIDTH * SCREEN_HEIGHT) / 8;  // 1-bit format
-            if (copy_len > BLE_BITMAP_SIZE) {
-                copy_len = BLE_BITMAP_SIZE;
-            }
+        FILE *f = fopen(filename, "rb");
+        if (f != NULL) {
+            // 动态分配临时缓冲区（按需）
+            uint16_t copy_len = (SCREEN_WIDTH * SCREEN_HEIGHT) / 8;
+            uint8_t *temp_buffer = (uint8_t *)malloc(copy_len);
             
-            memcpy(framebuffer, s_ble_state.page_buffer, copy_len);
-            ESP_LOGI(TAG, "Bitmap displayed, copied %u bytes", copy_len);
+            if (temp_buffer != NULL) {
+                // 从文件读取并显示
+                size_t read = fread(temp_buffer, 1, copy_len, f);
+                if (read > 0) {
+                    uint8_t *framebuffer = display_get_framebuffer();
+                    if (framebuffer != NULL) {
+                        memcpy(framebuffer, temp_buffer, read);
+                        ESP_LOGI(TAG, "Bitmap displayed, copied %u bytes", read);
+                    }
+                }
+                free(temp_buffer);
+            } else {
+                ESP_LOGE(TAG, "Failed to allocate temporary buffer");
+            }
+            fclose(f);
+        } else {
+            ESP_LOGW(TAG, "Failed to open page file: %s", filename);
         }
     } else if (s_ble_state.current_book_id != 0) {
         // 页面未加载，显示提示
@@ -413,15 +404,9 @@ static void on_show(screen_t *screen)
     s_context = screen_manager_get_context();
     screen->needs_redraw = true;
 
-    // 初始化页面缓冲区（仅用于显示，不再用于BLE接收）
-    if (!init_page_buffer()) {
-        ESP_LOGE(TAG, "Failed to initialize page buffer");
-        return;
-    }
-
-    // 初始化蓝牙协议（流式写入模式，无需外部缓冲）
+    // 先初始化蓝牙协议（流式写入模式，无需外部缓冲）
     if (!ble_book_protocol_init()) {
-        ESP_LOGE(TAG, "Failed to initialize BLE protocol");
+        ESP_LOGI(TAG, "Failed to initialize BLE protocol");
         return;
     }
 
@@ -429,9 +414,16 @@ static void on_show(screen_t *screen)
     ble_book_protocol_register_page_ready_cb(on_page_ready);
     ble_cache_register_preload_cb(on_preload_needed);
 
-    // 初始化蓝牙管理器
+    // 初始化蓝牙管理器（需要大块连续内存）
     if (!ble_manager_init()) {
         ESP_LOGE(TAG, "Failed to initialize BLE manager");
+        return;
+    }
+
+    // BLE初始化成功后，再分配Page buffer（避免堆碎片化）
+    if (!init_page_buffer()) {
+        ESP_LOGE(TAG, "Failed to initialize page buffer");
+        ble_manager_deinit();
         return;
     }
 
@@ -440,19 +432,16 @@ static void on_show(screen_t *screen)
     ble_manager_register_connect_cb(ble_connect_callback);
     ble_manager_register_data_received_cb(ble_data_received_callback);
 
-    // 开始扫描蓝牙设备
-    s_ble_state.state = BLE_READER_STATE_SCANNING;
-    ble_reader_screen_start_scan();
+    // 设备作为外设，开始广播等待手机连接
+    s_ble_state.state = BLE_READER_STATE_IDLE;
+    ESP_LOGI(TAG, "Waiting for phone connection (advertising as MFP-EPD)...");
 }
 
 static void on_hide(screen_t *screen)
 {
     ESP_LOGI(TAG, "BLE Reader screen hidden");
 
-    // 清理蓝牙
-    if (s_ble_state.state == BLE_READER_STATE_SCANNING) {
-        ble_reader_screen_stop_scan();
-    }
+    // 清理蓝牙连接
     if (s_ble_state.device_connected) {
         ble_reader_screen_disconnect();
     }

@@ -71,6 +71,18 @@ void ble_manager_register_connect_cb(ble_on_connect_cb cb);
 void ble_manager_register_data_received_cb(ble_on_data_received_cb cb);
 
 /**
+ * @brief 开始广播并等待手机连接
+ * @return true 成功，false 失败
+ */
+bool ble_manager_start_advertising(void);
+
+/**
+ * @brief 停止广播
+ * @return true 成功或已停止，false 失败
+ */
+bool ble_manager_stop_advertising(void);
+
+/**
  * @brief 启动蓝牙扫描
  * @param duration_ms 扫描持续时间（毫秒），0 表示无限扫描
  * @return true 成功，false 失败

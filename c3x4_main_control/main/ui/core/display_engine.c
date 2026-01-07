@@ -18,7 +18,9 @@ static const char *TAG = "DISP_ENGINE";
 
 // 帧缓冲（1bpp，物理尺寸800x480 = 48KB）
 // 注意：逻辑尺寸是480x800，通过ROTATE_270旋转显示
-static uint8_t s_framebuffer[(800 * 480) / 8] = {0};
+// 优化：使用动态分配节省 DRAM (.bss) 空间
+#define FRAMEBUFFER_SIZE ((800 * 480) / 8)
+static uint8_t *s_framebuffer = NULL;
 
 // 显示引擎状态
 static display_config_t s_config = {0};
@@ -28,7 +30,6 @@ static dirty_region_t s_dirty_region = {0};
 static int s_partial_refresh_count = 0;  // 局刷计数器
 
 // 帧缓冲管理
-#define FRAMEBUFFER_SIZE (sizeof(s_framebuffer))
 #define MAX_PARTIAL_REFRESH_COUNT 1  // 最多连续 5 次局刷，然后强制全刷
 
 /**********************
@@ -596,10 +597,26 @@ bool display_engine_init(const display_config_t *config)
 
     ESP_LOGI(TAG, "Initializing display engine...");
 
+    // 分配帧缓冲区内存（动态分配，节省 47KB .bss 空间）
+    if (s_framebuffer == NULL) {
+        ESP_LOGI(TAG, "Allocating framebuffer: %d bytes", FRAMEBUFFER_SIZE);
+        s_framebuffer = heap_caps_malloc(FRAMEBUFFER_SIZE, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+        if (s_framebuffer == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate framebuffer! Free heap: %lu bytes", 
+                     esp_get_free_heap_size());
+            return false;
+        }
+        memset(s_framebuffer, 0, FRAMEBUFFER_SIZE);
+        ESP_LOGI(TAG, "Framebuffer allocated successfully. Free heap now: %lu bytes", 
+                 esp_get_free_heap_size());
+    }
+
     // 创建互斥锁
     s_mutex = xSemaphoreCreateMutex();
     if (s_mutex == NULL) {
         ESP_LOGE(TAG, "Failed to create mutex");
+        free(s_framebuffer);
+        s_framebuffer = NULL;
         return false;
     }
 
@@ -644,6 +661,13 @@ void display_engine_deinit(void)
     if (s_mutex != NULL) {
         vSemaphoreDelete(s_mutex);
         s_mutex = NULL;
+    }
+
+    // 释放帧缓冲区内存
+    if (s_framebuffer != NULL) {
+        ESP_LOGI(TAG, "Freeing framebuffer");
+        free(s_framebuffer);
+        s_framebuffer = NULL;
     }
 
     s_initialized = false;

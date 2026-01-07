@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_bt.h"
+#include "esp_wifi.h"
 #include "esp_nimble_hci.h"
 #include "nimble/ble.h"
 #include "nimble/nimble_port.h"
@@ -25,26 +26,22 @@
 #include "services/gatt/ble_svc_gatt.h"
 #include <string.h>
 
+// Forward declaration for ble_store_config_init
+extern void ble_store_config_init(void);
+
 static const char *TAG = "BLE_MANAGER";
 
 // 蓝牙管理器状态
 static struct {
     bool initialized;
     bool scanning;
+    bool advertising;
     bool connected;
     uint8_t connected_addr[6];
     uint16_t connected_handle;
 
-    // Dynamic UUID exchange: selected service UUID from advertisement (little-endian bytes).
-    bool target_uuid_valid;
-    ble_uuid128_t target_uuid;
-
-    // Discovered IO characteristic (WRITE+NOTIFY) handles.
+    // GATT server ready flag
     bool gatt_ready;
-    uint16_t svc_start_handle;
-    uint16_t svc_end_handle;
-    uint16_t io_val_handle;
-    uint16_t io_cccd_handle;
     
     // 回调函数
     ble_on_device_found_cb device_found_cb;
@@ -53,25 +50,19 @@ static struct {
 } s_ble_state = {
     .initialized = false,
     .scanning = false,
+    .advertising = false,
     .connected = false,
     .device_found_cb = NULL,
     .connect_cb = NULL,
     .data_received_cb = NULL,
-    .target_uuid_valid = false,
     .gatt_ready = false,
-    .svc_start_handle = 0,
-    .svc_end_handle = 0,
-    .io_val_handle = 0,
-    .io_cccd_handle = 0,
 };
+
+static uint8_t s_own_addr_type = BLE_OWN_ADDR_PUBLIC;
 
 static void reset_gatt_state(void)
 {
     s_ble_state.gatt_ready = false;
-    s_ble_state.svc_start_handle = 0;
-    s_ble_state.svc_end_handle = 0;
-    s_ble_state.io_val_handle = 0;
-    s_ble_state.io_cccd_handle = 0;
 }
 
 static void parse_adv_for_uuid128(const uint8_t *data, uint8_t data_len, ble_device_info_t *out)
@@ -102,103 +93,8 @@ static void parse_adv_for_uuid128(const uint8_t *data, uint8_t data_len, ble_dev
     }
 }
 
-static int gatt_disc_svc_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
-                            const struct ble_gatt_svc *service, void *arg);
-static int gatt_disc_chr_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
-                            const struct ble_gatt_chr *chr, void *arg);
-static int gatt_disc_dsc_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
-                            uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc, void *arg);
-
-static void maybe_enable_notify(uint16_t conn_handle)
-{
-    if (!s_ble_state.io_cccd_handle || !s_ble_state.io_val_handle) {
-        return;
-    }
-
-    // CCCD: 0x0001 enable notifications
-    uint8_t cccd_val[2] = {0x01, 0x00};
-    int rc = ble_gattc_write_flat(conn_handle, s_ble_state.io_cccd_handle, cccd_val, sizeof(cccd_val), NULL, NULL);
-    if (rc != 0) {
-        ESP_LOGW(TAG, "Failed to write CCCD rc=%d", rc);
-        return;
-    }
-
-    s_ble_state.gatt_ready = true;
-    ESP_LOGI(TAG, "GATT ready: io_val_handle=%u cccd_handle=%u", s_ble_state.io_val_handle, s_ble_state.io_cccd_handle);
-}
-
-static int gatt_disc_dsc_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
-                            uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc, void *arg)
-{
-    (void)arg;
-    if (error && error->status != 0) {
-        if (error->status == BLE_HS_EDONE) {
-            maybe_enable_notify(conn_handle);
-        }
-        return 0;
-    }
-
-    if (dsc) {
-        // CCCD UUID 0x2902
-        const ble_uuid16_t cccd = BLE_UUID16_INIT(0x2902);
-        if (ble_uuid_cmp(&dsc->uuid.u, &cccd.u) == 0) {
-            s_ble_state.io_cccd_handle = dsc->handle;
-        }
-    }
-    return 0;
-}
-
-static int gatt_disc_chr_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
-                            const struct ble_gatt_chr *chr, void *arg)
-{
-    (void)arg;
-    if (error && error->status != 0) {
-        if (error->status == BLE_HS_EDONE) {
-            // Start descriptor discovery for the chosen characteristic
-            if (s_ble_state.io_val_handle && s_ble_state.svc_end_handle) {
-                int rc = ble_gattc_disc_all_dscs(conn_handle, s_ble_state.io_val_handle, s_ble_state.svc_end_handle, gatt_disc_dsc_cb, NULL);
-                ESP_LOGI(TAG, "Disc dscs rc=%d", rc);
-            }
-        }
-        return 0;
-    }
-
-    if (chr) {
-        // Need a characteristic that can WRITE and NOTIFY.
-        bool can_write = (chr->properties & (BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP)) != 0;
-        bool can_notify = (chr->properties & (BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_INDICATE)) != 0;
-        if (can_write && can_notify && s_ble_state.io_val_handle == 0) {
-            s_ble_state.io_val_handle = chr->val_handle;
-            ESP_LOGI(TAG, "Selected IO characteristic val_handle=%u props=0x%02x", chr->val_handle, chr->properties);
-        }
-    }
-
-    return 0;
-}
-
-static int gatt_disc_svc_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
-                            const struct ble_gatt_svc *service, void *arg)
-{
-    (void)arg;
-    if (error && error->status != 0) {
-        if (error->status == BLE_HS_EDONE) {
-            if (s_ble_state.svc_start_handle && s_ble_state.svc_end_handle) {
-                int rc = ble_gattc_disc_all_chrs(conn_handle, s_ble_state.svc_start_handle, s_ble_state.svc_end_handle, gatt_disc_chr_cb, NULL);
-                ESP_LOGI(TAG, "Disc chrs rc=%d", rc);
-            } else {
-                ESP_LOGW(TAG, "Target service not found on peer");
-            }
-        }
-        return 0;
-    }
-
-    if (service) {
-        s_ble_state.svc_start_handle = service->start_handle;
-        s_ble_state.svc_end_handle = service->end_handle;
-        ESP_LOGI(TAG, "Found target service: start=%u end=%u", service->start_handle, service->end_handle);
-    }
-    return 0;
-}
+static int start_advertising(void);
+static void ble_on_sync(void);
 
 /**********************
  *  STATIC FUNCTIONS
@@ -242,19 +138,26 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
                     
                     i += len + 1;
                 }
-
-                // Parse first advertised 128-bit service UUID (for dynamic UUID exchange).
-                parse_adv_for_uuid128(event->disc.data, event->disc.length_data, &device_info);
                 
                 s_ble_state.device_found_cb(&device_info);
             }
             break;
             
         case BLE_GAP_EVENT_CONNECT:
-            // 连接成功
+            if (event->connect.status != 0) {
+                ESP_LOGW(TAG, "Connect failed, status=%d", event->connect.status);
+                s_ble_state.connected = false;
+                s_ble_state.connected_handle = 0;
+                memset(s_ble_state.connected_addr, 0, sizeof(s_ble_state.connected_addr));
+                reset_gatt_state();
+                start_advertising();
+                break;
+            }
+
             ESP_LOGI(TAG, "Device connected");
             s_ble_state.connected = true;
             s_ble_state.connected_handle = event->connect.conn_handle;
+            s_ble_state.advertising = false;
             {
                 struct ble_gap_conn_desc desc;
                 if (ble_gap_conn_find(event->connect.conn_handle, &desc) == 0) {
@@ -264,14 +167,7 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
                 }
             }
             reset_gatt_state();
-
-            // Start GATT discovery for the dynamically exchanged service UUID.
-            if (s_ble_state.target_uuid_valid) {
-                int rc = ble_gattc_disc_svc_by_uuid(s_ble_state.connected_handle, &s_ble_state.target_uuid.u, gatt_disc_svc_cb, NULL);
-                ESP_LOGI(TAG, "Disc svc by uuid rc=%d", rc);
-            } else {
-                ESP_LOGW(TAG, "No target service UUID set; will not start GATT discovery");
-            }
+            s_ble_state.gatt_ready = true;
             
             if (s_ble_state.connect_cb != NULL) {
                 s_ble_state.connect_cb(true);
@@ -285,10 +181,16 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
             s_ble_state.connected_handle = 0;
             memset(s_ble_state.connected_addr, 0, 6);
             reset_gatt_state();
+            start_advertising();
             
             if (s_ble_state.connect_cb != NULL) {
                 s_ble_state.connect_cb(false);
             }
+            break;
+
+        case BLE_GAP_EVENT_ADV_COMPLETE:
+            s_ble_state.advertising = false;
+            start_advertising();
             break;
 
         case BLE_GAP_EVENT_NOTIFY_RX:
@@ -328,6 +230,56 @@ static void ble_host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
+static int start_advertising(void)
+{
+    ESP_LOGI(TAG, "=== Heap before advertising ===");
+    ESP_LOGI(TAG, "  Free heap: %lu bytes", esp_get_free_heap_size());
+    ESP_LOGI(TAG, "  Largest free block: %lu bytes", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    
+    struct ble_hs_adv_fields fields = {0};
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.name = (uint8_t *)"MFP-EPD";
+    fields.name_len = strlen("MFP-EPD");
+    fields.name_is_complete = 1;
+
+    int rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to set adv fields rc=%d", rc);
+        return rc;
+    }
+
+    struct ble_gap_adv_params adv_params;
+    memset(&adv_params, 0, sizeof(adv_params));
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    
+    ESP_LOGI(TAG, "DEBUG: adv_params configured - conn_mode=%d, disc_mode=%d, itvl_min=%d, itvl_max=%d, channel_map=0x%02x",
+             adv_params.conn_mode, adv_params.disc_mode, adv_params.itvl_min, adv_params.itvl_max, adv_params.channel_map);
+
+    rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &adv_params, ble_gap_event_handler, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to start advertising rc=%d", rc);
+        return rc;
+    }
+
+    s_ble_state.advertising = true;
+    ESP_LOGI(TAG, "Advertising started (name=%s)", "MFP-EPD");
+    return 0;
+}
+
+static void ble_on_sync(void)
+{
+    ESP_LOGI(TAG, "ble_on_sync() called");
+    int rc = ble_hs_id_infer_auto(0, &s_own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_id_infer_auto failed rc=%d", rc);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Calling start_advertising from ble_on_sync");
+    start_advertising();
+}
+
 /**********************
  * GLOBAL FUNCTIONS
  **********************/
@@ -364,46 +316,25 @@ bool ble_manager_init(void)
         ESP_LOGE(TAG, "Failed to release classic BT memory");
         return false;
     }
-
-    // 初始化 BT 控制器并启用 BLE 模式
-    // 使用最小内存配置以适应 ESP32-C3 有限的 DRAM
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     
-    // 优化内存设置 - 减少 ACL 连接和事件缓冲
-    bt_cfg.bluetooth_mode = ESP_BT_MODE_BLE;
-    bt_cfg.ble_max_act = 1;               // 只支持1个活动连接
-    
-    ESP_LOGI(TAG, "Initializing BT controller with minimal memory config...");
-    ret = esp_bt_controller_init(&bt_cfg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "esp_bt_controller_init failed: %s (0x%x)", esp_err_to_name(ret), ret);
-        return false;
-    }
-    
-    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "esp_bt_controller_enable failed: %s (0x%x)", esp_err_to_name(ret), ret);
-        esp_bt_controller_deinit();
-        return false;
+    // 释放WiFi内存（如果未使用）
+    ret = esp_wifi_deinit();
+    if (ret == ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGI(TAG, "WiFi not initialized, releasing WiFi memory");
+        // WiFi未初始化，直接释放内存
+    } else if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi deinit returned: %s", esp_err_to_name(ret));
     }
 
-    ESP_LOGI(TAG, "BT controller enabled, initializing NimBLE host...");
+    ESP_LOGI(TAG, "Initializing NimBLE host (will init controller internally)...");
     
-    // 打印堆内存状态 - BT控制器启用后
-    ESP_LOGI(TAG, "=== Heap after BT controller enabled ===");
-    ESP_LOGI(TAG, "  Free heap: %lu bytes", esp_get_free_heap_size());
-    ESP_LOGI(TAG, "  Min free heap: %lu bytes", esp_get_minimum_free_heap_size());
-    ESP_LOGI(TAG, "  Largest free block: %lu bytes", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    
-    // 初始化 NimBLE host
+    // 初始化 NimBLE host（内部会初始化控制器与HCI传输）
     ret = nimble_port_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init failed: %s (0x%x)", esp_err_to_name(ret), ret);
         ESP_LOGE(TAG, "This usually indicates insufficient memory or duplicate initialization");
         ESP_LOGE(TAG, "  Free heap now: %lu bytes", esp_get_free_heap_size());
         ESP_LOGE(TAG, "  Largest free block: %lu bytes", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-        esp_bt_controller_disable();
-        esp_bt_controller_deinit();
         return false;
     }
     
@@ -413,12 +344,24 @@ bool ble_manager_init(void)
     
     ESP_LOGI(TAG, "NimBLE host initialized, configuring GAP/GATT services...");
     
+    ESP_LOGI(TAG, "=== Heap after NimBLE init ===");
+    ESP_LOGI(TAG, "  Free heap: %lu bytes", esp_get_free_heap_size());
+    ESP_LOGI(TAG, "  Min free heap: %lu bytes", esp_get_minimum_free_heap_size());
+    ESP_LOGI(TAG, "  Largest free block: %lu bytes", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    
     // 配置BLE GAP
     ble_svc_gap_init();
     ble_svc_gatt_init();
     
     // 设置本地设备名称
-    ble_svc_gap_device_name_set("Monster-BLE");
+    ble_svc_gap_device_name_set("MFP-EPD");
+
+    // 配置 BLE 存储（安全材料的读写）
+    // 这对于配对和密钥管理是必需的，即使我们禁用了安全功能
+    ble_store_config_init();
+
+    // GAP/GATT ready -> start advertising after host sync
+    ble_hs_cfg.sync_cb = ble_on_sync;
     
     // GAP 事件通过各 API 传入 handler（无需全局设置）
     
@@ -438,6 +381,10 @@ void ble_manager_deinit(void)
     }
     
     ESP_LOGI(TAG, "Deinitializing BLE manager...");
+
+    if (s_ble_state.advertising) {
+        ble_manager_stop_advertising();
+    }
     
     if (s_ble_state.scanning) {
         ble_manager_stop_scan();
@@ -447,10 +394,8 @@ void ble_manager_deinit(void)
         ble_manager_disconnect();
     }
     
-    // NimBLE 清理
+    // NimBLE 清理 - 按初始化的逆序（nimble_port_deinit 会处理控制器关闭）
     nimble_port_deinit();
-    esp_bt_controller_disable();
-    esp_bt_controller_deinit();
     
     s_ble_state.initialized = false;
     ESP_LOGI(TAG, "BLE manager deinitialized");
@@ -471,40 +416,38 @@ void ble_manager_register_data_received_cb(ble_on_data_received_cb cb)
     s_ble_state.data_received_cb = cb;
 }
 
-bool ble_manager_start_scan(uint32_t duration_ms)
+bool ble_manager_start_advertising(void)
 {
     if (!s_ble_state.initialized) {
         ESP_LOGE(TAG, "BLE manager not initialized");
         return false;
     }
-    
-    if (s_ble_state.scanning) {
-        ESP_LOGW(TAG, "Already scanning");
+
+    int rc = start_advertising();
+    return rc == 0;
+}
+
+bool ble_manager_stop_advertising(void)
+{
+    if (!s_ble_state.initialized || !s_ble_state.advertising) {
         return true;
     }
-    
-    ESP_LOGI(TAG, "Starting BLE scan");
-    
-    // 设置扫描参数
-    struct ble_gap_disc_params disc_params = {
-        .filter_policy = 0,
-        .limited = 0,
-        .passive = 1,
-        .itvl = 0x0010,
-        .window = 0x0010,
-        .filter_duplicates = 0,
-    };
-    
-    int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, duration_ms, &disc_params, 
-                          ble_gap_event_handler, NULL);
+
+    int rc = ble_gap_adv_stop();
     if (rc != 0) {
-        ESP_LOGE(TAG, "Failed to start scan: %d", rc);
+        ESP_LOGE(TAG, "Failed to stop advertising rc=%d", rc);
         return false;
     }
-    
-    s_ble_state.scanning = true;
-    ESP_LOGI(TAG, "BLE scan started");
+
+    s_ble_state.advertising = false;
+    ESP_LOGI(TAG, "Advertising stopped");
     return true;
+}
+
+bool ble_manager_start_scan(uint32_t duration_ms)
+{
+    ESP_LOGI(TAG, "Scan disabled: device runs as peripheral and only advertises");
+    return false;
 }
 
 bool ble_manager_stop_scan(void)
@@ -542,13 +485,13 @@ bool ble_manager_connect(const uint8_t *addr)
         ESP_LOGW(TAG, "Already connected");
         return false;
     }
+
+    if (s_ble_state.advertising) {
+        ble_manager_stop_advertising();
+    }
     
     ESP_LOGI(TAG, "Connecting to device: %02x:%02x:%02x:%02x:%02x:%02x",
              addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
-
-    if (!s_ble_state.target_uuid_valid) {
-        ESP_LOGW(TAG, "Target service UUID not set; connection may be useless");
-    }
     
     // 停止扫描
     if (s_ble_state.scanning) {
@@ -584,19 +527,6 @@ bool ble_manager_connect(const uint8_t *addr)
     return true;
 }
 
-void ble_manager_set_target_service_uuid128_le(const uint8_t uuid_le[16])
-{
-    if (uuid_le == NULL) {
-        s_ble_state.target_uuid_valid = false;
-        return;
-    }
-    s_ble_state.target_uuid.u.type = BLE_UUID_TYPE_128;
-    memcpy(s_ble_state.target_uuid.value, uuid_le, 16);
-    s_ble_state.target_uuid_valid = true;
-    ESP_LOGI(TAG, "Target service UUID set (LE): %02x%02x%02x%02x...",
-             uuid_le[0], uuid_le[1], uuid_le[2], uuid_le[3]);
-}
-
 bool ble_manager_disconnect(void)
 {
     if (!s_ble_state.connected) {
@@ -616,30 +546,11 @@ bool ble_manager_disconnect(void)
 
 int ble_manager_send_data(const uint8_t *data, uint16_t length)
 {
-    if (!s_ble_state.connected) {
-        ESP_LOGE(TAG, "Not connected");
-        return -1;
-    }
-    
-    if (data == NULL || length == 0) {
-        ESP_LOGE(TAG, "Invalid data");
-        return -1;
-    }
-    
-    if (!s_ble_state.gatt_ready || s_ble_state.io_val_handle == 0) {
-        ESP_LOGW(TAG, "GATT not ready; drop send len=%u", length);
-        return -1;
-    }
-
-    // Write request to IO characteristic.
-    int rc = ble_gattc_write_flat(s_ble_state.connected_handle, s_ble_state.io_val_handle, data, length, NULL, NULL);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "ble_gattc_write_flat failed rc=%d", rc);
-        return -1;
-    }
-
-    ESP_LOGD(TAG, "Data write queued: %u bytes", length);
-    return length;
+    // EPD device is GATT server; phone writes to us, we don't write to phone
+    ESP_LOGW(TAG, "send_data not supported in server mode");
+    (void)data;
+    (void)length;
+    return -1;
 }
 
 bool ble_manager_is_connected(void)

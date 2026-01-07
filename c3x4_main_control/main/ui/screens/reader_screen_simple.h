@@ -14,6 +14,11 @@
 void reader_screen_init(void);
 
 /**
+ * @brief 清理阅读器屏幕并释放内存
+ */
+void reader_screen_deinit(void);
+
+/**
  * @brief 获取阅读器屏幕实例
  * @return 屏幕指针
  */

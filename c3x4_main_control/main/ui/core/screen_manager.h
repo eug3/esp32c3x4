@@ -15,7 +15,7 @@
  *********************/
 
 // 最大屏幕数量
-#define MAX_SCREENS 8
+#define MAX_SCREENS 16
 
 // 导航栈深度
 #define NAV_STACK_DEPTH 10
