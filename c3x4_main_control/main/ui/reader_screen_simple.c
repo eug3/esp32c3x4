@@ -5,6 +5,7 @@
 
 #include "reader_screen_simple.h"
 #include "display_engine.h"
+#include "input_handler.h"
 #include "screen_manager.h"
 #include "fonts.h"
 #include "txt_reader.h"
@@ -121,7 +122,7 @@ static bool epub_fill_current_page_text(void)
     }
     int line_spacing = 4;
     int font_height = chinese_font_height + line_spacing;
-    int max_lines = (SCREEN_HEIGHT - 80) / font_height;
+    int max_lines = (SCREEN_HEIGHT - 20) / font_height;
     int max_width = SCREEN_WIDTH - 20;
 
     size_t out_len = 0;
@@ -740,7 +741,7 @@ static int calculate_chars_per_page(void)
     int line_spacing = 4;
     int font_height = chinese_font_height + line_spacing;
 
-    int usable_height = SCREEN_HEIGHT - 40 - 40;
+    int usable_height = SCREEN_HEIGHT - 20;
     int lines_per_page = usable_height / font_height;
 
     int max_width = SCREEN_WIDTH - 20;
@@ -785,7 +786,7 @@ static void display_current_page(void)
 
     // 显示文本内容
     if (s_reader_state.type == READER_TYPE_TXT) {
-        int target_lines = (SCREEN_HEIGHT - 80) / (xt_eink_font_get_height() + 4);
+        int target_lines = (SCREEN_HEIGHT - 20) / (xt_eink_font_get_height() + 4);
         int consumed_chars = 0;
         int bytes_written = txt_cache_format_current_page(s_reader_state.current_text,
                                                           sizeof(s_reader_state.current_text),
@@ -807,12 +808,12 @@ static void display_current_page(void)
 
         if (s_reader_state.current_text[0] != '\0') {
             // current_text 已经按宽度插入了换行，这里直接逐行绘制即可
-            int y = 40;
+            int y = 20;
             int x = 10;
             const char *p = s_reader_state.current_text;
             char line[MAX_LINE_BUFFER_SIZE];
 
-            while (*p != '\0' && y < SCREEN_HEIGHT - 40) {
+            while (*p != '\0' && y < SCREEN_HEIGHT) {
                 const char *nl = strchr(p, '\n');
                 size_t len = nl ? (size_t)(nl - p) : strlen(p);
                 if (len >= sizeof(line)) {
@@ -837,12 +838,12 @@ static void display_current_page(void)
         (void)epub_fill_current_page_text();
 
         // current_text 已经按宽度插入了换行，这里直接逐行绘制即可
-        int y = 40;
+        int y = 20;
         int x = 10;
         const char *p = s_reader_state.current_text;
         char line[MAX_LINE_BUFFER_SIZE];
 
-        while (*p != '\0' && y < SCREEN_HEIGHT - 40) {
+        while (*p != '\0' && y < SCREEN_HEIGHT) {
             const char *nl = strchr(p, '\n');
             size_t len = nl ? (size_t)(nl - p) : strlen(p);
             if (len >= sizeof(line)) {
@@ -860,11 +861,6 @@ static void display_current_page(void)
             p = nl + 1;
         }
     }
-
-    // 显示底部提示
-    display_draw_text_font(20, SCREEN_HEIGHT - 30,
-                           "L/R: Page  BACK: Return",
-                           ui_font, COLOR_BLACK, COLOR_WHITE);
 }
 
 /**
@@ -1087,13 +1083,15 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
 
     switch (btn) {
         case BTN_RIGHT:
-            // 下一页
+        case BTN_VOLUME_DOWN:
+            // 下一页（上下左右均可翻到下一页）
             next_page();
             display_current_page();
             display_refresh(REFRESH_MODE_PARTIAL);
             break;
 
         case BTN_LEFT:
+        case BTN_VOLUME_UP:
             // 上一页
             prev_page();
             display_current_page();
@@ -1105,6 +1103,9 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
             screen_manager_back();
             break;
 
+        //case BTN_ENTER:
+            // 暂不处理
+        //    break;
         default:
             break;
     }

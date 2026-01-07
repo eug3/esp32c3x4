@@ -32,6 +32,7 @@ typedef struct {
 static font_option_t s_options[FONT_SELECTOR_MAX_FONTS + 1];
 static int s_option_count = 0;
 static screen_context_t *s_context = NULL;
+static bool s_showing_restart_dialog = false;  // 标记是否正在显示重启对话框
 
 /**********************
  * PRIVATE FUNCTIONS
@@ -148,6 +149,8 @@ static void save_font_to_nvs(const char *path) {
 }
 
 static void show_restart_dialog(void) {
+  s_showing_restart_dialog = true;
+  
   int dialog_w = 300;
   int dialog_h = 120;
   int dialog_x = (SCREEN_WIDTH - dialog_w) / 2;
@@ -180,6 +183,7 @@ static void on_show(screen_t *screen) {
 static void on_hide(screen_t *screen) {
   ESP_LOGI(TAG, "Font select screen hidden");
   s_context = NULL;
+  s_showing_restart_dialog = false;  // 重置对话框标志位
 }
 
 static void on_draw(screen_t *screen) {
@@ -221,6 +225,28 @@ static void on_draw(screen_t *screen) {
 
 static void on_event(screen_t *screen, button_t btn, button_event_t event) {
   if (event != BTN_EVENT_PRESSED) {
+    return;
+  }
+
+  // 如果正在显示重启对话框，处理对话框中的按键
+  if (s_showing_restart_dialog) {
+    switch (btn) {
+    case BTN_CONFIRM:
+      // 确认重启
+      ESP_LOGI(TAG, "User confirmed restart");
+      esp_restart();
+      break;
+
+    case BTN_BACK:
+      // 取消重启，返回菜单
+      ESP_LOGI(TAG, "User canceled restart");
+      s_showing_restart_dialog = false;
+      screen->needs_redraw = true;
+      break;
+
+    default:
+      break;
+    }
     return;
   }
 

@@ -4,6 +4,8 @@
  */
 
 #include "font_cache.h"
+#include "boot_animation.h"
+#include "display_engine.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -15,6 +17,12 @@
 #include <errno.h>
 
 static const char *TAG = "FONT_CACHE";
+
+// 进度回调函数
+static font_cache_progress_cb_t s_progress_callback = NULL;
+
+// 动画帧计数器
+static int s_animation_frame = 0;
 
 // 说明：缓存按“当前用户字体”的 glyph_size 生成/读取。
 // 默认/菜单字体按需求不使用缓存（由上层不调用 font_cache_init() 来保证）。
@@ -406,6 +414,18 @@ static bool generate_cache(const char *sd_font_path)
         // 定期让出 CPU，允许 UI 线程更新动画
         if (i % 50 == 0) {
             vTaskDelay(1);
+            
+            // 显示加载动画
+            uint32_t percent = ((i + 1) * 100) / count;
+            char status[64];
+            snprintf(status, sizeof(status), "Fonts Loading %lu%%", (unsigned long)percent);
+            boot_animation_show(status, s_animation_frame);
+            s_animation_frame = (s_animation_frame + 1) % 2;  // 切换动画帧
+            
+            // 调用进度回调
+            if (s_progress_callback != NULL) {
+                s_progress_callback(i + 1, count);
+            }
         }
     }
 
@@ -417,10 +437,21 @@ static bool generate_cache(const char *sd_font_path)
 
     ESP_LOGI(TAG, "Cache generated: count=%" PRIu32 " glyph=%u bytes, bad=%" PRIu32, written, (unsigned)s_glyph_size, bad);
     s_cached_chars = written;
+    
+    // 最后一次调用进度回调，表示完成
+    if (s_progress_callback != NULL) {
+        s_progress_callback(written, count);
+    }
+    
     return (written == count);
 }
 
 // ========== 公共接口 ==========
+
+void font_cache_set_progress_callback(font_cache_progress_cb_t callback)
+{
+    s_progress_callback = callback;
+}
 
 bool font_cache_init(const char *sd_font_path)
 {
@@ -511,11 +542,20 @@ bool font_cache_init(const char *sd_font_path)
 
     if (need_generate) {
         ESP_LOGI(TAG, "Cache not found or mismatch, generating: %s", s_cache_path);
+        
+        // 显示初始加载画面
+        s_animation_frame = 0;
+        boot_animation_show("Fonts Loading 0%", s_animation_frame);
+        
         if (!generate_cache(sd_font_path)) {
             ESP_LOGE(TAG, "Failed to generate cache");
             return false;
         }
         s_cached_chars = s_active_count;
+
+        // 清屏以移除最后一帧加载动画
+        display_clear(COLOR_WHITE);
+        display_refresh(REFRESH_MODE_FULL);
     } else {
         ESP_LOGI(TAG, "Cache found: %s (%ld bytes)", s_cache_path, st.st_size);
     }

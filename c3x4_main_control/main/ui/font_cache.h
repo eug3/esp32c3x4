@@ -15,6 +15,19 @@ extern "C" {
 #endif
 
 /**
+ * @brief 字体缓存生成进度回调函数类型
+ * @param current 当前进度
+ * @param total 总数
+ */
+typedef void (*font_cache_progress_cb_t)(uint32_t current, uint32_t total);
+
+/**
+ * @brief 设置字体缓存生成进度回调
+ * @param callback 进度回调函数，NULL 表示清除回调
+ */
+void font_cache_set_progress_callback(font_cache_progress_cb_t callback);
+
+/**
  * @brief 初始化字体缓存系统
  * 
  * 功能：
