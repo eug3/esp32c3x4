@@ -8,9 +8,8 @@
     },
     {
       "type": "espidf",
-      "name": "ESP-IDF Debug",
-      "request": "launch",
-      "sessionID": "default"
+      "name": "Launch",
+      "request": "launch"
     }
   ]
 }
