@@ -233,18 +233,6 @@ epub_xml_parser_t* epub_xml_create(const char *xml_content, size_t content_lengt
     parser->content[content_length] = '\0';
     parser->length = content_length;
 
-    // 调试：打印原始 XML 的前 2000 字节
-    ESP_LOGW(TAG, "=== RAW XML DATA (first 2000 bytes) ===");
-    for (size_t i = 0; i < content_length && i < 2000; i += 100) {
-        char line_buf[120] = {0};
-        size_t copy_len = (i + 100 <= content_length) ? 100 : (content_length - i);
-        if (copy_len > 100) {
-            copy_len = 100;
-        }
-        memcpy(line_buf, parser->content + i, copy_len);
-        ESP_LOGW(TAG, "  [%04zu] %s", i, line_buf);
-    }
-    ESP_LOGW(TAG, "=== END RAW XML ===");
 
     // 先按“示例库”的方式：原样交给 tinyxml2 解析。
     parser->doc = new tinyxml2::XMLDocument(true, tinyxml2::COLLAPSE_WHITESPACE);

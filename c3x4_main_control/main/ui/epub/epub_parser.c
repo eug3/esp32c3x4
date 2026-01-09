@@ -9,8 +9,10 @@
 #include "epub_parser.h"
 #include "epub_zip.h"
 #include "epub_cache.h"
+#include "epub_precache.h"
 #include "epub_xml.h"
 #include "epub_html.h"
+#include "reading_history.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "nvs_flash.h"
@@ -865,6 +867,9 @@ bool epub_parser_goto_chapter(epub_reader_t *reader, int chapter_index) {
 
     ESP_LOGI(TAG, "Jumped to chapter %d", chapter_index);
 
+    // 触发预缓存窗口更新（后台预加载周围章节）
+    epub_precache_update_window(reader, chapter_index);
+
     return true;
 }
 
@@ -947,6 +952,33 @@ bool epub_parser_save_position(const epub_reader_t *reader) {
         ESP_LOGI(TAG, "Saved position for %s: chapter=%d, page=%d",
                  filename, reader->position.current_chapter,
                  reader->position.page_number);
+        
+        // 同步更新阅读历史
+        book_record_t record;
+        if (reading_history_load_record(reader->epub_path, &record)) {
+            record.position.chapter = reader->position.current_chapter;
+            record.position.page = reader->position.page_number;
+            if (reader->metadata.total_chapters > 0) {
+                record.position.progress_percent = 
+                    (reader->position.current_chapter * 100) / reader->metadata.total_chapters;
+            }
+            reading_history_save_record(&record);
+        } else {
+            // 创建新记录
+            record = reading_history_create_record(
+                reader->epub_path, 
+                reader->metadata.title[0] ? reader->metadata.title : filename,
+                BOOK_TYPE_EPUB
+            );
+            record.position.chapter = reader->position.current_chapter;
+            record.position.page = reader->position.page_number;
+            if (reader->metadata.total_chapters > 0) {
+                record.position.progress_percent = 
+                    (reader->position.current_chapter * 100) / reader->metadata.total_chapters;
+            }
+            reading_history_save_record(&record);
+        }
+        
         return true;
     }
 
@@ -959,6 +991,20 @@ bool epub_parser_load_position(epub_reader_t *reader) {
         return false;
     }
 
+    // 优先从阅读历史加载
+    book_record_t record;
+    if (reading_history_load_record(reader->epub_path, &record)) {
+        if (record.position.chapter >= 0 && 
+            record.position.chapter < reader->metadata.total_chapters) {
+            epub_parser_goto_chapter(reader, record.position.chapter);
+            reader->position.page_number = record.position.page;
+            ESP_LOGI(TAG, "Loaded position from history: %s (chapter=%ld, page=%ld)",
+                     record.title, record.position.chapter, record.position.page);
+            return true;
+        }
+    }
+
+    // 回退到旧的 NVS 方式
     nvs_handle_t nvs_handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
     if (err != ESP_OK) {

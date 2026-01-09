@@ -32,6 +32,7 @@ idf_component_register(SRCS
                        "ui/core/input_handler.c"
                        "ui/core/ui_region_manager.c"
                        "ui/core/paginated_menu.c"
+                       "ui/reading_history.c"
 
                        # UI Screens
                        "ui/screens/home_screen.c"
@@ -83,6 +84,7 @@ idf_component_register(SRCS
                        "ui/epub/epub_xml.cpp"
                        "ui/epub/epub_zip.c"
                        "ui/epub/epub_cache.c"
+                       "ui/epub/epub_precache.c"
                        "ui/txt/txt_reader.c"
                        "ui/txt/gb18030_conv.c"
 
