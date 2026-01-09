@@ -72,6 +72,13 @@ static void lock_engine(void)
     if (s_mutex != NULL) {
         xSemaphoreTake(s_mutex, portMAX_DELAY);
     }
+
+    // 防御：确保所有 GUI_Paint 绘制都落在 display_engine 的 framebuffer 上。
+    // 某些屏幕会临时 Paint_NewImage/SelectImage 到小 buffer，如果没有恢复，
+    // 会导致“绘制有走，但刷新仍白屏”。
+    if (s_framebuffer != NULL && Paint.Image != s_framebuffer) {
+        Paint_SelectImage(s_framebuffer);
+    }
 }
 
 static void unlock_engine(void)
@@ -136,7 +143,9 @@ static void ensure_xt_font_initialized(void)
 
 static sFONT* choose_ascii_font_by_target_height(int target_height)
 {
-    // 目标：按当前中文字体行高选取“高度最接近”的 ASCII 字号，尽量不超过目标高度。
+    // 目标：混排时 ASCII 不要显得过小。
+    // 策略：优先选择“高度 >= 中文行高”的最小字号（ceiling）。
+    // 若目标高度超过现有 ASCII 字体最大高度，则退化为选择最大字号。
     // 候选 ASCII 字体按高度递增。
     sFONT *candidates[] = {
         &Font8,
@@ -151,27 +160,16 @@ static sFONT* choose_ascii_font_by_target_height(int target_height)
         return &Font16;
     }
 
-    sFONT *best = candidates[0];
-    int best_diff = target_height - (int)best->Height;
-    if (best_diff < 0) {
-        best_diff = -best_diff;
-    }
-
-    for (size_t i = 1; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+    // 先找 ceiling：第一个高度 >= target
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
         sFONT *f = candidates[i];
-        int diff = (int)f->Height - target_height;
-        if (diff < 0) {
-            diff = -diff;
-        }
-
-        bool closer = diff < best_diff;
-        bool same_diff_prefer_smaller = (diff == best_diff) && (f->Height <= best->Height);
-        if (closer || same_diff_prefer_smaller) {
-            best = f;
-            best_diff = diff;
+        if ((int)f->Height >= target_height) {
+            return f;
         }
     }
-    return best;
+
+    // 找不到 ceiling：返回最大字号
+    return candidates[(sizeof(candidates) / sizeof(candidates[0])) - 1];
 }
 
 static sFONT* choose_ascii_font_by_cjk_height(void)
@@ -268,6 +266,8 @@ static int measure_text_width_utf8(const char *text, sFONT *ascii_font)
 
     ensure_xt_font_initialized();
     int ascii_adv = get_ascii_advance_width(ascii_font);
+    const int xt_h = xt_eink_font_get_height();
+    const bool use_xt_ascii = (xt_h > 0 && ascii_font != NULL && (int)ascii_font->Height < xt_h);
 
     int width = 0;
     const char *p = text;
@@ -280,7 +280,16 @@ static int measure_text_width_utf8(const char *text, sFONT *ascii_font)
 
         // 规则：ASCII 永远走内置字体；非 ASCII 才尝试字体文件（xt_eink）
         if (ch <= 0x7Fu) {
-            width += ascii_adv;
+            if (use_xt_ascii && xt_eink_font_has_char(ch)) {
+                xt_eink_glyph_t glyph;
+                if (xt_eink_font_get_glyph(ch, &glyph) && glyph.width > 0) {
+                    width += glyph.width;
+                } else {
+                    width += ascii_adv;
+                }
+            } else {
+                width += ascii_adv;
+            }
         } else if (xt_eink_font_has_char(ch)) {
             xt_eink_glyph_t glyph;
             if (xt_eink_font_get_glyph(ch, &glyph) && glyph.width > 0) {
@@ -462,6 +471,8 @@ static int draw_text_utf8_locked(int x, int y, const char *text, sFONT *ascii_fo
     }
 
     ensure_xt_font_initialized();
+    const int xt_h = xt_eink_font_get_height();
+    const bool use_xt_ascii = (xt_h > 0 && ascii_font != NULL && (int)ascii_font->Height < xt_h);
     int ascii_adv = get_ascii_advance_width(ascii_font);
 
     int text_w = measure_text_width_utf8(text, ascii_font);
@@ -481,10 +492,38 @@ static int draw_text_utf8_locked(int x, int y, const char *text, sFONT *ascii_fo
             break;
         }
 
-        // 规则：ASCII 永远走内置字体；非 ASCII 才尝试字体文件（xt_eink）
+        // 规则：ASCII 优先使用与中文等高的 xt 字体（若可用），否则回退内置字体；非 ASCII 走 xt 字体
         if (ch <= 0x7Fu) {
-            Paint_DrawChar(current_x, y, (char)ch, ascii_font, color, bg_color);
-            current_x += ascii_adv;
+            bool drawn = false;
+            if (use_xt_ascii && xt_eink_font_has_char(ch)) {
+                xt_eink_glyph_t glyph;
+                if (xt_eink_font_get_glyph(ch, &glyph) && glyph.bitmap != NULL) {
+                    int bytes_per_row = (glyph.width + 7) / 8;
+                    for (int row = 0; row < glyph.height; row++) {
+                        for (int col = 0; col < glyph.width; col++) {
+                            int byte_idx = row * bytes_per_row + col / 8;
+                            int bit_idx = 7 - (col % 8);
+                            bool pixel_set = (glyph.bitmap[byte_idx] >> bit_idx) & 1;
+                            if (!pixel_set) {
+                                continue;
+                            }
+
+                            int px = current_x + col;
+                            int py = y + row;
+                            if (px >= 0 && px < SCREEN_WIDTH && py >= 0 && py < SCREEN_HEIGHT) {
+                                Paint_SetPixel(px, py, color);
+                            }
+                        }
+                    }
+                    current_x += glyph.width;
+                    drawn = true;
+                }
+            }
+
+            if (!drawn) {
+                Paint_DrawChar(current_x, y, (char)ch, ascii_font, color, bg_color);
+                current_x += ascii_adv;
+            }
         } else if (xt_eink_font_has_char(ch)) {
             xt_eink_glyph_t glyph;
             if (!xt_eink_font_get_glyph(ch, &glyph) || glyph.bitmap == NULL) {
@@ -726,10 +765,34 @@ void display_refresh(refresh_mode_t mode)
 {
     lock_engine();
 
-    // 在刷新前绘制电量到帧缓存
+    // 统计刷新前（不含电量叠加）的帧缓存变化量
+    size_t non_white_before_battery = 0;
+    if (s_framebuffer != NULL) {
+        for (size_t i = 0; i < FRAMEBUFFER_SIZE; i++) {
+            if (s_framebuffer[i] != 0xFFu) {
+                non_white_before_battery++;
+            }
+        }
+    }
+
+    // 在刷新前绘制电量到帧缓存（叠加）
     draw_battery_to_framebuffer();
 
     ESP_LOGI(TAG, "Refreshing display (mode=%d)...", mode);
+
+    // 统计帧缓冲变化量（白屏诊断）：white=0xFF，任何绘制都会让某些字节变为非 0xFF。
+    size_t non_white = 0;
+    if (s_framebuffer != NULL) {
+        for (size_t i = 0; i < FRAMEBUFFER_SIZE; i++) {
+            if (s_framebuffer[i] != 0xFFu) {
+                non_white++;
+            }
+        }
+    }
+    ESP_LOGI(TAG, "Framebuffer non-white bytes (before battery): %u / %u", (unsigned)non_white_before_battery, (unsigned)FRAMEBUFFER_SIZE);
+    ESP_LOGI(TAG, "Framebuffer non-white bytes (after  battery): %u / %u (delta=%d)",
+             (unsigned)non_white, (unsigned)FRAMEBUFFER_SIZE,
+             (int)non_white - (int)non_white_before_battery);
 
     // 打印帧缓冲区前几个字节用于调试
     ESP_LOGI(TAG, "Framebuffer first 8 bytes: %02X %02X %02X %02X %02X %02X %02X %02X",
@@ -789,6 +852,37 @@ void display_refresh(refresh_mode_t mode)
     unlock_engine();
 
     ESP_LOGI(TAG, "display_refresh complete");
+}
+
+void display_debug_log_framebuffer(const char *tag)
+{
+    lock_engine();
+
+    size_t non_white = 0;
+    if (s_framebuffer != NULL) {
+        for (size_t i = 0; i < FRAMEBUFFER_SIZE; i++) {
+            if (s_framebuffer[i] != 0xFFu) {
+                non_white++;
+            }
+        }
+    }
+
+    ESP_LOGI(TAG, "FB[%s]: s_framebuffer=%p Paint.Image=%p non_white=%u/%u first8=%02X %02X %02X %02X %02X %02X %02X %02X",
+             (tag != NULL) ? tag : "(null)",
+             (void *)s_framebuffer,
+             (void *)Paint.Image,
+             (unsigned)non_white,
+             (unsigned)FRAMEBUFFER_SIZE,
+             s_framebuffer ? s_framebuffer[0] : 0,
+             s_framebuffer ? s_framebuffer[1] : 0,
+             s_framebuffer ? s_framebuffer[2] : 0,
+             s_framebuffer ? s_framebuffer[3] : 0,
+             s_framebuffer ? s_framebuffer[4] : 0,
+             s_framebuffer ? s_framebuffer[5] : 0,
+             s_framebuffer ? s_framebuffer[6] : 0,
+             s_framebuffer ? s_framebuffer[7] : 0);
+
+    unlock_engine();
 }
 
 void display_refresh_region(int x, int y, int width, int height, refresh_mode_t mode)
@@ -941,30 +1035,7 @@ int display_draw_text_font(int x, int y, const char *text, sFONT *font, uint8_t 
     }
 
     lock_engine();
-    int width;
-    if (text_has_non_ascii(text)) {
-        width = draw_text_utf8_locked(x, y, text, font, color, bg_color);
-    } else {
-        // 与混排保持一致：按“半角宽度”逐字符绘制
-        int ascii_adv = get_ascii_advance_width(font);
-        int cur_x = x;
-        for (const char *p = text; *p != '\0'; p++) {
-            Paint_DrawChar(cur_x, y, *p, font, color, bg_color);
-            cur_x += ascii_adv;
-        }
-        width = cur_x - x;
-
-        if (s_config.use_partial_refresh) {
-            // 纯 ASCII 文本也要按中文字体高度参与刷新区域计算，避免在 TXT 渲染时
-            // 英文/数字行仅按较小 ASCII 高度刷新而产生残影/裁切。
-            int h = (int)font->Height;
-            int xt_h = xt_eink_font_get_height();
-            if (xt_h > h) {
-                h = xt_h;
-            }
-            expand_dirty_region(x, y, width, h);
-        }
-    }
+    int width = draw_text_utf8_locked(x, y, text, font, color, bg_color);
     unlock_engine();
 
     return width;

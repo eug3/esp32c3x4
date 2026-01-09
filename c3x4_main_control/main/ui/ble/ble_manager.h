@@ -123,6 +123,14 @@ bool ble_manager_disconnect(void);
 int ble_manager_send_data(const uint8_t *data, uint16_t length);
 
 /**
+ * @brief 发送通知给已连接的客户端（通过 CMD 特征）
+ * @param data 通知数据指针
+ * @param length 数据长度
+ * @return true 成功，false 失败
+ */
+bool ble_manager_send_notification(const uint8_t *data, uint16_t length);
+
+/**
  * @brief 检查蓝牙是否已连接
  * @return true 已连接，false 未连接
  */

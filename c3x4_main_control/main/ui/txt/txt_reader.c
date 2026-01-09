@@ -574,6 +574,27 @@ bool txt_reader_seek(txt_reader_t *reader, long position) {
         position = reader->position.file_size;
     }
 
+    // UTF-8：避免 seek 到多字节字符的中间（continuation byte 0x80..0xBF）
+    if (reader->encoding == TXT_ENCODING_UTF8 && reader->file != NULL && position > 0) {
+        long adjusted = position;
+        for (int i = 0; i < 4 && adjusted > 0; i++) {
+            if (fseek(reader->file, adjusted, SEEK_SET) != 0) {
+                break;
+            }
+            int c = fgetc(reader->file);
+            if (c == EOF) {
+                break;
+            }
+            if (((uint8_t)c & 0xC0u) == 0x80u) {
+                // continuation byte: move back
+                adjusted--;
+                continue;
+            }
+            break;
+        }
+        position = adjusted;
+    }
+
     int result = fseek(reader->file, position, SEEK_SET);
     if (result == 0) {
         reader->position.file_position = position;

@@ -22,7 +22,8 @@
       "Bash(idf.py:*)",
       "Bash(source:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(tree:*)"
     ]
   }
 }

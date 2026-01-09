@@ -10,9 +10,6 @@
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
-#include <ctype.h>
-#include <dirent.h>
-#include <errno.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -65,182 +62,21 @@ static uint32_t count_bits_set(const uint8_t *buf, size_t len)
     return total;
 }
 
-static bool ends_with_ignore_case(const char *s, const char *suffix)
+static inline void fb_put_pixel(int x, int y, uint8_t color, uint8_t *framebuffer, int fb_width, int fb_height)
 {
-    if (s == NULL || suffix == NULL) {
-        return false;
+    if (framebuffer == NULL) {
+        return;
     }
-    size_t sl = strlen(s);
-    size_t su = strlen(suffix);
-    if (su == 0 || sl < su) {
-        return false;
+    if (x < 0 || y < 0 || x >= fb_width || y >= fb_height) {
+        return;
     }
-    const char *p = s + (sl - su);
-    for (size_t i = 0; i < su; i++) {
-        char a = (char)tolower((unsigned char)p[i]);
-        char b = (char)tolower((unsigned char)suffix[i]);
-        if (a != b) {
-            return false;
-        }
+    int byte_pos = y * ((fb_width + 7) / 8) + x / 8;
+    int bit_pos = 7 - (x % 8);
+    if (color == 0x00) {
+        framebuffer[byte_pos] &= ~(1 << bit_pos);
+    } else {
+        framebuffer[byte_pos] |= (1 << bit_pos);
     }
-    return true;
-}
-
-static bool contains_ignore_case(const char *s, const char *needle)
-{
-    if (s == NULL || needle == NULL) {
-        return false;
-    }
-    size_t nl = strlen(needle);
-    if (nl == 0) {
-        return true;
-    }
-
-    for (const char *p = s; *p != '\0'; p++) {
-        size_t i = 0;
-        while (i < nl) {
-            char a = p[i];
-            if (a == '\0') {
-                return false;
-            }
-            a = (char)tolower((unsigned char)a);
-            char b = (char)tolower((unsigned char)needle[i]);
-            if (a != b) {
-                break;
-            }
-            i++;
-        }
-        if (i == nl) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool find_best_font_in_dir(const char *dir_path, char *out_path, size_t out_path_size, uint32_t *out_char_byte)
-{
-    if (dir_path == NULL) {
-        return false;
-    }
-
-    if (out_path == NULL || out_path_size == 0) {
-        return false;
-    }
-
-    out_path[0] = '\0';
-    if (out_char_byte != NULL) {
-        *out_char_byte = 0;
-    }
-
-    DIR *dir = opendir(dir_path);
-    if (dir == NULL) {
-        int err = errno;
-        ESP_LOGW(TAG, "Font dir not accessible: %s (errno=%d: %s)", dir_path, err, strerror(err));
-        return false;
-    }
-
-    // 目标：19x25 => width_byte=3, glyph_size=3*25=75 bytes => charByte=75
-    const uint32_t desired_char_byte = 75;
-
-    char best_path[192] = {0};
-    bool best_is_msyh = false;
-    uint32_t best_char_byte = 0;
-
-    struct dirent *ent = NULL;
-    while ((ent = readdir(dir)) != NULL) {
-        const char *name = ent->d_name;
-        if (name == NULL || name[0] == '\0') {
-            continue;
-        }
-        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
-            continue;
-        }
-        if (!ends_with_ignore_case(name, ".bin")) {
-            continue;
-        }
-
-        char fullpath[192];
-        int n = snprintf(fullpath, sizeof(fullpath), "%s/%s", dir_path, name);
-        if (n <= 0 || (size_t)n >= sizeof(fullpath)) {
-            continue;
-        }
-
-        struct stat st;
-        if (stat(fullpath, &st) != 0) {
-            continue;
-        }
-        if (st.st_size <= 0) {
-            continue;
-        }
-        uint32_t sz = (uint32_t)st.st_size;
-        if ((sz % 0x10000u) != 0) {
-            continue;
-        }
-        uint32_t char_byte = sz / 0x10000u;
-        bool is_msyh = contains_ignore_case(name, "msyh");
-
-        // 打分策略：优先选择 charByte==75；同为 75 时优先 MSYH。
-        // 若目录里没有 75，则退化为选择任意有效字体（仍优先 MSYH）。
-        bool take = false;
-        if (best_path[0] == '\0') {
-            take = true;
-        } else if (char_byte == desired_char_byte && best_char_byte != desired_char_byte) {
-            take = true;
-        } else if (char_byte == best_char_byte) {
-            if (is_msyh && !best_is_msyh) {
-                take = true;
-            }
-        } else if (best_char_byte != desired_char_byte) {
-            // 都不是 75：更偏好更接近 75
-            uint32_t d_new = (char_byte > desired_char_byte) ? (char_byte - desired_char_byte) : (desired_char_byte - char_byte);
-            uint32_t d_old = (best_char_byte > desired_char_byte) ? (best_char_byte - desired_char_byte) : (desired_char_byte - best_char_byte);
-            if (d_new < d_old) {
-                take = true;
-            } else if (d_new == d_old && is_msyh && !best_is_msyh) {
-                take = true;
-            }
-        }
-
-        if (take) {
-            strncpy(best_path, fullpath, sizeof(best_path) - 1);
-            best_path[sizeof(best_path) - 1] = '\0';
-            best_is_msyh = is_msyh;
-            best_char_byte = char_byte;
-        }
-    }
-
-    closedir(dir);
-
-    if (best_path[0] == '\0') {
-        return false;
-    }
-
-    strncpy(out_path, best_path, out_path_size - 1);
-    out_path[out_path_size - 1] = '\0';
-    if (out_char_byte != NULL) {
-        *out_char_byte = best_char_byte;
-    }
-
-    return true;
-}
-
-static bool try_load_font_by_scanning_dir(const char *dir_path)
-{
-    char best_path[192] = {0};
-    uint32_t best_char_byte = 0;
-
-    if (!find_best_font_in_dir(dir_path, best_path, sizeof(best_path), &best_char_byte)) {
-        return false;
-    }
-
-    ESP_LOGW(TAG, "Falling back to directory-scan font: %s (charByte=%lu)", best_path, (unsigned long)best_char_byte);
-    s_font = xt_eink_font_open(best_path);
-    if (s_font == NULL) {
-        ESP_LOGE(TAG, "Directory-scan font open failed: %s", best_path);
-        return false;
-    }
-    ESP_LOGI(TAG, "Font loaded successfully (dir scan): %s", best_path);
-    return true;
 }
 
 /**
@@ -359,17 +195,17 @@ bool xt_eink_font_init(void)
     // 注意：避免重复初始化导致内存泄漏
     // 但允许字体切换时重新加载
     
-    // 初始化字体分区（优先级最高，无需 SD 卡）
+    // 初始化字体分区（默认字体来源）
     if (font_partition_init()) {
         ESP_LOGI(TAG, "Font partition initialized successfully");
     } else {
-        ESP_LOGW(TAG, "Font partition not available, will use SD card");
+        ESP_LOGW(TAG, "Font partition not available");
     }
     
     // 0) 先初始化菜单默认字体（必须固定为启动默认 19x25 字体，不受 NVS/用户字体影响）
     if (s_menu_default_font == NULL) {
-        // 优先级 1：从 Flash 分区加载菜单字体（无需 SD 卡）
-        if (font_partition_is_available()) {
+        // 菜单默认字体：只允许从 Flash 分区加载（前提是分区有效）
+        if (font_partition_is_available() && font_partition_is_valid()) {
             xt_eink_font_t *menu_font = xt_eink_font_open_partition();
             if (menu_font != NULL) {
                 s_menu_default_font = menu_font;
@@ -379,39 +215,8 @@ bool xt_eink_font_init(void)
             }
         }
 
-        // 优先级 2：从 SD 卡标准路径加载（不尝试各种文件名变体）
         if (s_menu_default_font == NULL) {
-            const char *menu_font_paths[] = {
-                "/sdcard/fonts/msyh-14.25pt.19x25.bin",  // 标准路径
-                NULL
-            };
-
-            for (int i = 0; menu_font_paths[i] != NULL; i++) {
-                xt_eink_font_t *menu_font = xt_eink_font_open(menu_font_paths[i]);
-                if (menu_font != NULL) {
-                    s_menu_default_font = menu_font;
-                    strncpy(s_menu_font_path, menu_font_paths[i], sizeof(s_menu_font_path) - 1);
-                    s_menu_font_path[sizeof(s_menu_font_path) - 1] = '\0';
-                    ESP_LOGI(TAG, "Menu default font initialized from SD card: %s", s_menu_font_path);
-                    break;
-                }
-            }
-        }
-
-        // 优先级 3：扫描 SD 卡目录找最佳字体（仅当分区和标准路径都不可用）
-        if (s_menu_default_font == NULL) {
-            char best_path[192] = {0};
-            uint32_t best_char_byte = 0;
-            if (find_best_font_in_dir("/sdcard/fonts", best_path, sizeof(best_path), &best_char_byte)) {
-                xt_eink_font_t *menu_font = xt_eink_font_open(best_path);
-                if (menu_font != NULL) {
-                    s_menu_default_font = menu_font;
-                    strncpy(s_menu_font_path, best_path, sizeof(s_menu_font_path) - 1);
-                    s_menu_font_path[sizeof(s_menu_font_path) - 1] = '\0';
-                    ESP_LOGI(TAG, "Menu default font initialized (dir scan): %s (charByte=%lu)",
-                             s_menu_font_path, (unsigned long)best_char_byte);
-                }
-            }
+            ESP_LOGE(TAG, "Menu default font not available: please flash valid font_data partition");
         }
     }
 
@@ -419,16 +224,9 @@ bool xt_eink_font_init(void)
     char saved_font_path[128] = {0};
     bool loaded = false;
 
-    // 如果 SD 卡未就绪，直接使用菜单默认字体，避免无效的 SD 访问
-    if (!is_sdcard_available()) {
-        if (s_menu_default_font != NULL) {
-            s_font = s_menu_default_font;
-            strncpy(s_loaded_font_path, s_menu_font_path, sizeof(s_loaded_font_path) - 1);
-            s_loaded_font_path[sizeof(s_loaded_font_path) - 1] = '\0';
-            loaded = true;
-            ESP_LOGW(TAG, "SD card not available; use menu default font for reader");
-        }
-    }
+    // 仅两种方式：用户字体（LittleFS 缓存 + SD 回源）或默认分区字体。
+    // 因此，SD 卡不可用时不尝试打开用户字体，直接回退到默认分区字体。
+    bool sd_ready = is_sdcard_available();
     
     // 如果已经加载了用户字体且与菜单字体不同，需要先释放
     if (s_font != NULL && s_font != s_menu_default_font) {
@@ -438,12 +236,15 @@ bool xt_eink_font_init(void)
         memset(s_loaded_font_path, 0, sizeof(s_loaded_font_path));
     }
     
-    if (!loaded && load_font_path_from_nvs(saved_font_path, sizeof(saved_font_path))) {
-        if (try_open_font(saved_font_path)) {
-            loaded = true;
-        } else {
-            // NVS中的字体文件不存在或损坏，回退到默认字体
-            ESP_LOGW(TAG, "Saved font not available, falling back to default fonts");
+    if (!loaded) {
+        if (sd_ready && load_font_path_from_nvs(saved_font_path, sizeof(saved_font_path))) {
+            if (try_open_font(saved_font_path)) {
+                loaded = true;
+            } else {
+                ESP_LOGW(TAG, "Saved user font open failed; falling back to partition default");
+            }
+        } else if (!sd_ready) {
+            ESP_LOGW(TAG, "SD card not available; skip user font and use partition default");
         }
     }
 
@@ -455,13 +256,6 @@ bool xt_eink_font_init(void)
             s_loaded_font_path[sizeof(s_loaded_font_path) - 1] = '\0';
             loaded = true;
             ESP_LOGI(TAG, "Reader font fallback to menu default: %s", s_loaded_font_path);
-        } else {
-            // 最终兜底：尝试扫描 /sdcard/fonts 加载任意字体
-            if (!try_load_font_by_scanning_dir("/sdcard/fonts")) {
-                ESP_LOGE(TAG, "Failed to load any font!");
-                return false;
-            }
-            loaded = true;
         }
     }
 
@@ -518,6 +312,20 @@ int xt_eink_font_render_char(int x, int y, uint32_t ch, uint8_t color,
     // 获取位图
     const uint8_t *bitmap = xt_eink_font_get_bitmap(s_font, ch);
     if (bitmap == NULL) {
+        // 缺字：画方块占位（边框）
+        int w = s_font->width;
+        int h = s_font->height;
+        if (w <= 0 || h <= 0) {
+            return s_font->width;
+        }
+        for (int col = 0; col < w; col++) {
+            fb_put_pixel(x + col, y, color, framebuffer, fb_width, fb_height);
+            fb_put_pixel(x + col, y + h - 1, color, framebuffer, fb_width, fb_height);
+        }
+        for (int row = 0; row < h; row++) {
+            fb_put_pixel(x, y + row, color, framebuffer, fb_width, fb_height);
+            fb_put_pixel(x + w - 1, y + row, color, framebuffer, fb_width, fb_height);
+        }
         return s_font->width;
     }
 

@@ -26,6 +26,12 @@ bool font_partition_init(void);
 bool font_partition_is_available(void);
 
 /**
+ * @brief 检查字体分区内容是否有效（非空/非0xFF）
+ * @return true 有效，false 无效
+ */
+bool font_partition_is_valid(void);
+
+/**
  * @brief 从字体分区读取字形数据
  * @param unicode Unicode 字符编码
  * @param buffer 输出缓冲区

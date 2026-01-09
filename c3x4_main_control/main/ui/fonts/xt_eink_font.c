@@ -428,16 +428,6 @@ static bool read_glyph_from_file(xt_eink_font_t *font, uint32_t unicode, uint8_t
         ESP_LOGD(TAG, "Font cache miss for U+%04X, fallback to direct file read", unicode);
     }
 
-    // 兜底：尝试从字体分区读取，如果失败则从文件读取
-    if (font_partition_is_available()) {
-        size_t bytes_read = font_partition_read_glyph(unicode, bitmap, font->header.glyph_size);
-        if (bytes_read > 0) {
-            return true;
-        }
-        // 字体分区读取失败，继续尝试从文件读取
-        ESP_LOGD(TAG, "Font partition read failed for U+%04X, trying file", unicode);
-    }
-    
     // 最终兜底：直接从原文件读取（需要 SD 卡）
     if (font->fp == NULL) {
         ESP_LOGW(TAG, "No file handle and partition unavailable for U+%04X", unicode);
@@ -468,6 +458,42 @@ static bool read_glyph_from_file(xt_eink_font_t *font, uint32_t unicode, uint8_t
     }
 
     return true;
+}
+
+static inline void set_bitmap_pixel_1bpp(uint8_t *buf, uint16_t width, uint16_t x, uint16_t y)
+{
+    uint16_t stride = (uint16_t)((width + 7u) / 8u);
+    uint32_t idx = (uint32_t)y * (uint32_t)stride + (uint32_t)(x / 8u);
+    uint8_t bit = (uint8_t)(7u - (x % 8u));
+    buf[idx] |= (uint8_t)(1u << bit);
+}
+
+static void fill_missing_glyph_square(xt_eink_font_t *font, uint8_t *buf)
+{
+    if (font == NULL || buf == NULL) {
+        return;
+    }
+    if (font->width == 0 || font->height == 0 || font->glyph_size == 0) {
+        return;
+    }
+
+    memset(buf, 0x00, font->glyph_size);
+
+    uint16_t w = (uint16_t)font->width;
+    uint16_t h = (uint16_t)font->height;
+    if (w < 2 || h < 2) {
+        return;
+    }
+
+    // 边框 1px 方块
+    for (uint16_t x = 0; x < w; x++) {
+        set_bitmap_pixel_1bpp(buf, w, x, 0);
+        set_bitmap_pixel_1bpp(buf, w, x, (uint16_t)(h - 1));
+    }
+    for (uint16_t y = 0; y < h; y++) {
+        set_bitmap_pixel_1bpp(buf, w, 0, y);
+        set_bitmap_pixel_1bpp(buf, w, (uint16_t)(w - 1), y);
+    }
 }
 
 xt_eink_font_t *xt_eink_font_open(const char *path)
@@ -556,6 +582,17 @@ xt_eink_font_t *xt_eink_font_open(const char *path)
     }
 
     uint32_t width_byte = (w + 7u) / 8u;
+    // 重要：raw 字模按“字节对齐宽度”存储。
+    // 文件名里的宽度可能是“可见宽度”(例如 27)，但实际每行占用的位宽是 width_byte*8(例如 32)。
+    // 若按 27 渲染，会直接截掉最后 5 列，可能导致字形几乎为空（尤其当生成器右对齐/居中时）。
+    // 因此这里把渲染宽度对齐到字节宽度，确保不会截断。
+    uint16_t render_w = (uint16_t)(width_byte * 8u);
+    if (render_w != w) {
+        ESP_LOGI(TAG, "Align font width: %u -> %u (width_byte=%lu)",
+                 (unsigned int)w, (unsigned int)render_w, (unsigned long)width_byte);
+        w = render_w;
+    }
+
     uint32_t glyph_size = width_byte * h;
     if (glyph_size != char_byte) {
         ESP_LOGE(TAG, "Inferred dims %ux%u inconsistent (glyphSize=%lu, charByte=%lu): %s",
@@ -741,9 +778,10 @@ const uint8_t *xt_eink_font_get_bitmap(xt_eink_font_t *font, uint32_t unicode)
         return NULL;
     }
 
-    // 从分区或文件读取字形
+    // 从分区或文件读取字形；失败则返回方块占位
     if (!read_glyph_from_file(font, unicode, g_glyph_buffer)) {
-        return NULL;
+        fill_missing_glyph_square(font, g_glyph_buffer);
+        return g_glyph_buffer;
     }
 
     // 添加到缓存

@@ -18,6 +18,7 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "os/os_mbuf.h"
+#include "freertos/FreeRTOS.h"
 #include <string.h>
 
 static const char *TAG = "BLE_MANAGER";
@@ -29,6 +30,11 @@ static const char *TAG = "BLE_MANAGER";
 // 设备名称
 #define DEVICE_NAME                 "MFP-EPD"
 
+// 广播配置
+#define BLE_ADV_RETRY_MAX           3       // 最大连续广播失败重试次数
+#define BLE_ADV_RETRY_DELAY_MS      1000    // 广播失败后重试延迟（毫秒）
+#define BLE_DISCONNECT_DELAY_MS     500     // 断开连接后重新广播延迟（毫秒）
+
 // BLE 管理器状态
 static struct {
     bool initialized;
@@ -38,7 +44,10 @@ static struct {
     uint8_t own_addr_type;
     bool subscribed;  // 客户端是否订阅了通知
     uint16_t spp_handle;  // SPP characteristic value handle
-    
+
+    // 广播重试计数
+    uint8_t adv_retry_count;
+
     // 回调函数
     ble_on_connect_cb connect_cb;
     ble_on_data_received_cb data_received_cb;
@@ -46,6 +55,8 @@ static struct {
 
 // Forward declarations
 static void ble_spp_server_advertise(void);
+static void ble_spp_server_advertise_with_retry(void);
+static void ble_spp_server_schedule_advertise(uint32_t delay_ms);
 static int ble_spp_server_gap_event(struct ble_gap_event *event, void *arg);
 static void ble_spp_server_on_sync(void);
 static void ble_spp_server_on_reset(int reason);
@@ -123,7 +134,7 @@ static void ble_spp_server_advertise(void)
     memset(&adv_params, 0, sizeof(adv_params));
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    print_memory( TAG ,"Before Start Advertising");     
+    print_memory( TAG ,"Before Start Advertising");
     rc = ble_gap_adv_start(s_ble.own_addr_type, NULL, BLE_HS_FOREVER,
                            &adv_params, ble_spp_server_gap_event, NULL);
     print_memory( TAG ,"After Start Advertising");
@@ -135,7 +146,41 @@ static void ble_spp_server_advertise(void)
     }
 
     s_ble.advertising = true;
-    ESP_LOGI(TAG, "Advertising started (name=%s)", DEVICE_NAME);
+    ESP_LOGD(TAG, "Advertising started (name=%s)", DEVICE_NAME);
+}
+
+/**
+ * @brief 带延迟的广播函数（用于断开后重新广播）
+ */
+static void ble_spp_server_schedule_advertise(uint32_t delay_ms)
+{
+    ESP_LOGI(TAG, "Scheduling advertising in %lu ms", (unsigned long)delay_ms);
+
+    // 使用 vTaskDelay 实现延迟
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+
+    // 重置重试计数
+    s_ble.adv_retry_count = 0;
+
+    ble_spp_server_advertise();
+}
+
+/**
+ * @brief 带重试机制的广播函数
+ */
+static void ble_spp_server_advertise_with_retry(void)
+{
+    if (s_ble.adv_retry_count >= BLE_ADV_RETRY_MAX) {
+        ESP_LOGE(TAG, "Advertising retry count exceeded (%d), stopping", BLE_ADV_RETRY_MAX);
+        s_ble.advertising = false;
+        s_ble.adv_retry_count = 0;
+        return;
+    }
+
+    s_ble.adv_retry_count++;
+    ESP_LOGI(TAG, "Advertising attempt %d/%d", s_ble.adv_retry_count, BLE_ADV_RETRY_MAX);
+
+    ble_spp_server_advertise();
 }
 
 /**
@@ -159,6 +204,7 @@ static int ble_spp_server_gap_event(struct ble_gap_event *event, void *arg)
                 ble_spp_server_print_conn_desc(&desc);
             }
             
+            ESP_LOGI(TAG, "BLE connected, state updated to connected");
             s_ble.connected = true;
             s_ble.conn_handle = event->connect.conn_handle;
             s_ble.advertising = false;
@@ -170,7 +216,7 @@ static int ble_spp_server_gap_event(struct ble_gap_event *event, void *arg)
         } else {
             // 连接失败，继续广播
             s_ble.connected = false;
-            ble_spp_server_advertise();
+            ble_spp_server_advertise_with_retry();
         }
         return 0;
 
@@ -187,8 +233,8 @@ static int ble_spp_server_gap_event(struct ble_gap_event *event, void *arg)
             s_ble.connect_cb(false);
         }
 
-        /* 连接断开，恢复广播 */
-        ble_spp_server_advertise();
+        /* 连接断开，延迟后恢复广播 */
+        ble_spp_server_schedule_advertise(BLE_DISCONNECT_DELAY_MS);
         return 0;
 
     case BLE_GAP_EVENT_CONN_UPDATE:
@@ -202,7 +248,12 @@ static int ble_spp_server_gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
         ESP_LOGI(TAG, "Advertise complete; reason=%d", event->adv_complete.reason);
-        ble_spp_server_advertise();
+        s_ble.advertising = false;
+
+        // 如果不是用户主动停止，则重试广播
+        if (event->adv_complete.reason != 0) {
+            ble_spp_server_advertise_with_retry();
+        }
         return 0;
 
     case BLE_GAP_EVENT_MTU:
@@ -245,7 +296,7 @@ static int ble_svc_gatt_handler(uint16_t conn_handle, uint16_t attr_handle,
     case BLE_GATT_ACCESS_OP_WRITE_CHR:
         ESP_LOGI(TAG, "Data received in write event, conn_handle=%x, attr_handle=%x",
                  conn_handle, attr_handle);
-        
+
         // 提取接收到的数据
         if (s_ble.data_received_cb != NULL && ctxt->om != NULL) {
             uint16_t om_len = OS_MBUF_PKTLEN(ctxt->om);
@@ -254,9 +305,15 @@ static int ble_svc_gatt_handler(uint16_t conn_handle, uint16_t attr_handle,
                 if (buf != NULL) {
                     int copied = os_mbuf_copydata(ctxt->om, 0, om_len, buf);
                     if (copied == 0) {
+                        // 复制成功，调用回调
                         s_ble.data_received_cb(buf, om_len);
+                    } else {
+                        // 复制失败，释放内存
+                        ESP_LOGE(TAG, "Failed to copy mbuf data, copied=%d", copied);
+                        free(buf);
                     }
-                    free(buf);
+                } else {
+                    ESP_LOGE(TAG, "Failed to allocate %u bytes for received data", om_len);
                 }
             }
         }
@@ -386,6 +443,9 @@ static void ble_spp_server_on_sync(void)
                  addr_val[5], addr_val[4], addr_val[3],
                  addr_val[2], addr_val[1], addr_val[0]);
     }
+
+    // 重置广播重试计数
+    s_ble.adv_retry_count = 0;
 
     /* 开始广播 */
     ble_spp_server_advertise();
@@ -599,6 +659,11 @@ int ble_manager_send_data(const uint8_t *data, uint16_t length)
 
     ESP_LOGI(TAG, "Notification sent successfully, length=%d", length);
     return length;
+}
+
+bool ble_manager_send_notification(const uint8_t *data, uint16_t length)
+{
+    return ble_manager_send_data(data, length) > 0;
 }
 
 bool ble_manager_is_connected(void)

@@ -31,6 +31,10 @@ static const char *TAG = "READER_SCREEN";
 // Line buffer size for text rendering
 #define MAX_LINE_BUFFER_SIZE 512
 
+// Text buffers (dynamically allocated)
+#define EPUB_HTML_BUFFER_SIZE    4096
+#define CURRENT_TEXT_BUFFER_SIZE 4096
+
 // EPUB 章节内翻页：保留少量历史，支持左键回退
 #define EPUB_PAGE_HISTORY_DEPTH 24
 
@@ -114,7 +118,7 @@ static bool epub_fill_current_page_text(void)
                                                       s_reader_state.current_page - 1,
                                                       s_reader_state.epub_page.html_offset,
                                                       s_reader_state.epub_html,
-                                                      sizeof(s_reader_state.epub_html));
+                                                      EPUB_HTML_BUFFER_SIZE);
 
     if (bytes_read <= 0) {
         s_reader_state.epub_html[0] = '\0';
@@ -144,12 +148,12 @@ static bool epub_fill_current_page_text(void)
 
     s_reader_state.current_text[0] = '\0';
 
-    while (p < end && lines < max_lines && out_len + 2 < sizeof(s_reader_state.current_text)) {
+    while (p < end && lines < max_lines && out_len + 2 < CURRENT_TEXT_BUFFER_SIZE) {
         if (*p == '\n') {
             // flush line
             if (line_bytes > 0) {
                 size_t copy = (size_t)line_bytes;
-                if (out_len + copy + 2 >= sizeof(s_reader_state.current_text)) {
+                if (out_len + copy + 2 >= CURRENT_TEXT_BUFFER_SIZE) {
                     break;
                 }
                 memcpy(s_reader_state.current_text + out_len, line, copy);
@@ -177,7 +181,7 @@ static bool epub_fill_current_page_text(void)
             // line buffer full, flush as a line
             if (line_bytes > 0) {
                 size_t copy = (size_t)line_bytes;
-                if (out_len + copy + 2 >= sizeof(s_reader_state.current_text)) {
+                if (out_len + copy + 2 >= CURRENT_TEXT_BUFFER_SIZE) {
                     break;
                 }
                 memcpy(s_reader_state.current_text + out_len, line, copy);
@@ -205,7 +209,7 @@ static bool epub_fill_current_page_text(void)
 
             if (line_bytes > 0) {
                 size_t copy = (size_t)line_bytes;
-                if (out_len + copy + 2 >= sizeof(s_reader_state.current_text)) {
+                if (out_len + copy + 2 >= CURRENT_TEXT_BUFFER_SIZE) {
                     break;
                 }
                 memcpy(s_reader_state.current_text + out_len, line, copy);
@@ -233,7 +237,7 @@ static bool epub_fill_current_page_text(void)
     }
 
     // flush remaining line if any and we still have space
-    if (lines < max_lines && line_bytes > 0 && out_len + (size_t)line_bytes + 1 < sizeof(s_reader_state.current_text)) {
+    if (lines < max_lines && line_bytes > 0 && out_len + (size_t)line_bytes + 1 < CURRENT_TEXT_BUFFER_SIZE) {
         memcpy(s_reader_state.current_text + out_len, line, (size_t)line_bytes);
         out_len += (size_t)line_bytes;
         s_reader_state.current_text[out_len] = '\0';
@@ -476,11 +480,17 @@ static bool txt_cache_build_at(int32_t start_src_pos, uint16_t cursor_reset)
     // 保持 txt_reader 的 file_position 对齐到当前 cursor（保存进度用）
     (void)txt_reader_seek(&s_reader_state.txt_reader, (long)s_reader_state.txt_cache.src_pos[s_reader_state.txt_cache.cursor]);
 
-    ESP_LOGD(TAG, "TXT cache built: chars=%u start=%ld cursor=%u path=%s",
-             (unsigned)s_reader_state.txt_cache.cached_chars,
-             (long)start_src_pos,
-             (unsigned)s_reader_state.txt_cache.cursor,
-             s_reader_state.txt_cache.cache_path);
+    if (s_reader_state.txt_cache.cached_chars == 0) {
+        ESP_LOGW(TAG, "TXT cache built EMPTY at start=%ld path=%s", (long)start_src_pos, s_reader_state.txt_cache.cache_path);
+    } else {
+        ESP_LOGI(TAG, "TXT cache built: chars=%u start=%ld cursor=%u path=%s first_src=%ld next_src=%ld",
+                 (unsigned)s_reader_state.txt_cache.cached_chars,
+                 (long)start_src_pos,
+                 (unsigned)s_reader_state.txt_cache.cursor,
+                 s_reader_state.txt_cache.cache_path,
+                 (long)s_reader_state.txt_cache.src_pos[0],
+                 (long)s_reader_state.txt_cache.src_pos[s_reader_state.txt_cache.cached_chars]);
+    }
     return true;
 }
 
@@ -542,14 +552,37 @@ static int txt_cache_format_current_page(char *out, size_t out_size, int target_
     int cjk_w = txt_cache_get_chinese_font_width_cached();
 
     uint16_t cur = s_reader_state.txt_cache.cursor;
-    if (cur >= s_reader_state.txt_cache.cached_chars) {
-        out[0] = '\0';
-        return 0;
+    if (s_reader_state.txt_cache.cached_chars == 0 || cur >= s_reader_state.txt_cache.cached_chars) {
+        // 缓存为空或游标越界：尝试在当前文件位置重建一次缓存。
+        ESP_LOGW(TAG, "TXT cache empty/overrun (cached=%u, cursor=%u), rebuilding...",
+                 (unsigned)s_reader_state.txt_cache.cached_chars, (unsigned)cur);
+
+        int32_t pos = (int32_t)s_reader_state.txt_reader.position.file_position;
+        if (!txt_cache_build_at(pos, 0)) {
+            ESP_LOGE(TAG, "TXT cache rebuild failed at pos=%ld", (long)pos);
+            out[0] = '\0';
+            return -1;
+        }
+
+        cur = s_reader_state.txt_cache.cursor;
+        if (s_reader_state.txt_cache.cached_chars == 0 || cur >= s_reader_state.txt_cache.cached_chars) {
+            ESP_LOGE(TAG, "TXT cache still empty after rebuild (cached=%u, cursor=%u)",
+                     (unsigned)s_reader_state.txt_cache.cached_chars, (unsigned)cur);
+            out[0] = '\0';
+            return -1;
+        }
     }
 
     // 定位到 cache 文件的起点
     uint32_t start_off = s_reader_state.txt_cache.cache_off[cur];
     (void)fseek(s_reader_state.txt_cache.fp, (long)start_off, SEEK_SET);
+
+    ESP_LOGI(TAG, "TXT format start: cached=%u cursor=%u target_lines=%d out_size=%zu start_off=%u",
+             (unsigned)s_reader_state.txt_cache.cached_chars,
+             (unsigned)cur,
+             target_lines,
+             out_size,
+             (unsigned)start_off);
 
     size_t written = 0;
     int lines = 0;
@@ -709,7 +742,7 @@ static bool load_epub_file(const char *file_path)
     int bytes_read = epub_parser_read_chapter_text_at(&s_reader_state.epub_reader, 0,
                                                       0,
                                                       s_reader_state.epub_html,
-                                                      sizeof(s_reader_state.epub_html));
+                                                      EPUB_HTML_BUFFER_SIZE);
 
     if (bytes_read <= 0) {
         ESP_LOGE(TAG, "Failed to read first chapter");
@@ -771,6 +804,9 @@ static void display_current_page(void)
     // 清除屏幕（确保旧内容不残留）
     display_clear(COLOR_WHITE);
 
+    // 诊断：确认清屏后 framebuffer 状态 & Paint 绑定
+    display_debug_log_framebuffer("reader:after_clear");
+
     sFONT *ui_font = display_get_default_ascii_font();
     int chinese_font_height = xt_eink_font_get_height();
     if (chinese_font_height == 0) {
@@ -791,20 +827,58 @@ static void display_current_page(void)
 
     display_draw_text_font(10, 5, page_info, ui_font, COLOR_BLACK, COLOR_WHITE);
 
+    // 诊断：确认页码是否真的写进 framebuffer
+    display_debug_log_framebuffer("reader:after_page_info");
+
     // 显示文本内容
     if (s_reader_state.type == READER_TYPE_TXT) {
         int target_lines = (SCREEN_HEIGHT - 20) / (xt_eink_font_get_height() + 4);
         int consumed_chars = 0;
         int bytes_written = txt_cache_format_current_page(s_reader_state.current_text,
-                                                          sizeof(s_reader_state.current_text),
+                                  CURRENT_TEXT_BUFFER_SIZE,
                                                           target_lines,
                                                           &consumed_chars);
+
+        // 诊断：确认分页后的文本是否真的包含可绘制内容（尤其排查 NUL/非法 UTF-8 导致的早停）
+        if (bytes_written > 0 && s_reader_state.current_text != NULL) {
+            size_t n = strlen(s_reader_state.current_text);
+            size_t hi = 0;
+            for (size_t i = 0; i < n; i++) {
+                if (((unsigned char)s_reader_state.current_text[i]) & 0x80u) {
+                    hi++;
+                }
+            }
+
+            char hex32[3 * 32 + 1];
+            size_t hex_pos = 0;
+            for (size_t i = 0; i < 32; i++) {
+                unsigned char b = (unsigned char)s_reader_state.current_text[i];
+                // 注意：current_text 是 C 字符串，遇到 NUL 就停止
+                if (b == 0) {
+                    break;
+                }
+                if (hex_pos + 3 < sizeof(hex32)) {
+                    snprintf(&hex32[hex_pos], 4, "%02X ", b);
+                    hex_pos += 3;
+                }
+            }
+            hex32[hex_pos] = '\0';
+
+            ESP_LOGI(TAG, "TXT page text: bytes_written=%d consumed=%d strlen=%u non_ascii_bytes=%u head_hex=%s",
+                     bytes_written,
+                     consumed_chars,
+                     (unsigned)n,
+                     (unsigned)hi,
+                     hex32);
+        } else {
+            ESP_LOGI(TAG, "TXT page text: bytes_written=%d consumed=%d (empty)", bytes_written, consumed_chars);
+        }
 
         if (bytes_written < 0) {
             s_reader_state.current_text[0] = '\0';
             s_reader_state.txt_cache.last_page_consumed_chars = 0;
         } else {
-            s_reader_state.current_text[sizeof(s_reader_state.current_text) - 1] = '\0';
+            s_reader_state.current_text[CURRENT_TEXT_BUFFER_SIZE - 1] = '\0';
             s_reader_state.txt_cache.last_page_consumed_chars = consumed_chars;
         }
 
@@ -868,6 +942,9 @@ static void display_current_page(void)
             p = nl + 1;
         }
     }
+
+    // 诊断：正文绘制完成后，统计 framebuffer 变化
+    display_debug_log_framebuffer("reader:after_body");
 }
 
 /**
@@ -931,7 +1008,7 @@ static void next_page(void)
 
         int step = s_reader_state.epub_page.last_html_consumed;
         if (step <= 0) {
-            step = (int)sizeof(s_reader_state.epub_html) - 1;
+            step = (int)EPUB_HTML_BUFFER_SIZE - 1;
         }
         s_reader_state.epub_page.html_offset += step;
 
@@ -1260,13 +1337,13 @@ void reader_screen_init(void)
 
     // 分配大缓冲区（仅在需要时占用内存）
     if (s_reader_state.epub_html == NULL) {
-        s_reader_state.epub_html = malloc(4096);
+        s_reader_state.epub_html = malloc(EPUB_HTML_BUFFER_SIZE);
         if (s_reader_state.epub_html == NULL) {
             ESP_LOGE(TAG, "Failed to allocate epub_html buffer!");
         }
     }
     if (s_reader_state.current_text == NULL) {
-        s_reader_state.current_text = malloc(4096);
+        s_reader_state.current_text = malloc(CURRENT_TEXT_BUFFER_SIZE);
         if (s_reader_state.current_text == NULL) {
             ESP_LOGE(TAG, "Failed to allocate current_text buffer!");
         }

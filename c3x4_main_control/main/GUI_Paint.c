@@ -522,8 +522,17 @@ void Paint_DrawChar(UWORD Xpoint, UWORD Ypoint, const char Acsii_Char,
         Debug("Paint_DrawChar Input exceeds the normal display range\r\n");
         return;
     }
+    // 防护：字体与表必须有效，且字符必须在可支持的 ASCII 范围
+    if (Font == NULL || Font->table == NULL) {
+        return;
+    }
+    char ch = Acsii_Char;
+    if (ch < ' ' || ch > '~') {
+        ch = '?';
+    }
 
-    uint32_t Char_Offset = (Acsii_Char - ' ') * Font->Height * (Font->Width / 8 + (Font->Width % 8 ? 1 : 0));
+    uint32_t bytes_per_row = (uint32_t)(Font->Width / 8 + (Font->Width % 8 ? 1 : 0));
+    uint32_t Char_Offset = (uint32_t)(ch - ' ') * (uint32_t)Font->Height * bytes_per_row;
     const unsigned char *ptr = &Font->table[Char_Offset];
 
     for (Page = 0; Page < Font->Height; Page ++ ) {

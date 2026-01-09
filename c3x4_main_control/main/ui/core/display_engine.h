@@ -244,6 +244,9 @@ sFONT* display_get_menu_font(void);
  */
 uint8_t* display_get_framebuffer(void);
 
+// Debug helpers
+void display_debug_log_framebuffer(const char *tag);
+
 /**
  * @brief 绘制 1bpp 位图蒙版（bit=1 的像素被绘制为指定颜色）
  *

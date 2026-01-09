@@ -223,15 +223,33 @@ int ZEXPORT inflateInit2_(z_streamp strm, int windowBits, const char *version, i
 #else
         strm->zfree = zcfree;
 #endif
-    // ==== DEBUG - I use a static buffer (already set) to avoid this memory allocation
+    // ==== DEBUG - Use static buffer if provided, otherwise allocate
     state = (struct inflate_state FAR *)strm->state;
+    if (state == Z_NULL) {
+        state = (struct inflate_state FAR *)
+                ZALLOC(strm, 1, sizeof(struct inflate_state));
+        if (state == Z_NULL) return Z_MEM_ERROR;
+        Tracev((stderr, "inflate: allocated\n"));
+        strm->state = (struct internal_state FAR *)state;
+        state->strm = strm;
+        state->window = Z_NULL;
+    } else {
+        // Pre-allocated state provided (e.g. by PNGdec)
+        state->strm = strm;
+        // state->window should be set by caller or will be set to Z_NULL here
+        // For PNGdec, it sets window manually, so we shouldn't overwrite it if set
+        if (state->window == Z_NULL) {
+             // Keep as is or init?
+        }
+    }
+    
     // ==== DEBUG
     //    state = (struct inflate_state FAR *)
     //            ZALLOC(strm, 1, sizeof(struct inflate_state));
     //    if (state == Z_NULL) return Z_MEM_ERROR;
     //    Tracev((stderr, "inflate: allocated\n"));
     //    strm->state = (struct internal_state FAR *)state;
-    state->strm = strm;
+    //    state->strm = strm;
     //    state->window = Z_NULL; <-- I set this too to avoid a later allocation
     state->mode = PNG_HEADER; /* to pass state test in inflateReset2() */
     ret = inflateReset2(strm, windowBits);

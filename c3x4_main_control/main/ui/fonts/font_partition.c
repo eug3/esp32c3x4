@@ -95,6 +95,40 @@ size_t font_partition_read_glyph(uint32_t unicode, uint8_t *buffer, size_t glyph
     return glyph_size;
 }
 
+bool font_partition_is_valid(void)
+{
+    if (s_font_partition == NULL) {
+        return false;
+    }
+
+    // Check if partition is erased (all 0xFF)
+    // We check the first char (0x0000)
+    // If it is all 0xFF, it's likely an erased partition.
+    // A valid font (0x0000) should be all 0x00.
+
+    uint8_t buffer[FONT_GLYPH_SIZE];
+    
+    // Check 0x0000
+    if (esp_partition_read(s_font_partition, 0, buffer, FONT_GLYPH_SIZE) != ESP_OK) {
+        return false;
+    }
+    
+    bool all_ff = true;
+    for (int i = 0; i < FONT_GLYPH_SIZE; i++) {
+        if (buffer[i] != 0xFF) {
+            all_ff = false;
+            break;
+        }
+    }
+    
+    if (all_ff) {
+        ESP_LOGW(TAG, "Font partition appears to be erased (all 0xFF)");
+        return false;
+    }
+
+    return true;
+}
+
 void font_partition_get_info(size_t *out_size, size_t *out_offset)
 {
     if (s_font_partition != NULL) {
