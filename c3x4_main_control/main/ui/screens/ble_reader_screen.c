@@ -79,7 +79,6 @@ static void on_draw(screen_t *screen);
 static void on_event(screen_t *screen, button_t btn, button_event_t event);
 
 // 蓝牙回调函数
-static void ble_device_found_callback(const ble_device_info_t *device);
 static void ble_connect_callback(bool connected);
 static void ble_data_received_callback(const uint8_t *data, uint16_t length);
 
@@ -162,26 +161,6 @@ static bool load_current_page(void)
              s_ble_state.current_book_id, s_ble_state.current_page);
     s_ble_state.page_loaded = false;
     return false;
-}
-
-/**
- * @brief 蓝牙设备发现回调
- */
-static void ble_device_found_callback(const ble_device_info_t *device)
-{
-    if (device == NULL) {
-        return;
-    }
-
-    ESP_LOGI(TAG, "Device found: %s [%02x:%02x:%02x:%02x:%02x:%02x] RSSI=%d",
-             device->name[0] != '\0' ? device->name : "Unknown",
-             device->addr[0], device->addr[1], device->addr[2],
-             device->addr[3], device->addr[4], device->addr[5],
-             device->rssi);
-    // 服务器模式：EPD 设备不扫描，等待手机连接
-    // 此回调不应触发
-    ESP_LOGW(TAG, "Unexpected device found callback in server mode");
-    (void)device;
 }
 
 /**
@@ -644,14 +623,14 @@ static void on_draw(screen_t *screen)
         case BLE_READER_STATE_IDLE:
             status_str = "Status: Idle";
             break;
-        case BLE_READER_STATE_SCANNING:
-            status_str = "Status: Scanning...";
-            break;
         case BLE_READER_STATE_CONNECTING:
             status_str = "Status: Connecting...";
             break;
         case BLE_READER_STATE_CONNECTED:
             status_str = "Status: Connected";
+            break;
+        case BLE_READER_STATE_RECEIVING:
+            status_str = "Status: Receiving...";
             break;
         case BLE_READER_STATE_READING:
             status_str = "Status: Reading";
@@ -827,29 +806,19 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
                 // 初始化确认：标记为初始化完成，开始发送初始三页给手机
                 s_ble_state.initialization_complete = true;
                 ESP_LOGI(TAG, "Book initialization confirmed, starting to send initial pages");
-                
+
                 // 初始化缓存窗口（从第0页开始）
                 update_cached_window(0);
-                
+
                 // 首先发送初始页码 0 给手机
                 send_page_sync_notification(0);
-                
-                screen->needs_redraw = true;
-            } else if (s_ble_state.state == BLE_READER_STATE_IDLE ||
-                       s_ble_state.state == BLE_READER_STATE_SCANNING) {
-                // 没有书籍时，扫描 BLE 设备
-                ESP_LOGI(TAG, "Starting BLE scan...");
-                s_ble_state.state = BLE_READER_STATE_SCANNING;
-                ble_reader_screen_start_scan();
+
                 screen->needs_redraw = true;
             }
             break;
 
         case BTN_BACK:
             // Back button
-            if (s_ble_state.state == BLE_READER_STATE_SCANNING) {
-                ble_reader_screen_stop_scan();
-            }
             if (s_ble_state.device_connected) {
                 ble_reader_screen_disconnect();
             }
@@ -908,7 +877,6 @@ static void on_show(screen_t *screen)
     }
 
     // 注册蓝牙回调
-    ble_manager_register_device_found_cb(ble_device_found_callback);
     ble_manager_register_connect_cb(ble_connect_callback);
     ble_manager_register_data_received_cb(ble_data_received_callback);
 
@@ -970,24 +938,6 @@ screen_t* ble_reader_screen_get_instance(void)
 ble_reader_state_t ble_reader_screen_get_state(void)
 {
     return s_ble_state.state;
-}
-
-void ble_reader_screen_start_scan(void)
-{
-    ESP_LOGI(TAG, "Starting BLE scan");
-    s_ble_state.state = BLE_READER_STATE_SCANNING;
-    ble_manager_start_scan(0);
-}
-
-void ble_reader_screen_stop_scan(void)
-{
-    ESP_LOGI(TAG, "Stopping BLE scan");
-
-    if (s_ble_state.state == BLE_READER_STATE_SCANNING) {
-        s_ble_state.state = BLE_READER_STATE_IDLE;
-    }
-
-    ble_manager_stop_scan();
 }
 
 bool ble_reader_screen_connect_device(const uint8_t *addr)

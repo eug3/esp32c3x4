@@ -18,7 +18,6 @@ typedef enum {
     BLE_READER_STATE_IDLE,           // 空闲状态
     BLE_READER_STATE_CONNECTING,     // 连接中
     BLE_READER_STATE_CONNECTED,      // 已连接
-    BLE_READER_STATE_SCANNING,       // 扫描设备中
     BLE_READER_STATE_RECEIVING,      // 接收数据中
     BLE_READER_STATE_READING,        // 阅读中
 } ble_reader_state_t;
@@ -39,16 +38,6 @@ screen_t* ble_reader_screen_get_instance(void);
  * @return 当前状态
  */
 ble_reader_state_t ble_reader_screen_get_state(void);
-
-/**
- * @brief 启动蓝牙扫描
- */
-void ble_reader_screen_start_scan(void);
-
-/**
- * @brief 停止蓝牙扫描
- */
-void ble_reader_screen_stop_scan(void);
 
 /**
  * @brief 连接到蓝牙设备
