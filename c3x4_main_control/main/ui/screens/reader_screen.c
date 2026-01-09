@@ -19,6 +19,7 @@
 #include "wallpaper_manager.h"
 #include "power_manager.h"
 #include "gb18030_conv.h"
+#include "GUI_Paint.h"
 #include <string.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -825,7 +826,15 @@ static void display_current_page(void)
                  s_reader_state.current_page, s_reader_state.total_pages);
     }
 
-    display_draw_text_font(0, 5, page_info, &Font12, COLOR_BLACK, COLOR_WHITE);
+    // 直接使用 Paint_DrawChar 确保使用 Font12，不被自动字体选择覆盖
+    sFONT *font = &Font12;
+    int x = 0;
+    int y = 5;
+    const int ascii_adv = (int)font->Width;
+    for (const char *p = page_info; *p != '\0'; p++) {
+        Paint_DrawChar(x, y, *p, font, COLOR_BLACK, COLOR_WHITE);
+        x += ascii_adv;
+    }
 
     // 诊断：确认页码是否真的写进 framebuffer
     display_debug_log_framebuffer("reader:after_page_info");

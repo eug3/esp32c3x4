@@ -1193,7 +1193,8 @@ static void draw_battery_to_framebuffer(void)
 
     // 使用 Font12 在右上角绘制
     sFONT *font = &Font12;
-    int text_width = display_get_text_width_font(bat_str, font);
+    // 直接使用字体宽度，不用 display_get_text_width_font（它会被中文字体影响）
+    int text_width = (int)strlen(bat_str) * (int)font->Width;
 
     // 计算位置（右上角，靠着右边框）
     int x = SCREEN_WIDTH - text_width;
