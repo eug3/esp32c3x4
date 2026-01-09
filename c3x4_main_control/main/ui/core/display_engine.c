@@ -1191,9 +1191,9 @@ static void draw_battery_to_framebuffer(void)
     char bat_str[16];
     snprintf(bat_str, sizeof(bat_str), "Battery: %03d", battery_pct);
 
-    // 使用菜单字体在右上角绘制
-    sFONT *font = display_get_menu_font();
-    int text_width = display_get_text_width_menu(bat_str);
+    // 使用 Font12 在右上角绘制
+    sFONT *font = &Font12;
+    int text_width = display_get_text_width_font(bat_str, font);
 
     // 计算位置（右上角）
     int x = SCREEN_WIDTH - text_width - 10;

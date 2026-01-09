@@ -815,7 +815,7 @@ static void display_current_page(void)
     int line_spacing = 4;
     int font_height = chinese_font_height + line_spacing;
 
-    // 显示页码
+    // 显示页码（左上角，使用 Font12）
     char page_info[32];
     if (s_reader_state.type == READER_TYPE_TXT) {
         snprintf(page_info, sizeof(page_info), "%d/%d",
@@ -825,7 +825,7 @@ static void display_current_page(void)
                  s_reader_state.current_page, s_reader_state.total_pages);
     }
 
-    display_draw_text_font(10, 5, page_info, ui_font, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_font(10, 5, page_info, &Font12, COLOR_BLACK, COLOR_WHITE);
 
     // 诊断：确认页码是否真的写进 framebuffer
     display_debug_log_framebuffer("reader:after_page_info");
