@@ -23,7 +23,10 @@
       "Bash(source:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(tree:*)"
+      "Bash(tree:*)",
+      "Bash(/Users/beijihu/.espressif/python_env/idf6.1_py3.14_env/bin/python /Users/beijihu/esp/esp-idf/tools/idf_tools.py:*)",
+      "Bash(grep:*)",
+      "Bash(/Users/beijihu/.espressif/python_env/idf6.1_py3.14_env/bin/python:*)"
     ]
   }
 }

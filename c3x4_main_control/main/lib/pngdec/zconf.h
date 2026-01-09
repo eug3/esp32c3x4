@@ -10,10 +10,12 @@
 #define STDC 1
 #define Z_SOLO 1
 #define ZLIB_INTERNAL
+#define HAVE_MEMCPY 1  // Use standard memcpy instead of zmemcpy
 #define HAVE_HIDDEN 0
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 // Type definitions for ESP32
 typedef unsigned char Byte;

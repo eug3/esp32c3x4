@@ -56,6 +56,13 @@ void epub_xml_destroy(epub_xml_parser_t *parser);
 bool epub_xml_parse_metadata(epub_xml_parser_t *parser, epub_xml_metadata_t *metadata);
 
 /**
+ * @brief 统计 spine 项目数量（用于预先分配内存）
+ * @param parser 解析器句柄
+ * @return spine 项目数量
+ */
+int epub_xml_count_spine_items(epub_xml_parser_t *parser);
+
+/**
  * @brief 解析 content.opf - 提取 spine（章节顺序）
  * @param parser 解析器句柄
  * @param spine_items 输出 spine 项数组

@@ -64,6 +64,15 @@ static screen_t* pop_nav_stack(void)
     return screen;
 }
 
+static void dump_nav_stack(const char *where)
+{
+    ESP_LOGI(TAG, "Nav stack dump (%s): top=%d", where, g_nav_stack_top);
+    for (int i = 0; i <= g_nav_stack_top && i < NAV_STACK_DEPTH; i++) {
+        screen_t *s = g_nav_stack[i];
+        ESP_LOGI(TAG, "  [%d] %s", i, s ? s->name : "NULL");
+    }
+}
+
 /**********************
  * GLOBAL FUNCTIONS
  **********************/
@@ -190,6 +199,7 @@ bool screen_manager_show_screen(screen_t *screen)
 
     // 压入导航栈
     push_nav_stack(screen);
+    dump_nav_stack("after show");
 
     // 切换到新屏幕
     g_mgr.current_screen = screen;
@@ -216,6 +226,11 @@ bool screen_manager_back(void)
 {
     if (g_nav_stack_top <= 0) {
         ESP_LOGI(TAG, "Already at first screen, cannot go back");
+        // 尝试回到首页以恢复一致状态
+        if (g_mgr.current_screen == NULL || strcmp(g_mgr.current_screen->name, "home") != 0) {
+            ESP_LOGI(TAG, "Recovering to 'home' screen...");
+            (void)screen_manager_show("home");
+        }
         return false;
     }
 
@@ -232,6 +247,9 @@ bool screen_manager_back(void)
     screen_t *prev = g_nav_stack[g_nav_stack_top];
     if (prev == NULL) {
         ESP_LOGE(TAG, "Previous screen is NULL");
+        dump_nav_stack("prev NULL");
+        // 尝试回到首页以恢复一致状态
+        (void)screen_manager_show("home");
         return false;
     }
 
@@ -252,6 +270,7 @@ bool screen_manager_back(void)
 
     // 刷新显示
     display_refresh(REFRESH_MODE_FULL);
+    dump_nav_stack("after back");
 
     return true;
 }

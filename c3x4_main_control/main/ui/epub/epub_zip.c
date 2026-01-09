@@ -5,15 +5,21 @@
 
 #include "epub_zip.h"
 #include "esp_log.h"
-#include "zlib.h"
+#include "esp_system.h"
+#include "esp_heap_caps.h"
+
+// 使用 ESP ROM 提供的 miniz(tinfl) 解压，而不是 pngdec 的修改版 zlib
+#include "miniz.h"
 #include <string.h>
 #include <stdlib.h>
 #include <fcntl.h>
 
+static const char *TAG = "EPUB_ZIP";
+
 // ESP-IDF ROM 中包含 miniz，但多文件支持被禁用
 // 这里使用简化版本：只读取 ZIP 中心目录，按需解压
 
-static const char *TAG = "EPUB_ZIP";
+// 不再需要 zlib 的自定义分配器
 
 // ZIP 文件头结构（简化）
 #define ZIP_LOCAL_FILE_HEADER_SIGNATURE 0x04034b50
@@ -291,8 +297,12 @@ int epub_zip_extract_file(epub_zip_t *zip, const epub_zip_file_info_t *file_info
         return -1;
     }
 
+    ESP_LOGI(TAG, "extract_file: offset=%u, comp=%u, uncomp=%u, comp_method=%u",
+             file_info->offset, file_info->compressed_size,
+             file_info->uncompressed_size, file_info->compression_method);
+
     // 说明：阅读器章节缓冲区可能较小（例如 4KB）。
-    // 这里允许“截断式解压/读取”，返回实际写入 buffer 的字节数。
+    // 这里允许"截断式解压/读取"，返回实际写入 buffer 的字节数。
     if (file_info->uncompressed_size > buffer_size) {
         ESP_LOGW(TAG, "Buffer smaller than uncompressed size: need %u, have %u (will truncate)",
                  (unsigned)file_info->uncompressed_size, (unsigned)buffer_size);
@@ -309,9 +319,13 @@ int epub_zip_extract_file(epub_zip_t *zip, const epub_zip_file_info_t *file_info
     }
 
     if (local_header.signature != ZIP_LOCAL_FILE_HEADER_SIGNATURE) {
-        ESP_LOGE(TAG, "Invalid local header signature");
+        ESP_LOGE(TAG, "Invalid local header signature: 0x%08x", (unsigned)local_header.signature);
         return -1;
     }
+
+    ESP_LOGI(TAG, "Local header: filename_len=%u, extra_len=%u, compression=%u, flags=0x%04x",
+             local_header.filename_len, local_header.extra_len,
+             local_header.compression, local_header.flags);
 
     // 跳过文件名和 extra
     fseek(zip->file, local_header.filename_len + local_header.extra_len, SEEK_CUR);
@@ -319,6 +333,7 @@ int epub_zip_extract_file(epub_zip_t *zip, const epub_zip_file_info_t *file_info
     // 读取数据
     if (local_header.compression == 0) {
         // 存储 - 直接读取
+        ESP_LOGI(TAG, "Stored compression - direct copy");
         size_t to_read = (size_t)file_info->compressed_size;
         if (to_read > buffer_size) {
             to_read = buffer_size;
@@ -326,99 +341,94 @@ int epub_zip_extract_file(epub_zip_t *zip, const epub_zip_file_info_t *file_info
         size_t n = fread(buffer, 1, to_read, zip->file);
         return (int)n;
     } else if (local_header.compression == 8) {
-        // Deflate (raw) - ZIP 使用 raw deflate，无 zlib 头
-        // 这里使用工程内的 zlib(inflate) 实现（PNGdec 依赖）进行流式解压。
+        // Deflate (raw) - 使用 ROM miniz 的 tinfl 流式解压
         const size_t compressed_total = (size_t)file_info->compressed_size;
         const size_t uncompressed_total = (size_t)file_info->uncompressed_size;
         const size_t out_limit = (uncompressed_total > buffer_size) ? buffer_size : uncompressed_total;
 
-        // 小块输入，避免大内存/大栈
-        const size_t CHUNK = 4096;
-        uint8_t *in_chunk = (uint8_t *)malloc(CHUNK);
-        if (in_chunk == NULL) {
-            ESP_LOGE(TAG, "Failed to allocate deflate input chunk");
-            return -1;
-        }
-
-        z_stream strm;
-        memset(&strm, 0, sizeof(strm));
-        int ret = inflateInit2(&strm, -15);
-        if (ret != Z_OK) {
-            ESP_LOGE(TAG, "inflateInit2 failed: %d", ret);
+        const size_t IN_CHUNK = 1024;
+        const size_t OUT_CHUNK = 1024;
+        uint8_t *in_chunk = (uint8_t *)malloc(IN_CHUNK);
+        uint8_t *out_chunk = (uint8_t *)malloc(OUT_CHUNK);
+        if (!in_chunk || !out_chunk) {
             free(in_chunk);
+            free(out_chunk);
             return -1;
         }
 
-        strm.next_out = (Bytef *)buffer;
-        strm.avail_out = (uInt)out_limit;
+        tinfl_decompressor decomp;
+        tinfl_init(&decomp);
 
+        size_t total_written = 0;
         size_t remaining = compressed_total;
-        size_t in_have = 0;
+        tinfl_status status = TINFL_STATUS_NEEDS_MORE_INPUT;
 
-        while (1) {
-            if (strm.avail_in == 0) {
-                if (remaining == 0) {
-                    // 没有更多输入了
-                    in_have = 0;
-                } else {
-                    size_t to_read = remaining > CHUNK ? CHUNK : remaining;
-                    size_t nr = fread(in_chunk, 1, to_read, zip->file);
-                    if (nr == 0) {
-                        ESP_LOGE(TAG, "Failed to read compressed data (remaining=%u)", (unsigned)remaining);
-                        inflateEnd(&strm);
-                        free(in_chunk);
-                        return -1;
-                    }
-                    remaining -= nr;
-                    in_have = nr;
+        while (total_written < out_limit) {
+            size_t to_read = remaining > IN_CHUNK ? IN_CHUNK : remaining;
+            size_t nr = (to_read > 0) ? fread(in_chunk, 1, to_read, zip->file) : 0;
+            if (to_read > 0 && nr == 0) {
+                ESP_LOGE(TAG, "Failed to read deflate data (remaining=%u)", (unsigned)remaining);
+                free(in_chunk);
+                free(out_chunk);
+                return -1;
+            }
+            remaining -= nr;
+
+            const mz_uint8 *pIn = in_chunk;
+            size_t in_size = nr;
+
+            while (1) {
+                size_t out_size = OUT_CHUNK;
+                status = tinfl_decompress(&decomp, pIn, &in_size, out_chunk, out_chunk, &out_size,
+                                          (remaining > 0 ? TINFL_FLAG_HAS_MORE_INPUT : 0));
+
+                if (status < 0) {
+                    ESP_LOGE(TAG, "tinfl failed: %d (flags=0x%x)", (int)status, 0);
+                    free(in_chunk);
+                    free(out_chunk);
+                    return -1;
                 }
 
-                strm.next_in = (z_const Bytef *)in_chunk;
-                strm.avail_in = (uInt)in_have;
+                if (out_size > 0) {
+                    size_t to_copy = out_size;
+                    if (total_written + to_copy > out_limit) {
+                        to_copy = out_limit - total_written;
+                    }
+                    memcpy((uint8_t *)buffer + total_written, out_chunk, to_copy);
+                    total_written += to_copy;
+                    if (total_written >= out_limit) {
+                        break;
+                    }
+                }
+
+                if (status == TINFL_STATUS_DONE) {
+                    break;
+                }
+
+                if (status == TINFL_STATUS_HAS_MORE_OUTPUT) {
+                    continue;
+                }
+
+                if (status == TINFL_STATUS_NEEDS_MORE_INPUT) {
+                    break;
+                }
             }
 
-            int flush = (remaining == 0 && strm.avail_in == 0) ? Z_FINISH : Z_NO_FLUSH;
-            ret = inflate(&strm, flush, 0);
-
-            if (ret == Z_STREAM_END) {
+            if (status == TINFL_STATUS_DONE || total_written >= out_limit) {
                 break;
             }
 
-            if (ret != Z_OK && ret != Z_BUF_ERROR) {
-                ESP_LOGE(TAG, "inflate failed: %d", ret);
-                inflateEnd(&strm);
+            if (remaining == 0 && in_size == 0 && status != TINFL_STATUS_DONE) {
+                ESP_LOGE(TAG, "tinfl stalled: no input left but not done");
                 free(in_chunk);
-                return -1;
-            }
-
-            if (strm.avail_out == 0 && ret != Z_STREAM_END) {
-                // 输出缓冲满：允许截断返回
-                break;
-            }
-
-            // 防止死循环：没有输入、没有输出进展且已到输入末尾
-            if (remaining == 0 && strm.avail_in == 0 && ret == Z_BUF_ERROR) {
-                ESP_LOGE(TAG, "inflate stalled (no input remaining)");
-                inflateEnd(&strm);
-                free(in_chunk);
+                free(out_chunk);
                 return -1;
             }
         }
 
-        ret = inflateEnd(&strm);
         free(in_chunk);
-
-        if (ret != Z_OK) {
-            ESP_LOGW(TAG, "inflateEnd returned %d", ret);
-        }
-
-        if ((size_t)strm.total_out != uncompressed_total && out_limit == uncompressed_total) {
-            // 未截断时，通常应一致
-            ESP_LOGW(TAG, "Inflate size mismatch: out=%u expected=%u",
-                     (unsigned)strm.total_out, (unsigned)uncompressed_total);
-        }
-
-        return (int)strm.total_out;
+        free(out_chunk);
+        return (int)total_written;
     }
 
     ESP_LOGE(TAG, "Unsupported compression method: %u", local_header.compression);
@@ -460,7 +470,7 @@ int epub_zip_extract_file_to_path(epub_zip_t *zip, const epub_zip_file_info_t *f
     // 跳过文件名和 extra
     fseek(zip->file, local_header.filename_len + local_header.extra_len, SEEK_CUR);
 
-    const size_t CHUNK = 4096;
+    const size_t CHUNK = 1024;
     uint8_t *in_chunk = (uint8_t *)malloc(CHUNK);
     uint8_t *out_chunk = (uint8_t *)malloc(CHUNK);
     if (in_chunk == NULL || out_chunk == NULL) {
@@ -494,76 +504,95 @@ int epub_zip_extract_file_to_path(epub_zip_t *zip, const epub_zip_file_info_t *f
             written_total += (int)nr;
         }
     } else if (local_header.compression == 8) {
-        // Deflate(raw)
-        z_stream strm;
-        memset(&strm, 0, sizeof(strm));
+        // Deflate(raw) 使用 tinfl 流式解压写入文件
+        ESP_LOGI(TAG, "Starting inflate: compressed=%u, heap=%u",
+                 (unsigned)file_info->compressed_size, (unsigned)esp_get_free_heap_size());
 
-        int ret = inflateInit2(&strm, -15);
-        if (ret != Z_OK) {
-            ESP_LOGE(TAG, "inflateInit2 failed: %d", ret);
-            written_total = -1;
-        } else {
-            size_t remaining = (size_t)file_info->compressed_size;
-            strm.avail_in = 0;
-            strm.next_in = Z_NULL;
+        const size_t IN_CHUNK = 1024;
+        const size_t OUT_CHUNK = 1024;
+        uint8_t *in_chunk = (uint8_t *)malloc(IN_CHUNK);
+        uint8_t *out_chunk = (uint8_t *)malloc(OUT_CHUNK);
+        if (in_chunk == NULL || out_chunk == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate chunk buffers");
+            free(in_chunk);
+            free(out_chunk);
+            fclose(out);
+            return -1;
+        }
+
+        tinfl_decompressor decomp;
+        tinfl_init(&decomp);
+
+        size_t remaining = (size_t)file_info->compressed_size;
+        tinfl_status status = TINFL_STATUS_NEEDS_MORE_INPUT;
+
+        while (1) {
+            size_t to_read = remaining > IN_CHUNK ? IN_CHUNK : remaining;
+            size_t nr = (to_read > 0) ? fread(in_chunk, 1, to_read, zip->file) : 0;
+            if (to_read > 0 && nr == 0) {
+                ESP_LOGE(TAG, "Failed to read deflate data (remaining=%u)", (unsigned)remaining);
+                written_total = -1;
+                break;
+            }
+            remaining -= nr;
+
+            const mz_uint8 *pIn = in_chunk;
+            size_t in_size = nr;
 
             while (1) {
-                if (strm.avail_in == 0 && remaining > 0) {
-                    size_t to_read = remaining > CHUNK ? CHUNK : remaining;
-                    size_t nr = fread(in_chunk, 1, to_read, zip->file);
-                    if (nr == 0) {
-                        ESP_LOGE(TAG, "Failed to read deflate data (remaining=%u)", (unsigned)remaining);
-                        written_total = -1;
-                        break;
-                    }
-                    remaining -= nr;
-                    strm.next_in = (z_const Bytef *)in_chunk;
-                    strm.avail_in = (uInt)nr;
-                }
+                size_t out_size = OUT_CHUNK;
+                status = tinfl_decompress(&decomp, pIn, &in_size, out_chunk, out_chunk, &out_size,
+                                          (remaining > 0 ? TINFL_FLAG_HAS_MORE_INPUT : 0));
 
-                strm.next_out = (Bytef *)out_chunk;
-                strm.avail_out = (uInt)CHUNK;
-
-                int flush = (remaining == 0 && strm.avail_in == 0) ? Z_FINISH : Z_NO_FLUSH;
-                ret = inflate(&strm, flush, 0);
-
-                if (ret != Z_OK && ret != Z_STREAM_END && ret != Z_BUF_ERROR) {
-                    ESP_LOGE(TAG, "inflate failed: %d", ret);
+                if (status < 0) {
+                    ESP_LOGE(TAG, "tinfl failed: %d", (int)status);
                     written_total = -1;
                     break;
                 }
 
-                size_t produced = CHUNK - (size_t)strm.avail_out;
-                if (produced > 0) {
-                    size_t nw = fwrite(out_chunk, 1, produced, out);
-                    if (nw != produced) {
+                if (out_size) {
+                    size_t nw = fwrite(out_chunk, 1, out_size, out);
+                    if (nw != out_size) {
                         ESP_LOGE(TAG, "Failed to write inflated data");
                         written_total = -1;
                         break;
                     }
-                    written_total += (int)produced;
+                    written_total += (int)out_size;
                 }
 
-                if (ret == Z_STREAM_END) {
+                if (status == TINFL_STATUS_DONE) {
                     break;
                 }
 
-                if (remaining == 0 && strm.avail_in == 0 && ret == Z_BUF_ERROR) {
-                    ESP_LOGE(TAG, "inflate stalled (no input remaining)");
-                    written_total = -1;
+                if (status == TINFL_STATUS_HAS_MORE_OUTPUT) {
+                    // 继续拉取输出（不消耗更多输入）
+                    continue;
+                }
+
+                if (status == TINFL_STATUS_NEEDS_MORE_INPUT) {
+                    // 需要更多输入时，跳出内层，去读下一块输入
                     break;
                 }
             }
 
-            (void)inflateEnd(&strm);
+            if (status == TINFL_STATUS_DONE || written_total < 0) {
+                break;
+            }
+
+            if (remaining == 0 && in_size == 0 && status != TINFL_STATUS_DONE) {
+                ESP_LOGE(TAG, "tinfl stalled: no input left");
+                written_total = -1;
+                break;
+            }
         }
+
+        free(in_chunk);
+        free(out_chunk);
     } else {
         ESP_LOGE(TAG, "Unsupported compression method: %u", local_header.compression);
         written_total = -1;
     }
 
-    free(in_chunk);
-    free(out_chunk);
     fclose(out);
 
     return written_total;

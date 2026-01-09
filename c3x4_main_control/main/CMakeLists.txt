@@ -91,7 +91,8 @@ idf_component_register(SRCS
                        "power_manager.c"
                        ${EPUB_PARSER_SOURCES}
                        PRIV_REQUIRES spi_flash esp_driver_gpio esp_driver_spi driver esp_wifi nvs_flash fatfs littlefs esp_adc esp_timer vfs bt
-                       INCLUDE_DIRS "." "Fonts" "ui" "ui/core" "ui/screens" "ui/boot" "ui/fonts" "ui/epub" "ui/txt" "ui/image" "ui/wallpaper" "ui/ble" "lib/tjpgd" "lib/pngdec")
+                       INCLUDE_DIRS "." "Fonts" "ui" "ui/core" "ui/screens" "ui/boot" "ui/fonts" "ui/epub" "ui/txt" "ui/image" "ui/wallpaper" "ui/ble" "lib/tjpgd"
+                       PRIV_INCLUDE_DIRS "lib/pngdec")
 
 # Disable type-limits warning for GUI_Paint.c
 set_source_files_properties(GUI_Paint.c PROPERTIES COMPILE_FLAGS "-Wno-type-limits")

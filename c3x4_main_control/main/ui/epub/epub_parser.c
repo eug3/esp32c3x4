@@ -23,6 +23,8 @@
 #define HTML_STREAM_IN_CHUNK  2048
 #define HTML_STREAM_OUT_CHUNK 2048
 
+static const char *TAG = "EPUB_PARSER";
+
 static int ensure_chapter_cached_and_get_key(const epub_reader_t *reader, int chapter_index, epub_cache_key_t *out_key)
 {
     if (reader == NULL || out_key == NULL) {
@@ -59,12 +61,29 @@ static int ensure_chapter_cached_and_get_key(const epub_reader_t *reader, int ch
     out_key->content_path[sizeof(out_key->content_path) - 1] = '\0';
 
     if (!epub_cache_exists(out_key)) {
-        char *cache_path = (char *)malloc(256);
-        if (cache_path != NULL) {
-            if (epub_cache_get_file_path(out_key, cache_path, 256)) {
-                (void)epub_zip_extract_file_to_path(zip, &chapter_file, cache_path);
+        // 直接解压到 LittleFS 缓存，不写 SD 卡
+        if (chapter_file.uncompressed_size > 0) {
+            char *buffer = malloc(chapter_file.uncompressed_size);
+            if (buffer != NULL) {
+                ESP_LOGI(TAG, "Extracting chapter %s (comp=%u, uncomp=%u) to LittleFS cache",
+                         chapter_file.filename, (unsigned)chapter_file.compressed_size,
+                         (unsigned)chapter_file.uncompressed_size);
+
+                int size = epub_zip_extract_file(zip, &chapter_file, buffer, chapter_file.uncompressed_size);
+                if (size > 0) {
+                    // 写入 LittleFS 缓存
+                    if (epub_cache_write(out_key, buffer, size)) {
+                        ESP_LOGI(TAG, "Chapter cached in LittleFS: %d bytes", size);
+                    } else {
+                        ESP_LOGE(TAG, "Failed to write chapter to LittleFS cache");
+                    }
+                } else {
+                    ESP_LOGE(TAG, "Failed to extract chapter: %d", size);
+                }
+                free(buffer);
+            } else {
+                ESP_LOGE(TAG, "Failed to allocate buffer for chapter (%u bytes)", (unsigned)chapter_file.uncompressed_size);
             }
-            free(cache_path);
         }
     }
 
@@ -161,8 +180,6 @@ static int ensure_rendered_text_cache(const epub_reader_t *reader, int chapter_i
     }
     return 0;
 }
-
-static const char *TAG = "EPUB_PARSER";
 
 // NVS 命名空间
 #define NVS_NAMESPACE "reader_pos"
@@ -264,6 +281,9 @@ bool epub_parser_open(epub_reader_t *reader, const char *epub_path) {
         return false;
     }
 
+    // 打开新书前清理 LittleFS 缓存
+    (void)epub_cache_clear();
+
     strncpy(reader->epub_path, epub_path, sizeof(reader->epub_path) - 1);
     reader->epub_path[sizeof(reader->epub_path) - 1] = '\0';
 
@@ -314,22 +334,34 @@ bool epub_parser_open(epub_reader_t *reader, const char *epub_path) {
         opf_dir[dir_len] = '\0';
     }
 
-    // 步骤 3: 读取并解析 content.opf
-    char *opf_buffer = malloc(opf_file.uncompressed_size + 1);
-    if (!opf_buffer) {
-        ESP_LOGE(TAG, "Failed to allocate buffer for content.opf");
-        epub_zip_close(zip);
-        return false;
+    // 步骤 3: 直接解压 OPF 到内存（不写文件）
+    char *opf_buffer = NULL;
+    int opf_size = -1;
+
+    if (opf_file.uncompressed_size > 0 && opf_file.uncompressed_size < 1024 * 1024) {
+        opf_buffer = malloc(opf_file.uncompressed_size + 1);
+        if (opf_buffer) {
+            opf_size = epub_zip_extract_file(zip, &opf_file, opf_buffer, opf_file.uncompressed_size);
+            if (opf_size > 0) {
+                opf_buffer[opf_size] = '\0';
+                ESP_LOGI(TAG, "OPF loaded to memory: %d bytes", opf_size);
+            } else {
+                ESP_LOGE(TAG, "Failed to extract OPF: %d", opf_size);
+                free(opf_buffer);
+                opf_buffer = NULL;
+            }
+        } else {
+            ESP_LOGE(TAG, "Failed to allocate OPF buffer");
+        }
+    } else {
+        ESP_LOGE(TAG, "OPF file too large: %u bytes", (unsigned)opf_file.uncompressed_size);
     }
 
-    int opf_size = epub_zip_extract_file(zip, &opf_file, opf_buffer, opf_file.uncompressed_size);
-    if (opf_size < 0) {
+    if (opf_size < 0 || !opf_buffer) {
         ESP_LOGE(TAG, "Failed to extract content.opf");
-        free(opf_buffer);
         epub_zip_close(zip);
         return false;
     }
-    opf_buffer[opf_size] = '\0';
 
     // 创建 XML 解析器
     epub_xml_parser_t *xml = epub_xml_create(opf_buffer, opf_size);
@@ -357,18 +389,59 @@ bool epub_parser_open(epub_reader_t *reader, const char *epub_path) {
     }
 
     // 解析 spine (章节顺序)
-    // 注意：spine_items 结构体较大（含 href[256]），不能放在小栈任务上。
-    epub_xml_spine_item_t *spine_items = calloc(MAX_CHAPTERS, sizeof(epub_xml_spine_item_t));
-    if (!spine_items) {
-        ESP_LOGE(TAG, "Failed to allocate spine items");
+    // 先统计 spine 项目数量，再精确分配所需内存
+    int spine_count = epub_xml_count_spine_items(xml);
+    if (spine_count <= 0) {
+        ESP_LOGE(TAG, "No spine items found");
+        // 诊断：打印OPF内容的前1000字节
+        if (opf_size > 0) {
+            char debug_buf[512];
+            strncpy(debug_buf, opf_buffer, sizeof(debug_buf) - 1);
+            debug_buf[sizeof(debug_buf) - 1] = '\0';
+            ESP_LOGD(TAG, "OPF content sample: %s", debug_buf);
+            
+            // 检查是否存在spine标签
+            if (strstr(opf_buffer, "<spine") || strstr(opf_buffer, "<opf:spine")) {
+                ESP_LOGD(TAG, "spine tag found in OPF, but no itemref items detected");
+            } else if (strstr(opf_buffer, "spine")) {
+                ESP_LOGD(TAG, "spine keyword found but not as XML tag");
+            } else {
+                ESP_LOGD(TAG, "No spine tag found in OPF at all");
+            }
+        }
         epub_xml_destroy(xml);
         free(opf_buffer);
         epub_zip_close(zip);
         return false;
     }
 
-    int spine_count = epub_xml_parse_spine(xml, spine_items, MAX_CHAPTERS);
-    ESP_LOGI(TAG, "Found %d spine items", spine_count);
+    // 限制最大章节数，防止内存不足
+    if (spine_count > MAX_CHAPTERS) {
+        ESP_LOGW(TAG, "Too many spine items (%d), limiting to %d", spine_count, MAX_CHAPTERS);
+        spine_count = MAX_CHAPTERS;
+    }
+
+    ESP_LOGI(TAG, "Found %d spine items, allocating memory...", spine_count);
+
+    // 注意：spine_items 结构体较大（含 href[256]），不能放在小栈任务上。
+    epub_xml_spine_item_t *spine_items = calloc(spine_count, sizeof(epub_xml_spine_item_t));
+    if (!spine_items) {
+        ESP_LOGE(TAG, "Failed to allocate spine items (%d * %zu bytes)",
+                 spine_count, sizeof(epub_xml_spine_item_t));
+        epub_xml_destroy(xml);
+        free(opf_buffer);
+        epub_zip_close(zip);
+        return false;
+    }
+
+    // 实际解析 spine 数据
+    int parsed_count = epub_xml_parse_spine(xml, spine_items, spine_count);
+    ESP_LOGI(TAG, "Parsed %d spine items (expected %d)", parsed_count, spine_count);
+
+    if (parsed_count < spine_count) {
+        ESP_LOGW(TAG, "Parsed fewer items than counted, adjusting");
+        spine_count = parsed_count;
+    }
 
     // 分配章节数组
     reader->chapters = calloc(spine_count, sizeof(epub_chapter_t));

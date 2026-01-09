@@ -600,7 +600,8 @@ void app_main(void)
     input_handler_init(NULL);
     input_handler_register_callback(ui_button_event_cb, NULL);
     // 注意：input_poll 里可能触发屏幕切换/目录扫描等较深调用栈，给更大的栈以避免 stack protection fault
-    xTaskCreate(input_poll_task, "input_poll", 8192, NULL, 5, NULL);
+    // 增加到 16KB 以防止 zlib 解压时栈溢出 (ESP32-C3 上 zlib inflate 需要较多栈)
+    xTaskCreate(input_poll_task, "input_poll", 16384, NULL, 5, NULL);
 
     // 先显示启动屏幕
     ESP_LOGI("MAIN", "Showing boot screen...");

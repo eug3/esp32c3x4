@@ -1,9 +1,9 @@
 # Name,     Type, SubType, Offset,   Size,    Flags
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap
-# 16MB Flash 分区方案：应用 4MB + LittleFS 4MB + 字体分区 6MB
+# 16MB Flash 分区方案：应用 4MB + LittleFS 6MB + 字体分区 5MB
 nvs,        data, nvs,     0x9000,   0x6000,
 phy_init,   data, phy,     0xf000,   0x1000,
 factory,    app,  factory, 0x10000,  0x400000,
-littlefs,   data, spiffs,  0x410000, 0x400000,
-font_data,  data, spiffs,  0x810000, 0x600000,
-gbk_table,  data, spiffs,  0xE10000, 0x10000,
+littlefs,   data, spiffs,  0x410000, 0x600000,
+font_data,  data, spiffs,  0xa10000, 0x500000,
+gbk_table,  data, spiffs,  0xf10000, 0x10000,

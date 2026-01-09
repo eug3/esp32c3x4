@@ -46,6 +46,43 @@ static struct {
  *  STATIC PROTOTYPES
  **********************/
 
+/**
+ * @brief 检查文件是否应该显示（基于扩展名过滤）
+ * @param filename 文件名
+ * @param is_directory 是否为目录
+ * @return true 显示该文件，false 过滤掉
+ */
+static bool should_show_file(const char *filename, bool is_directory)
+{
+    // 目录始终显示
+    if (is_directory) {
+        return true;
+    }
+
+    // 查找文件扩展名
+    const char *ext = strrchr(filename, '.');
+    if (ext == NULL) {
+        return false;  // 没有扩展名，过滤掉
+    }
+    ext++;  // 跳过点号
+
+    // 允许的文件类型：.bin、.txt、.epub、.html、图片文件
+    if (strcasecmp(ext, "bin") == 0 ||
+        strcasecmp(ext, "txt") == 0 ||
+        strcasecmp(ext, "epub") == 0 ||
+        strcasecmp(ext, "html") == 0 ||
+        strcasecmp(ext, "htm") == 0 ||
+        strcasecmp(ext, "jpg") == 0 ||
+        strcasecmp(ext, "jpeg") == 0 ||
+        strcasecmp(ext, "png") == 0 ||
+        strcasecmp(ext, "gif") == 0 ||
+        strcasecmp(ext, "bmp") == 0) {
+        return true;
+    }
+
+    return false;  // 其他文件类型过滤掉
+}
+
 static void on_show(screen_t *screen);
 static void on_hide(screen_t *screen);
 static void on_draw(screen_t *screen);
@@ -92,6 +129,20 @@ static bool scan_directory(const char *path)
     while ((entry = readdir(dir)) != NULL && temp_count < max_entries) {
         // 跳过隐藏文件（以.开头）
         if (entry->d_name[0] == '.') {
+            continue;
+        }
+
+        // 检查文件类型（需要先获取是否为目录）
+        char full_path_temp[512];
+        snprintf(full_path_temp, sizeof(full_path_temp), "%s/%s", path, entry->d_name);
+        struct stat st_temp;
+        bool is_dir_temp = false;
+        if (stat(full_path_temp, &st_temp) == 0) {
+            is_dir_temp = S_ISDIR(st_temp.st_mode);
+        }
+
+        // 应用文件过滤
+        if (!should_show_file(entry->d_name, is_dir_temp)) {
             continue;
         }
 

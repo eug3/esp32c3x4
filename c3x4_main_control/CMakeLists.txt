@@ -31,8 +31,8 @@ if(NOT IDF_TARGET STREQUAL "linux")
     set(FONT_BIN "${CMAKE_CURRENT_SOURCE_DIR}/data/msyh-14.25pt.19×25.bin")
     
     # 分区偏移（必须与 partitions.csv 一致）
-    set(GBK_TABLE_OFFSET "0xE10000")
-    set(FONT_DATA_OFFSET "0x810000")
+    set(GBK_TABLE_OFFSET "0xF10000")
+    set(FONT_DATA_OFFSET "0xA10000")
     
     # 创建自定义烧录目标
     if(EXISTS "${GBK_TABLE_BIN}" OR EXISTS "${FONT_BIN}")
