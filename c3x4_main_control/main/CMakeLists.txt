@@ -74,10 +74,13 @@ idf_component_register(SRCS
                        "lib/pngdec/inflate.c"
                        "lib/pngdec/zutil.c"
 
+                       # XML parser
+                       "lib/tinyxml2/tinyxml2.cpp"
+
                        # EPUB/TXT readers
                        "ui/epub/epub_parser.c"
                        "ui/epub/epub_html.c"
-                       "ui/epub/epub_xml.c"
+                       "ui/epub/epub_xml.cpp"
                        "ui/epub/epub_zip.c"
                        "ui/epub/epub_cache.c"
                        "ui/txt/txt_reader.c"
@@ -91,7 +94,7 @@ idf_component_register(SRCS
                        "power_manager.c"
                        ${EPUB_PARSER_SOURCES}
                        PRIV_REQUIRES spi_flash esp_driver_gpio esp_driver_spi driver esp_wifi nvs_flash fatfs littlefs esp_adc esp_timer vfs bt
-                       INCLUDE_DIRS "." "Fonts" "ui" "ui/core" "ui/screens" "ui/boot" "ui/fonts" "ui/epub" "ui/txt" "ui/image" "ui/wallpaper" "ui/ble" "lib/tjpgd"
+                       INCLUDE_DIRS "." "Fonts" "ui" "ui/core" "ui/screens" "ui/boot" "ui/fonts" "ui/epub" "ui/txt" "ui/image" "ui/wallpaper" "ui/ble" "lib/tjpgd" "lib/tinyxml2"
                        PRIV_INCLUDE_DIRS "lib/pngdec")
 
 # Disable type-limits warning for GUI_Paint.c

@@ -17,9 +17,6 @@
 extern "C" {
 #endif
 
-// EPUB ZIP 文件句柄
-typedef struct epub_zip epub_zip_t;
-
 // ZIP 内文件信息
 typedef struct {
     char filename[256];    // 文件名（在 ZIP 内的路径）
@@ -31,27 +28,17 @@ typedef struct {
 
 /**
  * @brief 打开 EPUB 文件（ZIP 格式）
- * @param epub_path EPUB 文件路径
+ * @param path EPUB 文件路径
  * @return ZIP 句柄，失败返回 NULL
  */
-epub_zip_t* epub_zip_open(const char *epub_path);
+typedef struct epub_zip epub_zip_t;
+epub_zip_t* epub_zip_open(const char *path);
 
 /**
  * @brief 关闭 EPUB 文件
  * @param zip ZIP 句柄
  */
 void epub_zip_close(epub_zip_t *zip);
-
-/**
- * @brief 查找 ZIP 内的文件
- * @param zip ZIP 句柄
- * @param pattern 文件名模式（如 "content.opf", "*.xhtml"）
- * @param files 输出文件信息数组
- * @param max_files 最大文件数
- * @return 找到的文件数量
- */
-int epub_zip_list_files(epub_zip_t *zip, const char *pattern,
-                        epub_zip_file_info_t *files, int max_files);
 
 /**
  * @brief 流式解压单个文件到缓冲区
@@ -65,7 +52,7 @@ int epub_zip_extract_file(epub_zip_t *zip, const epub_zip_file_info_t *file_info
                           void *buffer, size_t buffer_size);
 
 /**
- * @brief 流式解压单个文件到指定路径（用于 LittleFS 缓存等场景）
+ * @brief 流式解压单个文件到指定路径
  * @param zip ZIP 句柄
  * @param file_info 文件信息
  * @param out_path 输出文件路径
@@ -75,21 +62,20 @@ int epub_zip_extract_file_to_path(epub_zip_t *zip, const epub_zip_file_info_t *f
                                  const char *out_path);
 
 /**
- * @brief 查找特定文件
+ * @brief 查找 ZIP 内的文件
  * @param zip ZIP 句柄
  * @param filename 文件名（如 "OEBPS/content.opf"）
- * @param file_info 输出文件信息
- * @return true 找到，false 未找到
+ * @return 文件信息指针，未找到返回 NULL
  */
-bool epub_zip_find_file(epub_zip_t *zip, const char *filename,
-                        epub_zip_file_info_t *file_info);
+const epub_zip_file_info_t *epub_zip_find_file(epub_zip_t *zip, const char *filename);
 
 /**
- * @brief 获取中心目录中的文件数量
+ * @brief 获取文件列表
  * @param zip ZIP 句柄
- * @return 文件数量
+ * @param out_count 输出文件数量
+ * @return 文件信息数组
  */
-int epub_zip_get_file_count(epub_zip_t *zip);
+const epub_zip_file_info_t *epub_zip_get_files(epub_zip_t *zip, int *out_count);
 
 #ifdef __cplusplus
 }

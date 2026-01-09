@@ -1,0 +1,36 @@
+<?xml version='1.0' encoding='utf-8'?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uuid_id" version="2.0">
+  <metadata xmlns:calibre="http://calibre.kovidgoyal.net/2009/metadata" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:opf="http://www.idpf.org/2007/opf" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <dc:language>und</dc:language>
+    <dc:identifier opf:scheme="ISBN">9787532767861</dc:identifier>
+    <dc:identifier id="uuid_id" opf:scheme="uuid">9596d451-3ba3-47e0-9ecc-ad183d242250</dc:identifier>
+    <dc:contributor opf:role="bkp">calibre (3.38.0) [http://calibre-ebook.com]</dc:contributor>
+    <dc:title>绑架游戏</dc:title>
+    <meta name="calibre:timestamp" content="2019-01-30T14:13:49.415000+00:00"/>
+    <dc:creator opf:file-as="未知" opf:role="aut">【日】东野圭吾, 郑悦, ePUBw.COM</dc:creator>
+    <dc:date>2016-05-19T16:00:00+00:00</dc:date>
+    <meta name="cover" content="cover"/>
+    <dc:publisher>上海译文出版社</dc:publisher>
+  </metadata>
+  <manifest>
+    <item href="OEBPS/Images/cover.jpg" id="cover" media-type="image/jpeg"/>
+    <item href="OEBPS/Images/8796093023422523033.jpg" id="8796093023422523033.jpg" media-type="image/jpeg"/>
+    <item href="OEBPS/Text/Section0001_split_000.xhtml" id="Section0001.xhtml2" media-type="application/xhtml+xml"/>
+    <item href="OEBPS/Text/Section0001_split_001.xhtml" id="Section0001.xhtml1" media-type="application/xhtml+xml"/>
+    <item href="OEBPS/Text/TOC.xhtml" id="TOC.xhtml" media-type="application/xhtml+xml"/>
+    <item href="OEBPS/Text/cover.xhtml" id="cover.xhtml" media-type="application/xhtml+xml"/>
+    <item href="page_styles.css" id="page_css" media-type="text/css"/>
+    <item href="stylesheet.css" id="css" media-type="text/css"/>
+    <item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>
+  </manifest>
+  <spine toc="ncx">
+    <itemref idref="cover.xhtml"/>
+    <itemref idref="TOC.xhtml"/>
+    <itemref idref="Section0001.xhtml2"/>
+    <itemref idref="Section0001.xhtml1"/>
+  </spine>
+  <guide>
+    <reference href="OEBPS/Text/cover.xhtml" title="封面" type="cover"/>
+    <reference href="OEBPS/Text/cover.xhtml" title="Title Page" type="other.titlepage"/>
+  </guide>
+</package>

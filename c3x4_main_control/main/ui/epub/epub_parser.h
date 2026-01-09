@@ -44,7 +44,8 @@ typedef struct {
     char epub_path[256];     // EPUB 文件路径
     FILE *current_file;      // 当前打开的内容文件
     epub_metadata_t metadata;// 元数据
-    epub_chapter_t *chapters;// 章节列表
+    char opf_cache_path[256];// OPF XML 缓存路径（LittleFS）
+    char opf_base_dir[128];  // OPF 所在目录（用于解析相对路径）
     epub_position_t position;// 当前位置
     bool is_open;            // 是否已打开
     bool is_unzipped;        // 是否已解压
