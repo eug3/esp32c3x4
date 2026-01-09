@@ -1,9 +1,9 @@
 /**
- * @file settings_screen_simple.c
+ * @file settings_screen.c
  * @brief 设置屏幕实现 - 使用 paginated_menu 组件
  */
 
-#include "settings_screen_simple.h"
+#include "settings_screen.h"
 #include "display_engine.h"
 #include "paginated_menu.h"
 #include "screen_manager.h"
@@ -148,7 +148,7 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
  * PUBLIC API
  **********************/
 
-void settings_screen_simple_init(void)
+void settings_screen_init(void)
 {
     ESP_LOGI(TAG, "Initializing settings screen");
 
@@ -187,10 +187,10 @@ void settings_screen_simple_init(void)
     g_settings_screen.needs_redraw = false;
 }
 
-screen_t* settings_screen_simple_get_instance(void)
+screen_t* settings_screen_get_instance(void)
 {
     if (g_settings_screen.name == NULL) {
-        settings_screen_simple_init();
+        settings_screen_init();
     }
     return &g_settings_screen;
 }

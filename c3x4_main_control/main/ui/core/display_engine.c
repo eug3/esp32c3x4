@@ -1195,8 +1195,8 @@ static void draw_battery_to_framebuffer(void)
     sFONT *font = &Font12;
     int text_width = display_get_text_width_font(bat_str, font);
 
-    // 计算位置（右上角）
-    int x = SCREEN_WIDTH - text_width - 10;
+    // 计算位置（右上角，靠着右边框）
+    int x = SCREEN_WIDTH - text_width;
     int y = 5;  // 顶部留一点边距
 
     // 绘制文字到帧缓存

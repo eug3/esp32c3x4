@@ -28,10 +28,10 @@
 #include "display_engine.h"
 #include "screen_manager.h"
 #include "home_screen.h"
-#include "settings_screen_simple.h"
+#include "settings_screen.h"
 #include "file_browser_screen.h"
 #include "image_viewer_screen.h"
-#include "reader_screen_simple.h"
+#include "reader_screen.h"
 #include "ble_reader_screen.h"
 #include "ble_manager.h"
 #include "input_handler.h"
@@ -577,7 +577,7 @@ void app_main(void)
     // 注册屏幕
     boot_screen_init();  // 初始化启动屏幕
     home_screen_init();
-    settings_screen_simple_init();
+    settings_screen_init();
     wallpaper_screen_init();
     file_browser_screen_init();
     image_viewer_screen_init();  // 初始化图片浏览器
@@ -586,7 +586,7 @@ void app_main(void)
     font_select_screen_init();  // 初始化字体选择屏幕
     screen_manager_register(boot_screen_get_instance());  // 注册启动屏幕
     screen_manager_register(home_screen_get_instance());
-    screen_manager_register(settings_screen_simple_get_instance());
+    screen_manager_register(settings_screen_get_instance());
     screen_manager_register(wallpaper_screen_get_instance());
     screen_manager_register(file_browser_screen_get_instance());
     screen_manager_register(image_viewer_screen_get_instance());  // 注册图片浏览器

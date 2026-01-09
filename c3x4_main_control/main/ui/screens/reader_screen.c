@@ -1,9 +1,9 @@
 /**
- * @file reader_screen_simple.c
+ * @file reader_screen.c
  * @brief 阅读器屏幕实现 - 支持 TXT 和 EPUB
  */
 
-#include "reader_screen_simple.h"
+#include "reader_screen.h"
 #include "display_engine.h"
 #include "input_handler.h"
 #include "screen_manager.h"
@@ -825,7 +825,7 @@ static void display_current_page(void)
                  s_reader_state.current_page, s_reader_state.total_pages);
     }
 
-    display_draw_text_font(10, 5, page_info, &Font12, COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_font(0, 5, page_info, &Font12, COLOR_BLACK, COLOR_WHITE);
 
     // 诊断：确认页码是否真的写进 framebuffer
     display_debug_log_framebuffer("reader:after_page_info");

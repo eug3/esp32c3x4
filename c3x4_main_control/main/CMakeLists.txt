@@ -36,9 +36,9 @@ idf_component_register(SRCS
 
                        # UI Screens
                        "ui/screens/home_screen.c"
-                       "ui/screens/settings_screen_simple.c"
+                       "ui/screens/settings_screen.c"
                        "ui/screens/file_browser_screen.c"
-                       "ui/screens/reader_screen_simple.c"
+                       "ui/screens/reader_screen.c"
                        "ui/screens/image_viewer_screen.c"
                        "ui/screens/wallpaper_screen.c"
                        "ui/screens/font_select_screen.c"
