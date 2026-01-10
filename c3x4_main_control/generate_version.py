@@ -65,8 +65,8 @@ def generate_version_file(output_file):
     project_name = get_project_name()
     
     # 主版本号
-    MAJOR = 1
-    MINOR = 0
+    MAJOR = 0
+    MINOR = 9
     PATCH = 0
     
     # 构建版本字符串
