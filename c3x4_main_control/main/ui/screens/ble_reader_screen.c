@@ -186,12 +186,13 @@ static void ble_connect_callback(bool connected)
     }
 }
 
-// X4IM 协议接收状态
+// X4IM 协议接收状态 - 改用流式写入文件，避免大内存分配
 static struct {
     bool receiving;
     uint32_t expected_size;
     uint32_t received_size;
-    uint8_t *buffer;
+    FILE *file_handle;          // 直接写入文件，不使用内存缓冲区
+    char filename[64];          // 当前写入的文件名
     uint16_t current_page;
 } x4im_rx_state = {0};
 
@@ -214,10 +215,23 @@ static bool init_x4im_mutex(void)
 }
 
 /**
- * @brief 释放 X4IM 接收互斥锁
+ * @brief 释放 X4IM 接收互斥锁和清理接收状态
  */
 static void deinit_x4im_mutex(void)
 {
+    // 关闭可能正在进行的文件传输
+    if (x4im_rx_state.file_handle != NULL) {
+        fclose(x4im_rx_state.file_handle);
+        x4im_rx_state.file_handle = NULL;
+        ESP_LOGW(TAG, "Closed incomplete file transfer during cleanup");
+    }
+    
+    // 重置接收状态
+    x4im_rx_state.receiving = false;
+    x4im_rx_state.expected_size = 0;
+    x4im_rx_state.received_size = 0;
+    
+    // 删除互斥锁
     if (x4im_rx_mutex != NULL) {
         vSemaphoreDelete(x4im_rx_mutex);
         x4im_rx_mutex = NULL;
@@ -225,12 +239,15 @@ static void deinit_x4im_mutex(void)
 }
 
 /**
- * @brief 蓝牙数据接收回调 - 支持 X4IM 位图协议
+ * @brief 蓝牙数据接收回调 - 支持 X4IM 位图协议（流式写入文件）
  */
 static void ble_data_received_callback(const uint8_t *data, uint16_t length)
 {
     if (data == NULL || length == 0) {
         ESP_LOGW(TAG, "Received NULL or empty data");
+        if (data != NULL) {
+            free((void *)data);  // 释放空数据包内存
+        }
         return;
     }
 
@@ -247,42 +264,73 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
 
         ESP_LOGI(TAG, "X4IM frame header: payload_size=%u", payload_size);
 
-        // 获取互斥锁，初始化接收状态
+        // 获取互斥锁，初始化接收状态（流式写入）
         if (xSemaphoreTake(x4im_rx_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            // 释放旧缓冲区
-            if (x4im_rx_state.buffer != NULL) {
-                free(x4im_rx_state.buffer);
+            // 关闭旧文件（如果有未完成的传输）
+            if (x4im_rx_state.file_handle != NULL) {
+                fclose(x4im_rx_state.file_handle);
+                x4im_rx_state.file_handle = NULL;
+                ESP_LOGW(TAG, "Closed incomplete file transfer");
             }
 
-            x4im_rx_state.buffer = (uint8_t *)malloc(payload_size);
-            if (x4im_rx_state.buffer == NULL) {
+            // 准备文件路径
+            snprintf(x4im_rx_state.filename, sizeof(x4im_rx_state.filename), 
+                     "/littlefs/ble_pages/book_%04x_page_%05u.bin",
+                     s_ble_state.current_book_id ? s_ble_state.current_book_id : 1,
+                     s_ble_state.current_page);
+
+            // 打开文件准备流式写入
+            x4im_rx_state.file_handle = fopen(x4im_rx_state.filename, "wb");
+            if (x4im_rx_state.file_handle == NULL) {
                 xSemaphoreGive(x4im_rx_mutex);
-                ESP_LOGE(TAG, "Failed to allocate %u bytes for bitmap", payload_size);
+                ESP_LOGE(TAG, "Failed to open file for streaming: %s", x4im_rx_state.filename);
+                free((void *)data);  // 释放内存
                 return;
             }
+
+            ESP_LOGI(TAG, "Opened file for streaming: %s", x4im_rx_state.filename);
 
             x4im_rx_state.expected_size = payload_size;
             x4im_rx_state.received_size = 0;
             x4im_rx_state.receiving = true;
 
-            // 如果帧头后还有数据，复制到缓冲区
+            // 如果帧头后还有数据，直接写入文件
             if (length > 12) {
                 uint32_t copy_len = length - 12;
                 if (copy_len > payload_size) {
                     copy_len = payload_size;
                 }
-                memcpy(x4im_rx_state.buffer, data + 12, copy_len);
+                
+                size_t written = fwrite(data + 12, 1, copy_len, x4im_rx_state.file_handle);
+                if (written != copy_len) {
+                    ESP_LOGE(TAG, "File write error: expected %u, wrote %u", copy_len, written);
+                    fclose(x4im_rx_state.file_handle);
+                    x4im_rx_state.file_handle = NULL;
+                    x4im_rx_state.receiving = false;
+                    xSemaphoreGive(x4im_rx_mutex);
+                    free((void *)data);  // 释放内存
+                    return;
+                }
+                
                 x4im_rx_state.received_size = copy_len;
-                ESP_LOGI(TAG, "Copied %u bytes from header packet (%u/%u)",
+                ESP_LOGI(TAG, "Wrote %u bytes from header packet (%u/%u)",
                          copy_len, x4im_rx_state.received_size, x4im_rx_state.expected_size);
             }
 
-            // 检查是否已完成
+            // 检查是否已完成（单包传输完成）
             bool complete = (x4im_rx_state.received_size >= x4im_rx_state.expected_size);
-            xSemaphoreGive(x4im_rx_mutex);
-
+            
             if (complete) {
-                ESP_LOGI(TAG, "Bitmap received in single packet!");
+                fclose(x4im_rx_state.file_handle);
+                x4im_rx_state.file_handle = NULL;
+                x4im_rx_state.receiving = false;
+                
+                ESP_LOGI(TAG, "======== BITMAP SAVED (Single Packet) ========");
+                ESP_LOGI(TAG, "File: %s", x4im_rx_state.filename);
+                ESP_LOGI(TAG, "Size: %u bytes", x4im_rx_state.received_size);
+                ESP_LOGI(TAG, "=============================================");
+
+                xSemaphoreGive(x4im_rx_mutex);
 
                 // 收到第一帧数据时初始化 book_id
                 if (!s_ble_state.initialization_complete) {
@@ -295,83 +343,63 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                     ESP_LOGI(TAG, "Showing confirm prompt: Click CONFIRM to start reading");
                 }
 
-                // 保存位图到 LittleFS（复制缓冲区内容后释放锁）
-                char filename[64];
-                snprintf(filename, sizeof(filename), "/littlefs/ble_pages/book_%04x_page_%05u.bin",
-                         s_ble_state.current_book_id ? s_ble_state.current_book_id : 1,
-                         s_ble_state.current_page);
+                // 标记页面已加载
+                s_ble_state.page_loaded = true;
 
-                // 获取缓冲区副本
-                uint8_t *buffer_copy = NULL;
-                uint32_t recv_size = 0;
-                if (xSemaphoreTake(x4im_rx_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                    if (x4im_rx_state.buffer != NULL && x4im_rx_state.received_size > 0) {
-                        buffer_copy = (uint8_t *)malloc(x4im_rx_state.received_size);
-                        if (buffer_copy != NULL) {
-                            memcpy(buffer_copy, x4im_rx_state.buffer, x4im_rx_state.received_size);
-                            recv_size = x4im_rx_state.received_size;
-                        }
-                    }
-                    xSemaphoreGive(x4im_rx_mutex);
+                // 触发重绘
+                screen_t *screen = screen_manager_get_current();
+                if (screen != NULL && screen == &g_ble_reader_screen) {
+                    screen->needs_redraw = true;
+                    screen_manager_draw();
                 }
-
-                if (buffer_copy != NULL) {
-                    FILE *f = fopen(filename, "wb");
-                    if (f != NULL) {
-                        size_t written = fwrite(buffer_copy, 1, recv_size, f);
-                        fclose(f);
-                        ESP_LOGI(TAG, "======== BITMAP SAVED (Single Packet) ========");
-                        ESP_LOGI(TAG, "File: %s", filename);
-                        ESP_LOGI(TAG, "Size: %u bytes", written);
-                        ESP_LOGI(TAG, "=============================================");
-
-                        // 标记页面已加载
-                        s_ble_state.page_loaded = true;
-
-                        // 触发重绘
-                        screen_t *screen = screen_manager_get_current();
-                        if (screen != NULL && screen == &g_ble_reader_screen) {
-                            screen->needs_redraw = true;
-                            screen_manager_draw();
-                        }
-                    } else {
-                        ESP_LOGE(TAG, "Failed to open %s for writing", filename);
-                    }
-                    free(buffer_copy);
-                }
-
-                // 清理接收状态
-                if (xSemaphoreTake(x4im_rx_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                    free(x4im_rx_state.buffer);
-                    x4im_rx_state.buffer = NULL;
-                    x4im_rx_state.receiving = false;
-                    xSemaphoreGive(x4im_rx_mutex);
-                }
+            } else {
+                xSemaphoreGive(x4im_rx_mutex);
             }
         }
-
+        
+        // 处理完毕，释放内存
+        free((void *)data);
         return;
     }
 
-    // 继续接收位图数据
+    // 继续接收位图数据 - 流式写入文件
     if (xSemaphoreTake(x4im_rx_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        if (x4im_rx_state.receiving && x4im_rx_state.buffer != NULL) {
+        if (x4im_rx_state.receiving && x4im_rx_state.file_handle != NULL) {
             uint32_t remaining = x4im_rx_state.expected_size - x4im_rx_state.received_size;
             uint32_t copy_len = (length > remaining) ? remaining : length;
 
-            memcpy(x4im_rx_state.buffer + x4im_rx_state.received_size, data, copy_len);
+            // 直接写入文件，无需内存缓冲区
+            size_t written = fwrite(data, 1, copy_len, x4im_rx_state.file_handle);
+            if (written != copy_len) {
+                ESP_LOGE(TAG, "File write error: expected %u, wrote %u", copy_len, written);
+                fclose(x4im_rx_state.file_handle);
+                free((void *)data);  // 释放内存
+                x4im_rx_state.file_handle = NULL;
+                x4im_rx_state.receiving = false;
+                xSemaphoreGive(x4im_rx_mutex);
+                return;
+            }
+
             x4im_rx_state.received_size += copy_len;
 
-            ESP_LOGI(TAG, "Receiving bitmap: %u/%u bytes (%.1f%%)",
+            ESP_LOGI(TAG, "Streaming to file: %u/%u bytes (%.1f%%)",
                      x4im_rx_state.received_size, x4im_rx_state.expected_size,
                      (float)x4im_rx_state.received_size * 100.0f / x4im_rx_state.expected_size);
 
             // 检查是否完成
             bool complete = (x4im_rx_state.received_size >= x4im_rx_state.expected_size);
-            xSemaphoreGive(x4im_rx_mutex);
-
+            
             if (complete) {
-                ESP_LOGI(TAG, "Bitmap reception complete!");
+                fclose(x4im_rx_state.file_handle);
+                x4im_rx_state.file_handle = NULL;
+                x4im_rx_state.receiving = false;
+                
+                ESP_LOGI(TAG, "======== BITMAP RECEPTION COMPLETE ========");
+                ESP_LOGI(TAG, "File: %s", x4im_rx_state.filename);
+                ESP_LOGI(TAG, "Size: %u bytes", x4im_rx_state.received_size);
+                ESP_LOGI(TAG, "==========================================");
+                
+                xSemaphoreGive(x4im_rx_mutex);
 
                 // 收到第一帧数据时初始化 book_id
                 if (!s_ble_state.initialization_complete) {
@@ -380,71 +408,29 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                         ESP_LOGI(TAG, "First page received, book_id set to %04x", s_ble_state.current_book_id);
                     }
                     s_ble_state.showing_confirm_prompt = true;
-                    s_ble_state.current_page = 0;
+                    s_ble_state.current_page = 0;  // 第一帧是页面 0
                     ESP_LOGI(TAG, "Showing confirm prompt: Click CONFIRM to start reading");
                 }
 
-                // Save bitmap to LittleFS
-                char filename[64];
-                snprintf(filename, sizeof(filename), "/littlefs/ble_pages/book_%04x_page_%05u.bin",
-                         s_ble_state.current_book_id ? s_ble_state.current_book_id : 1,
-                         s_ble_state.current_page);
+                // 标记页面已加载
+                s_ble_state.page_loaded = true;
 
-                // Optimization: Write directly from receive buffer
-                // Risk: File write holding mutex blocks BLE task briefly
-
-                bool written_success = false;
-                size_t written_size = 0;
-                
-                if (xSemaphoreTake(x4im_rx_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-                    if (x4im_rx_state.buffer != NULL && x4im_rx_state.received_size > 0) {
-                        FILE *f = fopen(filename, "wb");
-                        if (f != NULL) {
-                            written_size = fwrite(x4im_rx_state.buffer, 1, x4im_rx_state.received_size, f);
-                            fclose(f);
-                            written_success = true;
-                        } else {
-                            ESP_LOGE(TAG, "Failed to open %s for writing", filename);
-                        }
-                    }
-                    xSemaphoreGive(x4im_rx_mutex);
+                // 触发重绘
+                screen_t *screen = screen_manager_get_current();
+                if (screen != NULL && screen == &g_ble_reader_screen) {
+                    screen->needs_redraw = true;
+                    screen_manager_draw();
                 }
-
-                if (written_success) {
-                    ESP_LOGI(TAG, "Bitmap saved: %s, %u bytes", filename, written_size);
-
-                    // 标记页面已加载
-                    s_ble_state.page_loaded = true;
-
-                    // 如果还没初始化，增加页码计数
-                    if (!s_ble_state.initialization_complete) {
-                        s_ble_state.current_page++;
-                        if (s_ble_state.current_page >= 3) {
-                            ESP_LOGI(TAG, "Initial 3 pages received!");
-                        }
-                    }
-                    
-                    // 清理旧缓存页面
-                    cleanup_old_pages(s_ble_state.current_page);
-
-                    // 触发重绘
-                    screen_t *screen = screen_manager_get_current();
-                    if (screen != NULL && screen == &g_ble_reader_screen) {
-                        screen->needs_redraw = true;
-                        screen_manager_draw();
-                    }
-                }
-
-                // Clean up receive state
-                if (xSemaphoreTake(x4im_rx_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                    free(x4im_rx_state.buffer);
-                    x4im_rx_state.buffer = NULL;
-                    x4im_rx_state.receiving = false;
-                    xSemaphoreGive(x4im_rx_mutex);
-                }
+            } else {
+                xSemaphoreGive(x4im_rx_mutex);
             }
+        } else {
+            xSemaphoreGive(x4im_rx_mutex);
         }
     }
+    
+    // 所有路径最后都要释放内存
+    free((void *)data);
 }
 
 /**
@@ -810,7 +796,13 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
                 // 初始化缓存窗口（从第0页开始）
                 update_cached_window(0);
 
-                // 首先发送初始页码 0 给手机
+                // 发送用户确认通知，告诉手机可以开始渲染并发送第 2、3 帧
+                char notify_msg[32];
+                snprintf(notify_msg, sizeof(notify_msg), "USER_CONFIRMED:page_0");
+                ble_manager_send_notification((const uint8_t *)notify_msg, strlen(notify_msg));
+                ESP_LOGI(TAG, "Sent USER_CONFIRMED notification to Android");
+
+                // 然后发送初始页码 0 给手机（用于缓存管理）
                 send_page_sync_notification(0);
 
                 screen->needs_redraw = true;

@@ -307,6 +307,20 @@ static int ble_svc_gatt_handler(uint16_t conn_handle, uint16_t attr_handle,
                     if (copied == 0) {
                         // 复制成功，调用回调
                         s_ble.data_received_cb(buf, om_len);
+                        
+                        // 发送ACK确认（简单的1字节响应）
+                        if (s_ble.connected && s_ble.subscribed) {
+                            uint8_t ack = 0x06;  // ASCII ACK字符
+                            struct os_mbuf *txom = ble_hs_mbuf_from_flat(&ack, 1);
+                            if (txom != NULL) {
+                                int rc = ble_gatts_notify_custom(conn_handle, s_ble.spp_handle, txom);
+                                if (rc == 0) {
+                                    ESP_LOGD(TAG, "ACK sent for %u bytes", om_len);
+                                } else {
+                                    ESP_LOGW(TAG, "Failed to send ACK, rc=%d", rc);
+                                }
+                            }
+                        }
                     } else {
                         // 复制失败，释放内存
                         ESP_LOGE(TAG, "Failed to copy mbuf data, copied=%d", copied);
