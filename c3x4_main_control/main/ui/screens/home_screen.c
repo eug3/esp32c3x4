@@ -4,6 +4,7 @@
  */
 
 #include "home_screen.h"
+#include "ble_reader_screen.h"
 #include "display_engine.h"
 #include "ui_region_manager.h"
 #include "GUI_Paint.h"
@@ -40,6 +41,7 @@ static const menu_info_t s_menu_items[MENU_ITEM_COUNT] = {
     [MENU_ITEM_LAST_READ] = { .label = "上次阅读", .icon = NULL },
     [MENU_ITEM_FILE_BROWSER] = { .label = "文件", .icon = NULL },
     [MENU_ITEM_BLE_READER] = { .label = "蓝牙读书", .icon = NULL },
+    [MENU_ITEM_BLE_TRANSFER] = { .label = "蓝牙传书", .icon = NULL },
     [MENU_ITEM_SETTINGS]       = { .label = "设置", .icon = NULL },
 };
 
@@ -486,6 +488,13 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
                     screen_manager_show_file_browser();
                     break;
                 case MENU_ITEM_BLE_READER:
+                    // 蓝牙读书（阅读模式）
+                    ble_reader_set_mode(BLE_MODE_READING);
+                    screen_manager_show_ble_reader();
+                    break;
+                case MENU_ITEM_BLE_TRANSFER:
+                    // 蓝牙传书（传输模式）
+                    ble_reader_set_mode(BLE_MODE_TRANSFER);
                     screen_manager_show_ble_reader();
                     break;
                 case MENU_ITEM_SETTINGS:

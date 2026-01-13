@@ -202,6 +202,21 @@ static int ble_spp_server_gap_event(struct ble_gap_event *event, void *arg)
             rc = ble_gap_conn_find(event->connect.conn_handle, &desc);
             if (rc == 0) {
                 ble_spp_server_print_conn_desc(&desc);
+                
+                // 优化连接参数：更短的间隔以获得更高的吞吐量
+                // min_conn_itvl: 9 (11.25ms), max_conn_itvl: 12 (15ms)
+                struct ble_gap_upd_params params = {
+                    .itvl_min = 9,
+                    .itvl_max = 12,
+                    .latency = 0,
+                    .supervision_timeout = 300,  // 3秒
+                };
+                rc = ble_gap_update_params(event->connect.conn_handle, &params);
+                if (rc == 0) {
+                    ESP_LOGI(TAG, "Connection params update requested (interval: 11.25-15ms)");
+                } else {
+                    ESP_LOGW(TAG, "Failed to update connection params; rc=%d", rc);
+                }
             }
             
             ESP_LOGI(TAG, "BLE connected, state updated to connected");
@@ -294,8 +309,8 @@ static int ble_svc_gatt_handler(uint16_t conn_handle, uint16_t attr_handle,
         break;
 
     case BLE_GATT_ACCESS_OP_WRITE_CHR:
-        ESP_LOGI(TAG, "Data received in write event, conn_handle=%x, attr_handle=%x",
-                 conn_handle, attr_handle);
+        ESP_LOGD(TAG, "Data received in write event, conn_handle=%x, attr_handle=%x, len=%u",
+                 conn_handle, attr_handle, OS_MBUF_PKTLEN(ctxt->om));
 
         // 提取接收到的数据
         if (s_ble.data_received_cb != NULL && ctxt->om != NULL) {
@@ -308,19 +323,8 @@ static int ble_svc_gatt_handler(uint16_t conn_handle, uint16_t attr_handle,
                         // 复制成功，调用回调
                         s_ble.data_received_cb(buf, om_len);
                         
-                        // 发送ACK确认（简单的1字节响应）
-                        if (s_ble.connected && s_ble.subscribed) {
-                            uint8_t ack = 0x06;  // ASCII ACK字符
-                            struct os_mbuf *txom = ble_hs_mbuf_from_flat(&ack, 1);
-                            if (txom != NULL) {
-                                int rc = ble_gatts_notify_custom(conn_handle, s_ble.spp_handle, txom);
-                                if (rc == 0) {
-                                    ESP_LOGD(TAG, "ACK sent for %u bytes", om_len);
-                                } else {
-                                    ESP_LOGW(TAG, "Failed to send ACK, rc=%d", rc);
-                                }
-                            }
-                        }
+                        // 注意：不发送 ACK，改为浏览器超时重试机制
+                        // 这样可以大幅提升吞吐量（减少往返延迟）
                     } else {
                         // 复制失败，释放内存
                         ESP_LOGE(TAG, "Failed to copy mbuf data, copied=%d", copied);
