@@ -243,13 +243,18 @@ static int ble_spp_server_gap_event(struct ble_gap_event *event, void *arg)
         s_ble.subscribed = false;
         s_ble.conn_handle = 0;
 
-        // 调用连接回调
+        // 调用连接回调（在 deinit 过程中可能为 NULL）
         if (s_ble.connect_cb != NULL) {
             s_ble.connect_cb(false);
         }
 
-        /* 连接断开，延迟后恢复广播 */
-        ble_spp_server_schedule_advertise(BLE_DISCONNECT_DELAY_MS);
+        /* 连接断开，延迟后恢复广播（仅在未进行 deinit 时） */
+        // 如果 initialized 标志为 false，说明正在 deinit，不应重新广播
+        if (s_ble.initialized) {
+            ble_spp_server_schedule_advertise(BLE_DISCONNECT_DELAY_MS);
+        } else {
+            ESP_LOGI(TAG, "BLE manager is deinitializing, skip re-advertising");
+        }
         return 0;
 
     case BLE_GAP_EVENT_CONN_UPDATE:
@@ -543,17 +548,26 @@ void ble_manager_deinit(void)
 
     ESP_LOGI(TAG, "Deinitializing BLE manager...");
 
+    // 先标记为未初始化，防止断开连接事件触发重新广播
+    s_ble.initialized = false;
+
     if (s_ble.advertising) {
         ble_manager_stop_advertising();
     }
 
     if (s_ble.connected) {
+        ESP_LOGW(TAG, "Still connected during deinit, forcing disconnect...");
         ble_manager_disconnect();
+        // 等待断开连接事件处理完成
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
+
+    // 清空回调函数，防止在 deinit 过程中触发
+    s_ble.connect_cb = NULL;
+    s_ble.data_received_cb = NULL;
 
     nimble_port_deinit();
 
-    s_ble.initialized = false;
     ESP_LOGI(TAG, "BLE manager deinitialized");
 }
 

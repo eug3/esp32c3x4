@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/semphr.h"
+#include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -117,10 +118,20 @@ static void draw_reading_mode_screen(void);
 static void handle_transfer_mode_button(screen_t *screen, button_t btn);
 static void handle_reading_mode_button(screen_t *screen, button_t btn);
 
+// 构造 /sdcard/books/ 路径，确保字符串不会截断溢出
+static void build_books_path(char *out, size_t out_size, const char *name)
+{
+    const char *base = "/sdcard/books/";
+    size_t base_len = strlen(base);
+    size_t max_name_len = (out_size > base_len + 1) ? out_size - base_len - 1 : 0;
+    size_t name_len = strnlen(name, max_name_len);
+    snprintf(out, out_size, "%s%.*s", base, (int)name_len, name);
+}
+
 // 翻页防抖和同步
 static void send_page_sync_notification(uint16_t page_num);
 static void update_cached_window(uint16_t current_page);
-static void cleanup_old_pages(uint16_t current_page);
+static void __attribute__((unused)) cleanup_old_pages(uint16_t current_page);
 
 /**********************
  *  STATIC FUNCTIONS
@@ -199,6 +210,13 @@ static bool load_current_page(void)
  */
 static void ble_connect_callback(bool connected)
 {
+    // 在页面切换/清理过程中，回调可能被注销，此时不应执行
+    screen_t *current_screen = screen_manager_get_current();
+    if (current_screen == NULL || current_screen != &g_ble_reader_screen) {
+        ESP_LOGW(TAG, "BLE callback triggered but screen is not active, ignoring");
+        return;
+    }
+
     if (connected) {
         ESP_LOGI(TAG, "BLE device connected!");
         s_ble_state.state = BLE_READER_STATE_CONNECTED;
@@ -209,9 +227,8 @@ static void ble_connect_callback(bool connected)
         s_ble_state.device_connected = false;
     }
 
-    screen_t *screen = screen_manager_get_current();
-    if (screen != NULL && screen == &g_ble_reader_screen) {
-        screen->needs_redraw = true;
+    if (current_screen != NULL && current_screen == &g_ble_reader_screen) {
+        current_screen->needs_redraw = true;
         // 立即触发屏幕刷新，显示连接状态变化
         screen_manager_draw();
     }
@@ -289,6 +306,14 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         return;
     }
 
+    // 检查屏幕是否仍然激活（防止在清理过程中处理数据）
+    screen_t *current_screen = screen_manager_get_current();
+    if (current_screen == NULL || current_screen != &g_ble_reader_screen) {
+        ESP_LOGW(TAG, "BLE data received but screen is not active, discarding %u bytes", length);
+        free((void *)data);
+        return;
+    }
+
     ESP_LOGI(TAG, "===== BLE DATA RECEIVED: %u bytes =====", length);
     ESP_LOGI(TAG, "First 4 bytes: 0x%02X 0x%02X 0x%02X 0x%02X",
              data[0], data[1], data[2], data[3]);
@@ -351,7 +376,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         while ((entry = readdir(dir)) != NULL) {
             if (entry->d_type == DT_REG) {  // 普通文件
                 char filepath[256];
-                snprintf(filepath, sizeof(filepath), "/sdcard/books/%s", entry->d_name);
+                build_books_path(filepath, sizeof(filepath), entry->d_name);
                 
                 struct stat st;
                 if (stat(filepath, &st) == 0) {
@@ -396,7 +421,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         filename[name_len] = '\0';
         
         char filepath[256];
-        snprintf(filepath, sizeof(filepath), "/sdcard/books/%s", filename);
+        build_books_path(filepath, sizeof(filepath), filename);
         
         if (unlink(filepath) == 0) {
             ESP_LOGI(TAG, "Deleted file: %s", filepath);
@@ -423,7 +448,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
             while ((entry = readdir(dir)) != NULL) {
                 if (entry->d_type == DT_REG) {
                     char filepath[256];
-                    snprintf(filepath, sizeof(filepath), "/sdcard/books/%s", entry->d_name);
+                    build_books_path(filepath, sizeof(filepath), entry->d_name);
                     if (unlink(filepath) == 0) {
                         deleted++;
                     }
@@ -442,10 +467,10 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         free((void *)data);
         return;
     }
-    }
 
-    // 检查是否是 X4IM 帧头 (v2: 32字节, v1: 12字节 兼容)
+    // 检查是否是 X4IM 帧头 (v2: 32字节, v1: 12字节 兼容)  
     // "X4IM" + version(2) + flags(2) + payload_size(4) + sequence(2) + reserved(2) + filename(16)
+    // X4IM协议处理
     if (length >= X4IM_HEADER_SIZE_V1 && data[0] == 'X' && data[1] == '4' &&
         data[2] == 'I' && data[3] == 'M') {
 
@@ -467,8 +492,8 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         // 检查是否需要存储到 SD 卡
         bool use_sd = (flags & X4IM_FLAGS_STORAGE_SD) != 0;
         
-        ESP_LOGI(TAG, "X4IM frame: v%d, flags=0x%04X, payload=%u, sd=%d, name='%s'",
-                 is_v2 ? 2 : 1, flags, payload_size, use_sd, recv_filename);
+        ESP_LOGI(TAG, "X4IM frame: v%d, flags=0x%04X, payload=%" PRIu32 ", sd=%d, name='%s'",
+             is_v2 ? 2 : 1, flags, payload_size, use_sd, recv_filename);
 
         // ========== 模式检查 ==========
         // 阅读模式下，拒绝 SD 卡写入
@@ -556,7 +581,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                 // 记录接收到的原始文件名（可能被截断）到SD卡日志文件
                 FILE *log_file = fopen("/sdcard/transfer_log.txt", "a");
                 if (log_file != NULL) {
-                    fprintf(log_file, "File: %s | Path: %s | Size: %u bytes\n",
+                        fprintf(log_file, "File: %s | Path: %s | Size: %" PRIu32 " bytes\n",
                             recv_filename[0] ? recv_filename : "unknown",
                             x4im_rx_state.filename,
                             payload_size);
@@ -573,7 +598,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                 
                 size_t written = fwrite(data + header_size, 1, copy_len, x4im_rx_state.file_handle);
                 if (written != copy_len) {
-                    ESP_LOGE(TAG, "File write error: expected %u, wrote %u", copy_len, (unsigned)written);
+                    ESP_LOGE(TAG, "File write error: expected %" PRIu32 ", wrote %lu", copy_len, (unsigned long)written);
                     fclose(x4im_rx_state.file_handle);
                     x4im_rx_state.file_handle = NULL;
                     x4im_rx_state.receiving = false;
@@ -589,7 +614,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                     s_ble_state.transfer_bytes_received = copy_len;
                 }
                 
-                ESP_LOGI(TAG, "Wrote %u bytes from header packet (%u/%u)",
+                ESP_LOGI(TAG, "Wrote %" PRIu32 " bytes from header packet (%" PRIu32 "/%" PRIu32 ")",
                          copy_len, x4im_rx_state.received_size, x4im_rx_state.expected_size);
             }
 
@@ -603,7 +628,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                 
                 ESP_LOGI(TAG, "======== FILE SAVED ========");
                 ESP_LOGI(TAG, "File: %s", x4im_rx_state.filename);
-                ESP_LOGI(TAG, "Size: %u bytes", x4im_rx_state.received_size);
+                ESP_LOGI(TAG, "Size: %" PRIu32 " bytes", x4im_rx_state.received_size);
                 ESP_LOGI(TAG, "Storage: %s", x4im_rx_state.use_sd_card ? "SD Card" : "LittleFS");
                 ESP_LOGI(TAG, "============================");
 
@@ -658,7 +683,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
             // 直接写入文件，无需内存缓冲区
             size_t written = fwrite(data, 1, copy_len, x4im_rx_state.file_handle);
             if (written != copy_len) {
-                ESP_LOGE(TAG, "File write error: expected %u, wrote %u", copy_len, (unsigned)written);
+                ESP_LOGE(TAG, "File write error: expected %" PRIu32 ", wrote %lu", copy_len, (unsigned long)written);
                 fclose(x4im_rx_state.file_handle);
                 free((void *)data);  // 释放内存
                 x4im_rx_state.file_handle = NULL;
@@ -674,7 +699,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                 s_ble_state.transfer_bytes_received = x4im_rx_state.received_size;
             }
 
-            ESP_LOGI(TAG, "Streaming to file: %u/%u bytes (%.1f%%)",
+            ESP_LOGI(TAG, "Streaming to file: %" PRIu32 "/%" PRIu32 " bytes (%.1f%%)",
                      x4im_rx_state.received_size, x4im_rx_state.expected_size,
                      (float)x4im_rx_state.received_size * 100.0f / x4im_rx_state.expected_size);
 
@@ -688,7 +713,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                 
                 ESP_LOGI(TAG, "======== FILE RECEPTION COMPLETE ========");
                 ESP_LOGI(TAG, "File: %s", x4im_rx_state.filename);
-                ESP_LOGI(TAG, "Size: %u bytes", x4im_rx_state.received_size);
+                ESP_LOGI(TAG, "Size: %" PRIu32 " bytes", x4im_rx_state.received_size);
                 ESP_LOGI(TAG, "Storage: %s", x4im_rx_state.use_sd_card ? "SD Card" : "LittleFS");
                 ESP_LOGI(TAG, "=========================================");
                 
@@ -828,7 +853,7 @@ static void update_cached_window(uint16_t current_page)
  * @brief 清理过期的页面（超出三页范围的）
  * 仅保留 [current-1, current, current+1]
  */
-static void cleanup_old_pages(uint16_t current_page)
+static void __attribute__((unused)) cleanup_old_pages(uint16_t current_page)
 {
     if (s_ble_state.current_book_id == 0) return;
 
@@ -1356,11 +1381,21 @@ static void on_hide(screen_t *screen)
 {
     ESP_LOGI(TAG, "BLE Reader screen hidden");
 
+    // 先注销回调函数，防止在清理过程中回调被触发
+    ble_manager_register_connect_cb(NULL);
+    ble_manager_register_data_received_cb(NULL);
+
     // 清理蓝牙连接
     if (s_ble_state.device_connected) {
         ble_reader_screen_disconnect();
+        
+        // 等待断开连接完成（异步操作）
+        // ble_gap_terminate 是异步的，需要等待断开事件完成
+        ESP_LOGI(TAG, "Waiting for BLE disconnect to complete...");
+        vTaskDelay(pdMS_TO_TICKS(200));  // 等待 200ms 让断开连接完成
     }
 
+    // 在断开连接完成后再销毁 BLE 协议栈
     ble_manager_deinit();
     ble_book_protocol_deinit();
 
