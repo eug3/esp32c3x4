@@ -76,3 +76,29 @@ Desktop.ini
 *.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
+
+# IDE and Editor
+.vscode/
+.idea/
+.clangd/
+.ccls-cache/
+.vim/
+*.swp
+*.swo
+
+# Dev container
+.devcontainer/
+
+# Environment
+.envrc
+.env
+.venv/
+venv/
+env/
+
+# Project specific
+*.bak
+*.tmp
+temp/
+tmp/
+*.log
