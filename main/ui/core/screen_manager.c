@@ -155,6 +155,8 @@ void screen_manager_unregister(screen_t *screen)
         return;
     }
 
+    const char *name = screen->name ? screen->name : "(unnamed)";
+
     // 从数组中移除
     for (int i = 0; i < g_mgr.screen_count; i++) {
         if (g_mgr.screens[i] == screen) {
@@ -163,16 +165,21 @@ void screen_manager_unregister(screen_t *screen)
                 g_mgr.screens[j] = g_mgr.screens[j + 1];
             }
             g_mgr.screen_count--;
-            ESP_LOGI(TAG, "Unregistered screen '%s'", screen->name);
+            ESP_LOGI(TAG, "Unregistered screen '%s'", name);
             return;
         }
     }
 
-    ESP_LOGW(TAG, "Screen '%s' not found", screen->name);
+    ESP_LOGW(TAG, "Screen '%s' not found", name);
 }
 
 bool screen_manager_show(const char *screen_name)
 {
+    if (screen_name == NULL) {
+        ESP_LOGE(TAG, "screen_name is NULL");
+        return false;
+    }
+    
     screen_t *screen = screen_manager_find(screen_name);
     if (screen == NULL) {
         ESP_LOGE(TAG, "Screen '%s' not found", screen_name);
@@ -189,7 +196,8 @@ bool screen_manager_show_screen(screen_t *screen)
         return false;
     }
 
-    ESP_LOGI(TAG, "Showing screen '%s'", screen->name);
+    const char *name = screen->name ? screen->name : "(unnamed)";
+    ESP_LOGI(TAG, "Showing screen '%s'", name);
 
     // 隐藏当前屏幕
     if (g_mgr.current_screen != NULL &&

@@ -6,6 +6,7 @@
 #include "file_browser_screen.h"
 #include "display_engine.h"
 #include "screen_manager.h"
+#include "fs_utils.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include <string.h>
@@ -18,12 +19,8 @@ static const char *TAG = "FILE_BROWSER";
 // 文件浏览器屏幕实例
 static screen_t g_file_browser_screen = {0};
 
-// 文件信息结构
-typedef struct {
-    char name[128];
-    bool is_directory;
-    off_t size;
-} file_info_t;
+// 复用共享文件信息结构
+typedef fs_file_info_t file_info_t;
 
 // 浏览器状态
 static struct {
@@ -52,36 +49,7 @@ static struct {
  * @param is_directory 是否为目录
  * @return true 显示该文件，false 过滤掉
  */
-static bool should_show_file(const char *filename, bool is_directory)
-{
-    // 目录始终显示
-    if (is_directory) {
-        return true;
-    }
-
-    // 查找文件扩展名
-    const char *ext = strrchr(filename, '.');
-    if (ext == NULL) {
-        return false;  // 没有扩展名，过滤掉
-    }
-    ext++;  // 跳过点号
-
-    // 允许的文件类型：.bin、.txt、.epub、.html、图片文件
-    if (strcasecmp(ext, "bin") == 0 ||
-        strcasecmp(ext, "txt") == 0 ||
-        strcasecmp(ext, "epub") == 0 ||
-        strcasecmp(ext, "html") == 0 ||
-        strcasecmp(ext, "htm") == 0 ||
-        strcasecmp(ext, "jpg") == 0 ||
-        strcasecmp(ext, "jpeg") == 0 ||
-        strcasecmp(ext, "png") == 0 ||
-        strcasecmp(ext, "gif") == 0 ||
-        strcasecmp(ext, "bmp") == 0) {
-        return true;
-    }
-
-    return false;  // 其他文件类型过滤掉
-}
+// 过滤逻辑改为复用 fs_utils
 
 static void on_show(screen_t *screen);
 static void on_hide(screen_t *screen);
@@ -105,114 +73,17 @@ static void navigate_to_parent_directory(void);
 static bool scan_directory(const char *path)
 {
     ESP_LOGI(TAG, "Scanning directory: %s", path);
-
-    // 释放旧的文件列表
     free_file_list();
 
-    DIR *dir = opendir(path);
-    if (dir == NULL) {
-        ESP_LOGE(TAG, "Failed to open directory: %s", path);
+    fs_file_info_t *files = NULL;
+    int count = 0;
+    if (!fs_list_dir(path, &files, &count)) {
+        ESP_LOGE(TAG, "fs_list_dir failed: %s", path);
         return false;
     }
-
-    // 临时存储文件名（放到堆上，避免在 input_poll 等小栈任务里扫描目录时栈溢出）
-    const int max_entries = 256;
-    char **file_names = (char **)heap_caps_calloc(max_entries, sizeof(char *), MALLOC_CAP_8BIT);
-    if (file_names == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate temp file name list");
-        closedir(dir);
-        return false;
-    }
-    int temp_count = 0;
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL && temp_count < max_entries) {
-        // 跳过隐藏文件（以.开头）
-        if (entry->d_name[0] == '.') {
-            continue;
-        }
-
-        // 检查文件类型（需要先获取是否为目录）
-        char full_path_temp[512];
-        snprintf(full_path_temp, sizeof(full_path_temp), "%s/%s", path, entry->d_name);
-        struct stat st_temp;
-        bool is_dir_temp = false;
-        if (stat(full_path_temp, &st_temp) == 0) {
-            is_dir_temp = S_ISDIR(st_temp.st_mode);
-        }
-
-        // 应用文件过滤
-        if (!should_show_file(entry->d_name, is_dir_temp)) {
-            continue;
-        }
-
-        // 分配内存存储文件名
-        file_names[temp_count] = strdup(entry->d_name);
-        if (file_names[temp_count] == NULL) {
-            ESP_LOGE(TAG, "Failed to allocate memory for file name");
-            break;
-        }
-        temp_count++;
-    }
-    closedir(dir);
-
-    if (temp_count == 0) {
-        ESP_LOGI(TAG, "No files found in directory");
-        heap_caps_free(file_names);
-        return true;
-    }
-
-    // 分配文件列表内存
-    s_browser_state.files = (file_info_t *)heap_caps_malloc(temp_count * sizeof(file_info_t), MALLOC_CAP_8BIT);
-    if (s_browser_state.files == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate memory for file list");
-        for (int i = 0; i < temp_count; i++) {
-            free(file_names[i]);
-        }
-        heap_caps_free(file_names);
-        return false;
-    }
-
-    // 填充文件信息并排序（目录在前，文件在后）
-    int dir_count = 0;
-    int file_count = 0;
-
-    for (int i = 0; i < temp_count; i++) {
-        char full_path[512];
-        snprintf(full_path, sizeof(full_path), "%s/%s", path, file_names[i]);
-
-        struct stat st;
-        if (stat(full_path, &st) == 0) {
-            bool is_dir = S_ISDIR(st.st_mode);
-
-            if (is_dir) {
-                // 目录插入到前面（使用 memmove 安全移动，避免元素拷贝越界）
-                if (dir_count > 0 && dir_count < temp_count) {
-                    memmove(&s_browser_state.files[1], &s_browser_state.files[0], dir_count * sizeof(file_info_t));
-                }
-                strncpy(s_browser_state.files[0].name, file_names[i], sizeof(s_browser_state.files[0].name) - 1);
-                s_browser_state.files[0].name[sizeof(s_browser_state.files[0].name) - 1] = '\0';
-                s_browser_state.files[0].is_directory = true;
-                s_browser_state.files[0].size = 0;
-                dir_count++;
-            } else {
-                // 文件添加到后面
-                int idx = dir_count + file_count;
-                strncpy(s_browser_state.files[idx].name, file_names[i], sizeof(s_browser_state.files[idx].name) - 1);
-                s_browser_state.files[idx].name[sizeof(s_browser_state.files[idx].name) - 1] = '\0';
-                s_browser_state.files[idx].is_directory = false;
-                s_browser_state.files[idx].size = st.st_size;
-                file_count++;
-            }
-        }
-        free(file_names[i]);
-    }
-
-    heap_caps_free(file_names);
-
-    s_browser_state.file_count = temp_count;
-    ESP_LOGI(TAG, "Found %d files (%d directories, %d files)", temp_count, dir_count, file_count);
-
+    s_browser_state.files = (file_info_t *)files;
+    s_browser_state.file_count = count;
+    ESP_LOGI(TAG, "Found %d items", count);
     return true;
 }
 
@@ -222,7 +93,7 @@ static bool scan_directory(const char *path)
 static void free_file_list(void)
 {
     if (s_browser_state.files != NULL) {
-        heap_caps_free(s_browser_state.files);
+        fs_free_file_list((fs_file_info_t *)s_browser_state.files);
         s_browser_state.files = NULL;
     }
     s_browser_state.file_count = 0;

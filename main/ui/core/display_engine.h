@@ -89,6 +89,33 @@ bool display_engine_init(const display_config_t *config);
  */
 void display_engine_deinit(void);
 
+// ============================================================================
+// 帧缓冲区借用 API（供 BLE 传输模式使用）
+// ============================================================================
+
+/**
+ * @brief 借用帧缓冲区作为 BLE 数据缓存
+ * @note 借用期间不能进行 UI 刷新
+ * @return 帧缓冲区指针（48KB），失败返回 NULL
+ */
+uint8_t* display_borrow_framebuffer(void);
+
+/**
+ * @brief 归还帧缓冲区
+ * @note 归还后需要重新绘制 UI
+ */
+void display_return_framebuffer(void);
+
+/**
+ * @brief 检查帧缓冲区是否可用
+ */
+bool display_is_framebuffer_available(void);
+
+/**
+ * @brief 获取帧缓冲区大小
+ */
+size_t display_get_framebuffer_size(void);
+
 /**
  * @brief 设置电池电量读取回调
  * @param read_battery 电池电量读取函数指针

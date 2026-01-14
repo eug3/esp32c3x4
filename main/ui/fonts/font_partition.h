@@ -1,6 +1,7 @@
 /**
  * @file font_partition.h
  * @brief 字体分区管理（从 Flash 分区读取字体）
+ * @note 使用 mmap 实现零拷贝读取
  */
 
 #pragma once
@@ -14,7 +15,7 @@ extern "C" {
 #endif
 
 /**
- * @brief 初始化字体分区
+ * @brief 初始化字体分区（使用 mmap 映射）
  * @return true 成功，false 失败
  */
 bool font_partition_init(void);
@@ -32,7 +33,15 @@ bool font_partition_is_available(void);
 bool font_partition_is_valid(void);
 
 /**
- * @brief 从字体分区读取字形数据
+ * @brief 获取字形数据的直接指针（零拷贝）
+ * @param unicode Unicode 字符编码
+ * @return 字形数据指针，失败返回 NULL
+ * @note 返回的指针直接指向 Flash，无需释放
+ */
+const uint8_t* font_partition_get_glyph_ptr(uint32_t unicode);
+
+/**
+ * @brief 从字体分区读取字形数据（兼容旧接口）
  * @param unicode Unicode 字符编码
  * @param buffer 输出缓冲区
  * @param glyph_size 字形大小（字节）

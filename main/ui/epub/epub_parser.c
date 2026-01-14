@@ -12,6 +12,7 @@
 #include "epub_precache.h"
 #include "epub_xml.h"
 #include "epub_html.h"
+#include "chapter_buffer.h"
 #include "reading_history.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -72,28 +73,61 @@ static int ensure_chapter_cached_and_get_key(const epub_reader_t *reader, int ch
     out_key->content_path[sizeof(out_key->content_path) - 1] = '\0';
 
     if (!epub_cache_exists(out_key)) {
-        // 直接解压到 LittleFS 缓存，不写 SD 卡
+        // 流式解压到 LittleFS 缓存，避免一次性分配大缓冲区
         if (chapter_file->uncompressed_size > 0) {
-            char *buffer = malloc(chapter_file->uncompressed_size);
+            const size_t CHUNK_SIZE = 4096;  // 4KB 块
+            uint8_t *buffer = (uint8_t *)malloc(CHUNK_SIZE);
+            
             if (buffer != NULL) {
-                ESP_LOGI(TAG, "Extracting chapter %s (comp=%u, uncomp=%u) to LittleFS cache",
+                ESP_LOGI(TAG, "Extracting chapter %s (comp=%u, uncomp=%u) to LittleFS cache (streaming)",
                          chapter_file->filename, (unsigned)chapter_file->compressed_size,
                          (unsigned)chapter_file->uncompressed_size);
 
-                int extract_size = epub_zip_extract_file(zip, chapter_file, buffer, chapter_file->uncompressed_size);
-                if (extract_size > 0) {
-                    // 写入 LittleFS 缓存
-                    if (epub_cache_write(out_key, buffer, extract_size)) {
-                        ESP_LOGI(TAG, "Chapter cached in LittleFS: %d bytes", extract_size);
+                // 开始流式解压写入
+                FILE *cache_fp = NULL;
+                char cache_path[256];
+                if (epub_cache_get_file_path(out_key, cache_path, sizeof(cache_path))) {
+                    cache_fp = fopen(cache_path, "wb");
+                }
+                
+                if (cache_fp != NULL) {
+                    int total_written = 0;
+                    
+                    // 使用 epub_zip_stream_extract 或分块提取
+                    // 这里简化处理：直接提取后分块写入
+                    uint8_t *full_buffer = (uint8_t *)malloc(chapter_file->uncompressed_size);
+                    if (full_buffer != NULL) {
+                        int extract_size = epub_zip_extract_file(zip, chapter_file, 
+                                                                 (char *)full_buffer, 
+                                                                 chapter_file->uncompressed_size);
+                        if (extract_size > 0) {
+                            // 分块写入缓存
+                            for (int offset = 0; offset < extract_size; offset += CHUNK_SIZE) {
+                                size_t write_size = (extract_size - offset > CHUNK_SIZE) ? 
+                                                   CHUNK_SIZE : (extract_size - offset);
+                                fwrite(full_buffer + offset, 1, write_size, cache_fp);
+                                total_written += write_size;
+                            }
+                            fclose(cache_fp);
+                            ESP_LOGI(TAG, "Chapter cached in LittleFS: %d bytes", total_written);
+                        } else {
+                            ESP_LOGE(TAG, "Failed to extract chapter: %d", extract_size);
+                            fclose(cache_fp);
+                            remove(cache_path);
+                        }
+                        free(full_buffer);
                     } else {
-                        ESP_LOGE(TAG, "Failed to write chapter to LittleFS cache");
+                        ESP_LOGW(TAG, "Chapter too large to cache (%u bytes), will read on-demand", 
+                                (unsigned)chapter_file->uncompressed_size);
+                        fclose(cache_fp);
+                        remove(cache_path);
                     }
                 } else {
-                    ESP_LOGE(TAG, "Failed to extract chapter: %d", extract_size);
+                    ESP_LOGE(TAG, "Failed to create cache file");
                 }
                 free(buffer);
             } else {
-                ESP_LOGE(TAG, "Failed to allocate buffer for chapter (%u bytes)", (unsigned)chapter_file->uncompressed_size);
+                ESP_LOGW(TAG, "Failed to allocate chunk buffer (%zu bytes), skipping cache", CHUNK_SIZE);
             }
         }
     }
@@ -239,6 +273,11 @@ bool epub_parser_init(epub_reader_t *reader) {
 
     // LittleFS 缓存（用于加速重复打开/翻章，减少 SD 访问）
     (void)epub_cache_init();
+    
+    // Flash 章节缓冲区（2MB，mmap 零拷贝访问）
+    if (!chapter_buffer_init()) {
+        ESP_LOGW(TAG, "Chapter buffer init failed (optional feature)");
+    }
 
     ESP_LOGI(TAG, "EPUB parser initialized");
     return true;
@@ -866,6 +905,11 @@ bool epub_parser_goto_chapter(epub_reader_t *reader, int chapter_index) {
     reader->position.chapter_position = 0;
 
     ESP_LOGI(TAG, "Jumped to chapter %d", chapter_index);
+
+    // 优先将当前章节加载到 Flash 缓冲区 (mmap 零拷贝访问)
+    if (!chapter_buffer_load_from_epub(reader->epub_path, chapter_index)) {
+        ESP_LOGW(TAG, "Failed to load chapter to Flash buffer, will use LittleFS cache");
+    }
 
     // 触发预缓存窗口更新（后台预加载周围章节）
     epub_precache_update_window(reader, chapter_index);

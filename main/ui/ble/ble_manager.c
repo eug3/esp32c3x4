@@ -124,10 +124,22 @@ static void ble_spp_server_advertise(void)
     
     rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
-         
-         
-        ESP_LOGE(TAG, "Error setting advertisement data; rc=%d", rc);
-        return;
+        ESP_LOGE(TAG, "Error setting advertisement data; rc=%d (will retry with minimal fields)", rc);
+
+        // 回退到最小广播字段：仅 Flags + 完整设备名
+        memset(&fields, 0, sizeof(fields));
+        fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+        fields.name = (uint8_t *)DEVICE_NAME;
+        fields.name_len = strlen(DEVICE_NAME);
+        fields.name_is_complete = 1;
+
+        rc = ble_gap_adv_set_fields(&fields);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "Fallback advertisement data also failed; rc=%d", rc);
+            return;
+        } else {
+            ESP_LOGW(TAG, "Using minimal advertisement fields (name only)");
+        }
     }
 
     /* 开始广播 */

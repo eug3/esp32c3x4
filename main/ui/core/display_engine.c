@@ -12,15 +12,23 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "esp_heap_caps.h"
 #include <string.h>
 
 static const char *TAG = "DISP_ENGINE";
 
+// ============================================================================
+// 帧缓冲区优化：静态分配 + DMA 对齐
+// ============================================================================
 // 帧缓冲（1bpp，物理尺寸800x480 = 48KB）
 // 注意：逻辑尺寸是480x800，通过ROTATE_270旋转显示
-// 优化：使用动态分配节省 DRAM (.bss) 空间
+// 优化：使用静态分配避免堆碎片，DRAM_ATTR 确保在内部 RAM
 #define FRAMEBUFFER_SIZE ((800 * 480) / 8)
+static DRAM_ATTR uint8_t s_framebuffer_static[FRAMEBUFFER_SIZE] __attribute__((aligned(4)));
 static uint8_t *s_framebuffer = NULL;
+
+// 帧缓冲区借用状态（用于 BLE 传输模式）
+static bool s_framebuffer_borrowed = false;
 
 // 显示引擎状态
 static display_config_t s_config = {0};
@@ -636,25 +644,16 @@ bool display_engine_init(const display_config_t *config)
 
     ESP_LOGI(TAG, "Initializing display engine...");
 
-    // 分配帧缓冲区内存（动态分配，节省 47KB .bss 空间）
-    if (s_framebuffer == NULL) {
-        ESP_LOGI(TAG, "Allocating framebuffer: %d bytes", FRAMEBUFFER_SIZE);
-        s_framebuffer = heap_caps_malloc(FRAMEBUFFER_SIZE, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-        if (s_framebuffer == NULL) {
-            ESP_LOGE(TAG, "Failed to allocate framebuffer! Free heap: %lu bytes", 
-                     esp_get_free_heap_size());
-            return false;
-        }
-        memset(s_framebuffer, 0, FRAMEBUFFER_SIZE);
-        ESP_LOGI(TAG, "Framebuffer allocated successfully. Free heap now: %lu bytes", 
-                 esp_get_free_heap_size());
-    }
+    // 使用静态分配的帧缓冲区（避免堆碎片）
+    s_framebuffer = s_framebuffer_static;
+    memset(s_framebuffer, 0, FRAMEBUFFER_SIZE);
+    ESP_LOGI(TAG, "Framebuffer: static allocation at %p, size %d bytes", 
+             (void*)s_framebuffer, FRAMEBUFFER_SIZE);
 
     // 创建互斥锁
     s_mutex = xSemaphoreCreateMutex();
     if (s_mutex == NULL) {
         ESP_LOGE(TAG, "Failed to create mutex");
-        free(s_framebuffer);
         s_framebuffer = NULL;
         return false;
     }
@@ -702,17 +701,68 @@ void display_engine_deinit(void)
         s_mutex = NULL;
     }
 
-    // 释放帧缓冲区内存
-    if (s_framebuffer != NULL) {
-        ESP_LOGI(TAG, "Freeing framebuffer");
-        free(s_framebuffer);
-        s_framebuffer = NULL;
-    }
+    // 静态分配的帧缓冲区不需要释放，只需重置指针
+    s_framebuffer = NULL;
+    s_framebuffer_borrowed = false;
 
     s_initialized = false;
     unlock_engine();
 
     ESP_LOGI(TAG, "Display engine deinitialized");
+}
+
+// ============================================================================
+// 帧缓冲区借用 API（供 BLE 传输模式使用）
+// ============================================================================
+
+/**
+ * @brief 借用帧缓冲区作为 BLE 数据缓存
+ * @note 借用期间不能进行 UI 刷新
+ * @return 帧缓冲区指针，失败返回 NULL
+ */
+uint8_t* display_borrow_framebuffer(void)
+{
+    if (!s_initialized || s_framebuffer_borrowed) {
+        return NULL;
+    }
+    lock_engine();
+    s_framebuffer_borrowed = true;
+    ESP_LOGI(TAG, "Framebuffer borrowed for BLE transfer (%d bytes)", FRAMEBUFFER_SIZE);
+    unlock_engine();
+    return s_framebuffer_static;
+}
+
+/**
+ * @brief 归还帧缓冲区
+ * @note 归还后需要重新绘制 UI
+ */
+void display_return_framebuffer(void)
+{
+    if (!s_framebuffer_borrowed) {
+        return;
+    }
+    lock_engine();
+    s_framebuffer_borrowed = false;
+    // 清除缓冲区内容
+    memset(s_framebuffer_static, 0, FRAMEBUFFER_SIZE);
+    ESP_LOGI(TAG, "Framebuffer returned, cleared");
+    unlock_engine();
+}
+
+/**
+ * @brief 检查帧缓冲区是否可用
+ */
+bool display_is_framebuffer_available(void)
+{
+    return s_initialized && !s_framebuffer_borrowed;
+}
+
+/**
+ * @brief 获取帧缓冲区大小
+ */
+size_t display_get_framebuffer_size(void)
+{
+    return FRAMEBUFFER_SIZE;
 }
 
 void display_set_battery_callback(display_battery_read_t read_battery)

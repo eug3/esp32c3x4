@@ -8,9 +8,11 @@
 #include "ble_book_protocol.h"
 #include "ble_cache_manager.h"
 #include "display_engine.h"
+#include "../fs_utils.h"     // 共享文件系统工具
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/semphr.h"
+#include "ff.h"           // FATFS for SD card operations
 #include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
@@ -26,9 +28,13 @@ static const char *TAG = "BLE_READER";
 #define X4IM_CMD_GET_MODE   0x8D    // 查询当前模式
 #define X4IM_CMD_FILE_NOTIFY 0x8B   // 文件通知
 #define X4IM_CMD_LIST_FILES 0x8E    // 列表 SD 卡文件
-#define X4IM_CMD_DELETE_FILE 0x8F   // 删除 SD 卡文件
-#define X4IM_CMD_RENAME_FILE 0x90   // 重命名 SD 卡文件
-#define X4IM_CMD_FORMAT_SD  0x91    // 格式化 SD 卡
+#define X4IM_CMD_DELETE_FILE 0x8F   // 删除 SD 卡文件/目录
+#define X4IM_CMD_RENAME_FILE 0x90   // 重命名 SD 卡文件/目录
+#define X4IM_CMD_CLEAR_BOOKS 0x91   // 清空书籍目录 (/sdcard/books/)
+#define X4IM_CMD_CREATE_DIR 0x92    // 创建目录
+#define X4IM_CMD_GET_STORAGE_INFO 0x93  // 获取存储信息
+#define X4IM_CMD_READ_FILE 0x94     // 读取文件（下载）
+#define X4IM_CMD_FILE_DATA 0x95     // 文件数据块（ESP32→Client）
 
 // 蓝牙读书屏幕实例（导出以供屏幕管理器注册）
 screen_t g_ble_reader_screen = {0};
@@ -118,16 +124,6 @@ static void draw_reading_mode_screen(void);
 static void handle_transfer_mode_button(screen_t *screen, button_t btn);
 static void handle_reading_mode_button(screen_t *screen, button_t btn);
 
-// 构造 /sdcard/books/ 路径，确保字符串不会截断溢出
-static void build_books_path(char *out, size_t out_size, const char *name)
-{
-    const char *base = "/sdcard/books/";
-    size_t base_len = strlen(base);
-    size_t max_name_len = (out_size > base_len + 1) ? out_size - base_len - 1 : 0;
-    size_t name_len = strnlen(name, max_name_len);
-    snprintf(out, out_size, "%s%.*s", base, (int)name_len, name);
-}
-
 // 翻页防抖和同步
 static void send_page_sync_notification(uint16_t page_num);
 static void update_cached_window(uint16_t current_page);
@@ -143,6 +139,12 @@ static void __attribute__((unused)) cleanup_old_pages(uint16_t current_page);
 static bool init_page_buffer(void)
 {
     if (s_page_buffer == NULL) {
+        // 记录当前可用内存情况，便于定位碎片问题
+        size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        ESP_LOGI(TAG, "Heap free=%zu, largest=%zu before page buffer alloc", free_internal, largest_internal);
+
+        // 恢复原策略：ESP32-C3没有SPIRAM，会自动fallback到malloc
         s_page_buffer = (uint8_t *)heap_caps_malloc(PAGE_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
         if (s_page_buffer == NULL) {
             // 尝试从内部RAM分配
@@ -151,6 +153,9 @@ static bool init_page_buffer(void)
         if (s_page_buffer != NULL) {
             ESP_LOGI(TAG, "Page buffer allocated at %p (%zu bytes)",
                      s_page_buffer, PAGE_BUFFER_SIZE);
+            size_t free_after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+            size_t largest_after = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+            ESP_LOGI(TAG, "Heap free=%zu, largest=%zu after page buffer alloc", free_after, largest_after);
         } else {
             ESP_LOGE(TAG, "Failed to allocate page buffer (%zu bytes)", PAGE_BUFFER_SIZE);
             return false;
@@ -294,6 +299,54 @@ static void deinit_x4im_mutex(void)
 }
 
 /**
+ * @brief 递归扫描目录，统计文件和目录数量
+ * @note 限制递归深度避免栈溢出，使用堆分配路径缓冲避免占用栈空间
+ */
+static void scan_directory_recursive(const char *path, int *file_count, int *dir_count, uint64_t *used_size)
+{
+    // 限制递归深度，避免栈溢出（最大10层）
+    static int depth = 0;
+    if (depth > 10) {
+        ESP_LOGW(TAG, "Directory scan depth limit reached at: %s", path);
+        return;
+    }
+
+    DIR *dir = opendir(path);
+    if (dir == NULL) return;
+
+    depth++;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        // 使用堆分配路径缓冲，避免栈溢出
+        char *full_path = malloc(512);
+        if (!full_path) {
+            ESP_LOGE(TAG, "Failed to allocate path buffer during scan");
+            break;
+        }
+        snprintf(full_path, 512, "%s/%s", path, entry->d_name);
+
+        struct stat st;
+        if (stat(full_path, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                (*dir_count)++;
+                scan_directory_recursive(full_path, file_count, dir_count, used_size);
+            } else {
+                (*file_count)++;
+                (*used_size) += st.st_size;
+            }
+        }
+        free(full_path);
+    }
+    closedir(dir);
+    depth--;
+}
+
+/**
  * @brief 蓝牙数据接收回调 - 支持 X4IM 位图协议（流式写入文件）
  */
 static void ble_data_received_callback(const uint8_t *data, uint16_t length)
@@ -357,113 +410,431 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
     }
 
     // ========== SD 卡文件管理命令 ==========
-    // LIST_FILES 命令：1字节 [0x8E]
-    if (length == 1 && data[0] == X4IM_CMD_LIST_FILES) {
-        ESP_LOGI(TAG, "Received LIST_FILES command");
-        
-        DIR *dir = opendir("/sdcard/books");
-        if (dir == NULL) {
-            ESP_LOGW(TAG, "Failed to open /sdcard/books directory");
+    // LIST_FILES 命令：扫描 /sdcard/ 根目录
+    // 格式: [0x8E, 路径长度, 路径...] - 可选路径，默认 /sdcard/
+    if (length >= 1 && data[0] == X4IM_CMD_LIST_FILES) {
+        const char *scan_path = "/sdcard";
+        char path_buf[256] = {0};
+
+        if (length > 1) {
+            // 有路径参数： [0x8E, 路径长度, 路径...]
+            int path_len = data[1];
+            if (path_len > length - 2) path_len = length - 2;
+            if (path_len > sizeof(path_buf) - 1) path_len = sizeof(path_buf) - 1;
+            memcpy(path_buf, &data[2], path_len);
+            path_buf[path_len] = '\0';
+            if (path_len > 0) {
+                scan_path = path_buf;
+            }
+        }
+
+        ESP_LOGI(TAG, "Scanning directory: %s", scan_path);
+
+        // 使用共享的 fs_list_dir 进行目录扫描
+        fs_file_info_t *files = NULL;
+        int count = 0;
+
+        if (!fs_list_dir(scan_path, &files, &count)) {
+            ESP_LOGW(TAG, "Failed to list directory: %s", scan_path);
             uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x00};  // 0=empty
             ble_manager_send_data(response, 2);
             free((void *)data);
             return;
         }
-        
-        // 发送文件列表：每个文件一条消息 [0x8B, 文件大小(4字节), 文件名...]
-        struct dirent *entry;
+
+        // 发送目录列表：每条消息 [0x8B, 标志(1), 大小(4字节), 文件名...]
+        // 标志: bit0=1 表示目录, bit0=0 表示文件
         int file_count = 0;
-        while ((entry = readdir(dir)) != NULL) {
-            if (entry->d_type == DT_REG) {  // 普通文件
-                char filepath[256];
-                build_books_path(filepath, sizeof(filepath), entry->d_name);
-                
-                struct stat st;
-                if (stat(filepath, &st) == 0) {
-                    uint8_t response[300];
-                    response[0] = X4IM_CMD_FILE_NOTIFY;
-                    
-                    // 编码文件大小（4字节，小端）
-                    uint32_t size = st.st_size;
-                    response[1] = (size >> 0) & 0xFF;
-                    response[2] = (size >> 8) & 0xFF;
-                    response[3] = (size >> 16) & 0xFF;
-                    response[4] = (size >> 24) & 0xFF;
-                    
-                    // 文件名
-                    int name_len = strlen(entry->d_name);
-                    if (name_len > 255 - 5) name_len = 255 - 5;
-                    memcpy(&response[5], entry->d_name, name_len);
-                    
-                    ble_manager_send_data(response, 5 + name_len);
-                    file_count++;
-                    ESP_LOGI(TAG, "  File: %s (%u bytes)", entry->d_name, (unsigned)size);
-                }
+        int dir_count = 0;
+
+        for (int i = 0; i < count; i++) {
+            uint8_t response[300];
+            response[0] = X4IM_CMD_FILE_NOTIFY;
+
+            if (files[i].is_directory) {
+                // 目录
+                response[1] = 0x01;  // 目录标志
+                // 大小字段设为0
+                response[2] = 0; response[3] = 0; response[4] = 0; response[5] = 0;
+                dir_count++;
+            } else {
+                // 文件
+                response[1] = 0x00;  // 文件标志
+                uint32_t size = (uint32_t)files[i].size;
+                response[2] = (size >> 0) & 0xFF;
+                response[3] = (size >> 8) & 0xFF;
+                response[4] = (size >> 16) & 0xFF;
+                response[5] = (size >> 24) & 0xFF;
+                file_count++;
             }
+
+            // 文件名
+            int name_len = strlen(files[i].name);
+            if (name_len > 255 - 6) name_len = 255 - 6;
+            memcpy(&response[6], files[i].name, name_len);
+
+            ble_manager_send_data(response, 6 + name_len);
+            ESP_LOGI(TAG, "  %s: %s", files[i].is_directory ? "Dir" : "File", files[i].name);
         }
-        closedir(dir);
-        
-        // 发送文件列表结束标记
+
+        // 释放文件列表
+        fs_free_file_list(files);
+
+        // 发送文件列表结束标记 [0x8B, 0xFF]
         uint8_t end_marker[2] = {X4IM_CMD_FILE_NOTIFY, 0xFF};
         ble_manager_send_data(end_marker, 2);
-        ESP_LOGI(TAG, "Sent %d files", file_count);
-        
+        ESP_LOGI(TAG, "List complete: %d files, %d directories", file_count, dir_count);
+
         free((void *)data);
         return;
     }
 
-    // DELETE_FILE 命令：[0x8F, 文件名...]
+    // DELETE_FILE 命令：[0x8F, 路径...]
+    // 客户端已发送完整路径（包含/sdcard/）
     if (length > 1 && data[0] == X4IM_CMD_DELETE_FILE) {
-        char filename[256];
-        int name_len = length - 1;
-        if (name_len > 255) name_len = 255;
-        memcpy(filename, &data[1], name_len);
-        filename[name_len] = '\0';
-        
-        char filepath[256];
-        build_books_path(filepath, sizeof(filepath), filename);
-        
-        if (unlink(filepath) == 0) {
-            ESP_LOGI(TAG, "Deleted file: %s", filepath);
-            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
+        char *filepath = malloc(512);
+        if (!filepath) {
+            ESP_LOGE(TAG, "Failed to allocate filepath buffer for DELETE_FILE");
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};
             ble_manager_send_data(response, 2);
+            free((void *)data);
+            return;
+        }
+        int name_len = length - 1;
+        if (name_len > 511) name_len = 511;
+        memcpy(filepath, &data[1], name_len);
+        filepath[name_len] = '\0';
+
+        ESP_LOGI(TAG, "Deleting: %s", filepath);
+
+        struct stat st;
+        if (stat(filepath, &st) == 0) {
+            int result;
+            if (S_ISDIR(st.st_mode)) {
+                // 目录：先检查是否为空
+                DIR *dir = opendir(filepath);
+                int count = 0;
+                if (dir) {
+                    struct dirent *e;
+                    while ((e = readdir(dir)) != NULL) {
+                        if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0) {
+                            count++;
+                        }
+                    }
+                    closedir(dir);
+                }
+                if (count > 0) {
+                    ESP_LOGW(TAG, "Directory not empty: %s (%d items)", filepath, count);
+                    uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x03};  // 3=directory not empty
+                    ble_manager_send_data(response, 2);
+                } else {
+                    result = rmdir(filepath);
+                    if (result == 0) {
+                        ESP_LOGI(TAG, "Deleted directory: %s", filepath);
+                        uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
+                        ble_manager_send_data(response, 2);
+                    } else {
+                        ESP_LOGW(TAG, "Failed to delete directory: %s (errno=%d)", filepath, errno);
+                        uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};  // 2=failed
+                        ble_manager_send_data(response, 2);
+                    }
+                }
+            } else {
+                // 文件
+                result = unlink(filepath);
+                if (result == 0) {
+                    ESP_LOGI(TAG, "Deleted file: %s", filepath);
+                    uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
+                    ble_manager_send_data(response, 2);
+                } else {
+                    ESP_LOGW(TAG, "Failed to delete file: %s (errno=%d)", filepath, errno);
+                    uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};  // 2=failed
+                    ble_manager_send_data(response, 2);
+                }
+            }
         } else {
-            ESP_LOGW(TAG, "Failed to delete file: %s (errno=%d)", filepath, errno);
-            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};  // 2=failed
+            ESP_LOGW(TAG, "File not found: %s", filepath);
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x04};  // 4=not found
             ble_manager_send_data(response, 2);
         }
-        
+
+        free(filepath);
         free((void *)data);
         return;
     }
 
-    // FORMAT_SD 命令：1字节 [0x91]
-    if (length == 1 && data[0] == X4IM_CMD_FORMAT_SD) {
-        ESP_LOGW(TAG, "Received FORMAT_SD command - deleting all files in /sdcard/books");
-        
-        DIR *dir = opendir("/sdcard/books");
-        if (dir != NULL) {
-            struct dirent *entry;
-            int deleted = 0;
-            while ((entry = readdir(dir)) != NULL) {
-                if (entry->d_type == DT_REG) {
-                    char filepath[256];
-                    build_books_path(filepath, sizeof(filepath), entry->d_name);
-                    if (unlink(filepath) == 0) {
-                        deleted++;
+    // CLEAR_BOOKS 命令：1字节 [0x91] - 清空 /sdcard/books 目录
+    if (length == 1 && data[0] == X4IM_CMD_CLEAR_BOOKS) {
+        ESP_LOGW(TAG, "Received CLEAR_BOOKS command - deleting all files in /sdcard/books");
+
+        // 使用 fs_list_dir 获取文件列表
+        fs_file_info_t *files = NULL;
+        int count = 0;
+
+        if (!fs_list_dir("/sdcard/books", &files, &count)) {
+            ESP_LOGW(TAG, "Failed to list /sdcard/books directory");
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};  // 2=failed
+            ble_manager_send_data(response, 2);
+            free((void *)data);
+            return;
+        }
+
+        int deleted = 0;
+        char *filepath = malloc(512);
+        if (filepath) {
+            for (int i = 0; i < count; i++) {
+                if (!files[i].is_directory) {
+                    if (fs_build_child_path(filepath, 512, "/sdcard/books", files[i].name)) {
+                        if (unlink(filepath) == 0) {
+                            deleted++;
+                            ESP_LOGI(TAG, "Deleted: %s", filepath);
+                        }
                     }
                 }
             }
-            closedir(dir);
-            ESP_LOGI(TAG, "Deleted %d files from /sdcard/books", deleted);
-            
+            free(filepath);
+        }
+        fs_free_file_list(files);
+        
+        ESP_LOGI(TAG, "Deleted %d files from /sdcard/books", deleted);
+        uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
+        ble_manager_send_data(response, 2);
+
+        free((void *)data);
+        return;
+    }
+
+    // CREATE_DIR 命令：[0x92, 路径...]
+    // 客户端已发送完整路径，直接创建即可
+    if (length > 1 && data[0] == X4IM_CMD_CREATE_DIR) {
+        char *dirpath = malloc(512);
+        if (!dirpath) {
+            ESP_LOGE(TAG, "Failed to allocate dirpath buffer for CREATE_DIR");
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};
+            ble_manager_send_data(response, 2);
+            free((void *)data);
+            return;
+        }
+        int name_len = length - 1;
+        if (name_len > 511) name_len = 511;
+        memcpy(dirpath, &data[1], name_len);
+        dirpath[name_len] = '\0';
+
+        ESP_LOGI(TAG, "Creating directory: %s", dirpath);
+
+        if (mkdir(dirpath, 0755) == 0 || errno == EEXIST) {
+            ESP_LOGI(TAG, "Directory created/exists: %s", dirpath);
             uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
             ble_manager_send_data(response, 2);
         } else {
+            ESP_LOGW(TAG, "Failed to create directory: %s (errno=%d)", dirpath, errno);
             uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};  // 2=failed
             ble_manager_send_data(response, 2);
         }
+
+        free(dirpath);
+        free((void *)data);
+        return;
+    }
+
+    // RENAME_FILE 命令：[0x90, 旧名长度, 旧名..., 新名长度, 新名...]
+    // 客户端已发送完整路径（包含/sdcard/）
+    if (length > 2 && data[0] == X4IM_CMD_RENAME_FILE) {
+        int offset = 1;
+        int old_len = data[offset++];
+        if (old_len > length - offset - 1) old_len = length - offset - 1;
+        if (old_len > 490) old_len = 490;
+
+        char oldpath[512];
+        memcpy(oldpath, &data[offset], old_len);
+        oldpath[old_len] = '\0';
+        offset += old_len;
+
+        int new_len = data[offset++];
+        if (new_len > length - offset) new_len = length - offset;
+        if (new_len > 490) new_len = 490;
+
+        char newpath[512];
+        memcpy(newpath, &data[offset], new_len);
+        newpath[new_len] = '\0';
+
+        ESP_LOGI(TAG, "Renaming: %s -> %s", oldpath, newpath);
+
+        if (rename(oldpath, newpath) == 0) {
+            ESP_LOGI(TAG, "Rename successful");
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
+            ble_manager_send_data(response, 2);
+        } else {
+            ESP_LOGW(TAG, "Rename failed: %s -> %s (errno=%d)", oldpath, newpath, errno);
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};  // 2=failed
+            ble_manager_send_data(response, 2);
+        }
+
+        free((void *)data);
+        return;
+    }
+
+    // GET_STORAGE_INFO 命令：1字节 [0x93]
+    if (length == 1 && data[0] == X4IM_CMD_GET_STORAGE_INFO) {
+        ESP_LOGI(TAG, "Received GET_STORAGE_INFO command - scanning entire SD card");
+
+        // 递归扫描 /sdcard/ 目录
+        uint64_t total_size = 0;
+        uint64_t used_size = 0;
+        int file_count = 0;
+        int dir_count = 0;
+
+        // 使用 statfs 获取实际容量
+        FATFS *fs;
+        DWORD fre_clust, fre_bsec, tot_bsec;
+        if (f_getfree("/sdcard", &fre_clust, &fs) == 0) {
+            tot_bsec = fs->csize * fs->n_fatent;
+            fre_bsec = fre_clust * fs->csize;
+            total_size = (uint64_t)tot_bsec * 512;
+            uint64_t free_size = (uint64_t)fre_bsec * 512;
+            used_size = total_size - free_size;
+        } else {
+            // 估算总容量（假设 4GB SD 卡）
+            total_size = 4LL * 1024 * 1024 * 1024;
+        }
+
+        // 递归统计文件和目录数量
+        scan_directory_recursive("/sdcard", &file_count, &dir_count, &used_size);
+
+        // 发送响应: [0x93, total(4), used(4), files(2), dirs(2)]
+        uint8_t response[13];
+        response[0] = X4IM_CMD_GET_STORAGE_INFO;
+
+        // total_size (小端，限制为 32 位)
+        uint32_t total32 = (total_size > 0xFFFFFFFF) ? 0xFFFFFFFF : (uint32_t)total_size;
+        response[1] = (total32 >> 0) & 0xFF;
+        response[2] = (total32 >> 8) & 0xFF;
+        response[3] = (total32 >> 16) & 0xFF;
+        response[4] = (total32 >> 24) & 0xFF;
+
+        // used_size (小端，限制为 32 位)
+        uint32_t used32 = (used_size > 0xFFFFFFFF) ? 0xFFFFFFFF : (uint32_t)used_size;
+        response[5] = (used32 >> 0) & 0xFF;
+        response[6] = (used32 >> 8) & 0xFF;
+        response[7] = (used32 >> 16) & 0xFF;
+        response[8] = (used32 >> 24) & 0xFF;
+
+        // file_count (小端)
+        response[9] = (file_count >> 0) & 0xFF;
+        response[10] = (file_count >> 8) & 0xFF;
+
+        // dir_count (小端)
+        response[11] = (dir_count >> 0) & 0xFF;
+        response[12] = (dir_count >> 8) & 0xFF;
+
+        ble_manager_send_data(response, 13);
+        ESP_LOGI(TAG, "Storage info: total=%llu, used=%llu, files=%d, dirs=%d",
+                 (unsigned long long)total_size, (unsigned long long)used_size, file_count, dir_count);
+
+        free((void *)data);
+        return;
+    }
+
+    // READ_FILE 命令：[0x94, 偏移(4字节), 大小(4字节), 路径...]
+    // 读取文件的指定范围并发送给客户端
+    if (length > 9 && data[0] == X4IM_CMD_READ_FILE) {
+        uint32_t offset = data[1] | (data[2] << 8) | (data[3] << 16) | (data[4] << 24);
+        uint32_t read_size = data[5] | (data[6] << 8) | (data[7] << 16) | (data[8] << 24);
         
+        char filepath[512];
+        int path_len = length - 9;
+        if (path_len > sizeof(filepath) - 1) path_len = sizeof(filepath) - 1;
+        memcpy(filepath, &data[9], path_len);
+        filepath[path_len] = '\0';
+
+        ESP_LOGI(TAG, "Reading file: %s (offset=%u, size=%u)", filepath, offset, read_size);
+
+        FILE *file = fopen(filepath, "rb");
+        if (!file) {
+            ESP_LOGW(TAG, "Failed to open file: %s (errno=%d)", filepath, errno);
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x04};  // 4=not found
+            ble_manager_send_data(response, 2);
+            free((void *)data);
+            return;
+        }
+
+        // 获取文件大小
+        fseek(file, 0, SEEK_END);
+        long file_size = ftell(file);
+        fseek(file, 0, SEEK_SET);
+
+        // 检查偏移和大小是否有效
+        if (offset >= file_size) {
+            ESP_LOGW(TAG, "Invalid offset: %u >= %ld", offset, file_size);
+            fclose(file);
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};  // 2=failed
+            ble_manager_send_data(response, 2);
+            free((void *)data);
+            return;
+        }
+
+        // 调整读取大小
+        if (offset + read_size > file_size) {
+            read_size = file_size - offset;
+        }
+
+        // 分块发送文件数据（每块最大256字节）
+        const uint32_t CHUNK_SIZE = 256;
+        uint8_t *chunk_buffer = malloc(CHUNK_SIZE + 13);  // 13字节头部
+        if (!chunk_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate chunk buffer");
+            fclose(file);
+            free((void *)data);
+            return;
+        }
+
+        fseek(file, offset, SEEK_SET);
+        uint32_t sent = 0;
+
+        while (sent < read_size) {
+            uint32_t chunk_len = (read_size - sent > CHUNK_SIZE) ? CHUNK_SIZE : (read_size - sent);
+            size_t bytes_read = fread(&chunk_buffer[13], 1, chunk_len, file);
+            
+            if (bytes_read == 0) {
+                ESP_LOGW(TAG, "File read error or EOF");
+                break;
+            }
+
+            // 构建数据包: [0x95, 偏移(4), 总大小(4), 当前块大小(4), 数据...]
+            chunk_buffer[0] = X4IM_CMD_FILE_DATA;
+            uint32_t current_offset = offset + sent;
+            chunk_buffer[1] = (current_offset >> 0) & 0xFF;
+            chunk_buffer[2] = (current_offset >> 8) & 0xFF;
+            chunk_buffer[3] = (current_offset >> 16) & 0xFF;
+            chunk_buffer[4] = (current_offset >> 24) & 0xFF;
+            chunk_buffer[5] = (file_size >> 0) & 0xFF;
+            chunk_buffer[6] = (file_size >> 8) & 0xFF;
+            chunk_buffer[7] = (file_size >> 16) & 0xFF;
+            chunk_buffer[8] = (file_size >> 24) & 0xFF;
+            chunk_buffer[9] = (bytes_read >> 0) & 0xFF;
+            chunk_buffer[10] = (bytes_read >> 8) & 0xFF;
+            chunk_buffer[11] = (bytes_read >> 16) & 0xFF;
+            chunk_buffer[12] = (bytes_read >> 24) & 0xFF;
+
+            ble_manager_send_data(chunk_buffer, 13 + bytes_read);
+            sent += bytes_read;
+
+            ESP_LOGI(TAG, "Sent chunk: offset=%u, size=%zu, total=%u/%ld",
+                     current_offset, bytes_read, sent, file_size);
+
+            // 短暂延迟，避免蓝牙缓冲区溢出
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+
+        free(chunk_buffer);
+        fclose(file);
+        
+        ESP_LOGI(TAG, "File transfer complete: %u bytes sent", sent);
+        
+        // 发送传输完成标记
+        uint8_t end_marker[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
+        ble_manager_send_data(end_marker, 2);
+
         free((void *)data);
         return;
     }
@@ -1105,23 +1476,27 @@ static void draw_reading_mode_screen(void)
     
             FILE *f = fopen(filename, "rb");
             if (f != NULL) {
-                // 使用静态分配的页面缓冲区
-                if (s_page_buffer != NULL) {
-                    size_t read = fread(s_page_buffer, 1, PAGE_BUFFER_SIZE, f);
-                    if (read > 0) {
-                        // 读取成功，更新缓冲区状态
-                        s_buffered_book_id = s_ble_state.current_book_id;
-                        s_buffered_page_id = s_ble_state.current_page;
-                        
-                        // 复制到帧缓冲
-                        uint8_t *framebuffer = display_get_framebuffer();
-                        if (framebuffer != NULL) {
+                uint8_t *framebuffer = display_get_framebuffer();
+                if (framebuffer != NULL) {
+                    if (s_page_buffer != NULL) {
+                        size_t read = fread(s_page_buffer, 1, PAGE_BUFFER_SIZE, f);
+                        if (read > 0) {
+                            // 读取成功，更新缓冲区状态
+                            s_buffered_book_id = s_ble_state.current_book_id;
+                            s_buffered_page_id = s_ble_state.current_page;
                             memcpy(framebuffer, s_page_buffer, read);
-                            ESP_LOGI(TAG, "Bitmap loaded from file and displayed");
+                            ESP_LOGI(TAG, "Bitmap loaded to buffer and displayed");
+                        }
+                    } else {
+                        // 无页面缓冲区，直接读到帧缓冲
+                        size_t read = fread(framebuffer, 1, PAGE_BUFFER_SIZE, f);
+                        if (read > 0) {
+                            // 不设置缓冲区标志，避免误判缓存命中
+                            ESP_LOGW(TAG, "Bitmap loaded directly to framebuffer (%zu bytes)", read);
                         }
                     }
                 } else {
-                    ESP_LOGE(TAG, "Page buffer not allocated");
+                    ESP_LOGE(TAG, "Framebuffer not available");
                 }
                 fclose(f);
             } else {
@@ -1130,7 +1505,7 @@ static void draw_reading_mode_screen(void)
                 s_buffered_page_id = 0xFFFF;
                 
                 display_draw_text_menu(20, 100, "缓存缺失", COLOR_BLACK, COLOR_WHITE);
-                display_draw_text_menu(20, 140, "正在从手机请求...", COLOR_BLACK, COLOR_WHITE);
+                display_draw_text_menu(20, 140, s_page_buffer ? "正在从手机请求..." : "缓冲未分配，直接显示", COLOR_BLACK, COLOR_WHITE);
                 
                 // 如果正在接收数据，显示进度
                 if (x4im_rx_state.receiving && x4im_rx_state.expected_size > 0) {
@@ -1360,12 +1735,9 @@ static void on_show(screen_t *screen)
     }
 
     // BLE初始化成功后，再分配Page buffer（避免堆碎片化）
+    // 注意：如果内存碎片导致分配失败，系统会直接从文件读到帧缓冲，但不会中断BLE
     if (!init_page_buffer()) {
-        ESP_LOGE(TAG, "Failed to initialize page buffer");
-        ble_manager_deinit();
-        ble_book_protocol_deinit();
-        deinit_x4im_mutex();
-        return;
+        ESP_LOGW(TAG, "Page buffer allocation failed due to fragmentation, will read pages directly to framebuffer");
     }
 
     // 注册蓝牙回调

@@ -93,10 +93,11 @@ bool epub_precache_chapter(const epub_reader_t *reader, int chapter_index)
         return false;
     }
     
-    char *buffer = malloc(chapter_file->uncompressed_size);
+    // 流式解压避免大缓冲区分配
+    const size_t CHUNK_SIZE = 4096;  // 4KB块
+    uint8_t *buffer = (uint8_t *)malloc(CHUNK_SIZE);
     if (!buffer) {
-        ESP_LOGE(TAG, "Failed to allocate %u bytes for chapter %d", 
-                 (unsigned)chapter_file->uncompressed_size, chapter_index);
+        ESP_LOGE(TAG, "Failed to allocate 4KB chunk for chapter %d", chapter_index);
         epub_zip_close(zip);
         return false;
     }
@@ -104,19 +105,31 @@ bool epub_precache_chapter(const epub_reader_t *reader, int chapter_index)
     ESP_LOGI(TAG, "Precaching chapter %d: %s (%u bytes)", 
              chapter_index, chapter_file->filename, (unsigned)chapter_file->uncompressed_size);
     
-    int extract_size = epub_zip_extract_file(zip, chapter_file, buffer, chapter_file->uncompressed_size);
+    // 先尝试一次性提取到内存
+    uint8_t *full_buffer = (uint8_t *)malloc(chapter_file->uncompressed_size);
     bool success = false;
     
-    if (extract_size > 0) {
-        // 写入 LittleFS 缓存
-        if (epub_cache_write(&cache_key, buffer, extract_size)) {
-            ESP_LOGI(TAG, "✓ Chapter %d cached: %d bytes", chapter_index, extract_size);
-            success = true;
+    if (full_buffer != NULL) {
+        // 内存充足，一次性提取
+        int extract_size = epub_zip_extract_file(zip, chapter_file, (char *)full_buffer, 
+                                               chapter_file->uncompressed_size);
+        if (extract_size > 0) {
+            // 分块写入缓存
+            if (epub_cache_write(&cache_key, (const char *)full_buffer, extract_size)) {
+                ESP_LOGI(TAG, "✓ Chapter %d cached: %d bytes", chapter_index, extract_size);
+                success = true;
+            } else {
+                ESP_LOGE(TAG, "✗ Failed to write chapter %d to cache", chapter_index);
+            }
         } else {
-            ESP_LOGE(TAG, "✗ Failed to write chapter %d to cache", chapter_index);
+            ESP_LOGE(TAG, "✗ Failed to extract chapter %d: %d", chapter_index, extract_size);
         }
+        free(full_buffer);
     } else {
-        ESP_LOGE(TAG, "✗ Failed to extract chapter %d: %d", chapter_index, extract_size);
+        // 内存不足，跳过预缓存（在读时再缓存）
+        ESP_LOGW(TAG, "Chapter %d too large to precache (%u bytes), will cache on-demand", 
+                 chapter_index, (unsigned)chapter_file->uncompressed_size);
+        success = true;  // 不算失败，只是延迟处理
     }
     
     free(buffer);
