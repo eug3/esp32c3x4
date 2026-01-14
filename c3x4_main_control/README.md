@@ -51,3 +51,77 @@ Please use the following feedback channels:
 * For a feature request or bug report, create a [GitHub issue](https://github.com/espressif/esp-idf/issues)
 
 We will get back to you as soon as possible.
+
+## 烧录说明
+
+本项目使用 16MB Flash，分区方案如下：
+
+| 分区   | 用途       | 大小  | 偏移地址    |
+|--------|-----------|-------|------------|
+| nvs    | NVS 存储   | 24KB  | 0x9000     |
+| phy_init | PHY 校准  | 4KB   | 0xf000     |
+| factory | 应用程序   | 4MB   | 0x10000    |
+| littlefs | 用户数据   | 6MB   | 0x410000   |
+| font_data | 字体文件   | 5MB   | 0xa10000   |
+| gbk_table | GBK 编码表 | 64KB  | 0xf10000   |
+
+### 1. 编译并烧录固件
+
+```bash
+# 编译项目
+idf.py build
+
+# 烧录固件（自动烧录 factory, bootloader, partition table）
+idf.py -p /dev/ttyUSB0 flash
+```
+
+### 2. 烧录数据分区
+
+固件烧录完成后，需要单独烧录字体文件和 GBK 编码表：
+
+```bash
+# 烧录字体文件到 font_data 分区
+python $IDF_PATH/components/esptool_py/parttool/parttool.py \
+  --partition-table-offset 0x8000 \
+  write_partition --partition-name font_data \
+  --input data/msyh-14.25pt.19×25.bin
+
+# 烧录 GBK 编码表到 gbk_table 分区
+python $IDF_PATH/components/esptool_py/parttool/parttool.py \
+  --partition-table-offset 0x8000 \
+  write_partition --partition-name gbk_table \
+  --input data/gbk_table.bin
+```
+
+### 3. 完整烧录脚本
+
+```bash
+#!/bin/bash
+PARTITION_OFFSET=0x8000
+PORT=/dev/ttyUSB0
+
+echo "Building project..."
+idf.py build
+
+echo "Flashing firmware..."
+idf.py -p $PORT flash
+
+echo "Flashing font_data partition..."
+python $IDF_PATH/components/esptool_py/parttool/parttool.py \
+  --partition-table-offset $PARTITION_OFFSET \
+  write_partition --partition-name font_data \
+  --input data/msyh-14.25pt.19×25.bin
+
+echo "Flashing gbk_table partition..."
+python $IDF_PATH/components/esptool_py/parttool/parttool.py \
+  --partition-table-offset $PARTITION_OFFSET \
+  write_partition --partition-name gbk_table \
+  --input data/gbk_table.bin
+
+echo "Done!"
+```
+
+### 数据文件说明
+
+- `data/msyh-14.25pt.19×25.bin` - 微软雅黑字体，19x25 像素
+- `data/gbk_table.bin` - GBK/GB18030 到 Unicode 编码转换表
