@@ -1,32 +1,40 @@
+# 阅星瞳 X4 ESP32-C3 电子书阅读器
+
 | 硬件平台 | 参数                      |
 |----------|--------------------------|
 | 主控芯片 | ESP32-C3 @ 160MHz        |
 | Flash    | 16MB                     |
-| 显示屏   | 电子墨水屏                |
-| 字体     | 微软雅黑 19x25 像素       |
-
-# 阅星瞳 X4 ESP32-C3 电子书阅读器
-
-本项目是一个基于 ESP32-C3 的开源电子书阅读器应用，支持 TXT 文本阅读、GBK/GB18030 编码转换。
+| 显示屏   | 4.26" 电子墨水屏 (800x480) |
+| RAM      | 400KB                   |
+| 字体     | 微软雅黑 14.25pt (19x25) |
 
 ## 简介
 
-阅星瞳 X4 是一款基于 ESP32-C3 的电子墨水屏阅读器，本项目为其提供固件支持。通过本固件，您可以在设备上阅读 TXT 格式的电子书，享受舒适的阅读体验。
+阅星瞳 X4 是一款基于 ESP32-C3 的电子墨水屏阅读器，提供完整的固件支持。支持 TXT 和 EPUB 格式电子书阅读、图片查看、蓝牙文件传输等功能，配备智能预缓存和阅读历史管理，带来流畅的阅读体验。
 
-## 功能特点
+## 核心功能
 
-- **TXT 阅读** - 支持 TXT 文本文件阅读
-- **编码自动检测** - 自动识别文件编码（UTF-8、GB18030、ASCII）
-- **中文编码转换** - GBK/GB18030 到 UTF-8 转换
-- **中文字体显示** - 集成微软雅黑字体，支持中文显示
-- **阅读进度保存** - 自动保存和恢复阅读进度
-- **低功耗设计** - 电子墨水屏特性，超低功耗阅读
+### 阅读功能
+- **TXT 阅读器** - 支持 GB18030/UTF-8 编码自动检测和转换
+- **EPUB 阅读器** - 完整的 EPUB 2.0/3.0 支持，带章节导航
+- **智能预缓存** - 滑动窗口预缓存机制，翻页速度提升 **16倍** (800ms → 50ms)
+- **阅读历史** - 自动记录阅读位置，支持多本书籍记录（最多 10 本）
+- **字体管理** - 支持 Flash 分区字体，可扩展自定义字体
+
+### 系统功能
+- **文件浏览器** - SD 卡文件管理，支持图片、电子书分类浏览
+- **图片查看器** - 支持 PNG/JPEG/BMP 格式
+- **壁纸管理** - 自定义设备壁纸
+- **蓝牙传输** - BLE 协议，支持无线文件传输和书籍下载
+- **低功耗** - 睡眠模式，长按电源键唤醒
+- **电池管理** - 实时电量显示
 
 ## 硬件要求
 
 - 阅星瞳 X4 开发板（ESP32-C3 主控）
 - 16MB Flash
-- 电子墨水屏显示屏
+- 4.26" 电子墨水屏 (800x480)
+- MicroSD 卡（支持书籍和图片存储）
 - USB 数据线（用于烧录和调试）
 
 ## 软件依赖
@@ -52,34 +60,98 @@ source export.sh
 ```bash
 git clone https://your-repo-url/esp32c3x4.git
 cd esp32c3x4
-git submodule update --init --recursive
 ```
 
 ## 项目结构
 
 ```
 esp32c3x4/
-├── main/                       # 主应用程序代码
-│   ├── ui/                     # UI 相关代码
-│   │   ├── fonts/              # 字体管理模块
-│   │   │   ├── font_partition.c/h   # Flash 字体分区读写
-│   │   │   └── xt_eink_font.c/h     # 电子墨水屏字体渲染
-│   │   ├── screens/            # 屏幕界面模块
-│   │   └── txt/                # TXT 阅读器
-│   │       ├── txt_reader.c/h       # TXT 文件读取
-│   │       └── gb18030_conv.c/h     # GBK/GB18030 编码转换
-│   ├── CMakeLists.txt
-│   └── main.c                  # 应用入口
-├── data/                       # 数据文件（烧录到 Flash）
-│   ├── msyh-14.25pt.19×25.bin  # 微软雅黑字体文件
-│   └── gbk_table.bin           # GBK 编码转换表
-├── tools/                      # 工具脚本
-│   └── generate_gbk_table.py   # GBK 编码表生成工具
-├── partitions.csv              # Flash 分区表配置
-├── CMakeLists.txt              # 项目 CMake 配置
-├── sdkconfig                   # SDK 配置文件
-└── README.md                   # 本文档
+├── main/                           # 主应用程序代码
+│   ├── ui/                         # UI 相关代码
+│   │   ├── epub/                   # EPUB 阅读器模块
+│   │   │   ├── epub_parser.c/h     # EPUB 解析器
+│   │   │   ├── epub_precache.c/h   # 章节预缓存管理
+│   │   │   ├── epub_xml.cpp        # XML 解析
+│   │   │   ├── epub_zip.c/h        # ZIP 解压缩
+│   │   │   ├── epub_html.c/h       # HTML 渲染
+│   │   │   └── chapter_buffer.c/h  # 章节缓冲区
+│   │   ├── txt/                    # TXT 阅读器模块
+│   │   │   ├── txt_reader.c/h      # TXT 文件读取
+│   │   │   └── gb18030_conv.c/h    # GBK/GB18030 编码转换
+│   │   ├── screens/                # 屏幕界面模块
+│   │   │   ├── home_screen.c/h     # 主屏幕
+│   │   │   ├── reader_screen.c/h   # 阅读屏幕
+│   │   │   ├── file_browser_screen.c/h # 文件浏览器
+│   │   │   ├── image_viewer_screen.c/h # 图片查看器
+│   │   │   ├── ble_reader_screen.c/h   # BLE 阅读器
+│   │   │   ├── settings_screen.c/h     # 设置屏幕
+│   │   │   ├── font_select_screen.c/h  # 字体选择
+│   │   │   └── wallpaper_screen.c/h    # 壁纸设置
+│   │   ├── ble/                    # 蓝牙模块
+│   │   │   ├── ble_manager.c/h         # BLE 管理
+│   │   │   ├── ble_book_protocol.c/h   # BLE 书籍传输协议
+│   │   │   ├── ble_cache_manager.c/h   # BLE 缓存管理
+│   │   │   └── ble_write_queue.c/h     # BLE 写队列
+│   │   ├── fonts/                 # 字体管理模块
+│   │   │   ├── font_manager.c/h   # 字体管理器
+│   │   │   ├── font_cache.c/h     # 字体缓存
+│   │   │   ├── font_partition.c/h # Flash 字体分区读写
+│   │   │   └── xt_eink_font.c/h   # 电子墨水屏字体渲染
+│   │   ├── wallpaper/             # 壁纸管理
+│   │   │   ├── wallpaper_manager.c/h
+│   │   │   └── wallpaper_screen.c/h
+│   │   ├── reading_history.c/h    # 阅读历史管理
+│   │   ├── display_engine.c/h     # 显示引擎
+│   │   ├── screen_manager.c/h     # 屏幕管理器
+│   │   └── input_handler.c/h      # 输入处理
+│   ├── lib/                       # 第三方库
+│   │   ├── DEV_Config.c/h         # 硬件配置
+│   │   ├── EPD_4in26.c/h          # 电子墨水屏驱动
+│   │   ├── GUI_Paint.c/h          # 绘图库
+│   │   └── ...
+│   ├── Fonts/                     # 内置字体文件
+│   ├── power_manager.c/h          # 电源管理
+│   └── main.c                     # 应用入口
+├── c3x4_main_control/              # ESP-IDF 平台适配层
+│   ├── managed_components/         # 托管组件
+│   └── tools/                     # 工具脚本
+├── examples/                      # 示例项目
+│   ├── xteink-x4-sample/          # 原厂示例
+│   ├── monster_c3x4/               # C3X4 主控示例
+│   ├── diy-esp32-epub-reader/    # EPUB 阅读器示例
+│   └── ...
+├── docs/                          # 文档
+│   ├── EPUB_PRECACHE_*.md         # EPUB 预缓存文档
+│   ├── READING_HISTORY_*.md      # 阅读历史文档
+│   ├── BLE_*.md                  # BLE 相关文档
+│   └── ...
+├── data/                          # 数据文件（烧录到 Flash）
+│   ├── msyh-14.25pt.19×25.bin    # 微软雅黑字体文件
+│   └── gbk_table.bin              # GBK 编码转换表
+├── tools/                         # 工具脚本
+│   ├── generate_gbk_table.py      # GBK 编码表生成工具
+│   ├── flash.py                  # Flash 烧录脚本
+│   └── generate_version.py        # 版本生成脚本
+├── partitions.csv                 # Flash 分区表配置
+├── CMakeLists.txt                 # 项目 CMake 配置
+├── sdkconfig                      # SDK 配置文件
+├── CHANGELOG.md                   # 功能更新日志
+├── MEMORY_OPTIMIZATION.md          # 内存优化方案
+├── FLASH_GUIDE.md                 # Flash 刷新指南
+└── README.md                      # 本文档
 ```
+
+## Flash 分区方案 (16MB)
+
+| 分区        | 用途         | 大小   | 偏移地址    |
+|-------------|------------|--------|------------|
+| nvs         | NVS 存储    | 24KB   | 0x9000     |
+| phy_init    | PHY 校准    | 4KB    | 0xf000     |
+| factory     | 应用程序    | 4MB    | 0x10000    |
+| littlefs    | 用户数据    | 4MB    | 0x410000   |
+| chapter_buf | 章节缓冲    | 2MB    | 0x810000   |
+| font_data   | 字体文件    | 5MB    | 0xa10000   |
+| gbk_table   | GBK 编码表  | 64KB   | 0xf10000   |
 
 ## 编译与烧录
 
@@ -106,6 +178,20 @@ idf.py build
 idf.py -p /dev/ttyUSB0 flash
 ```
 
+### 烧录数据分区
+
+```bash
+# 烧录字体文件和 GBK 编码表
+idf.py -p /dev/ttyUSB0 flash-data
+```
+
+### 一键完整烧录
+
+```bash
+# 擦除 Flash + 烧录固件 + 烧录数据
+idf.py -p /dev/ttyUSB0 erase-flash flash flash-data
+```
+
 ### 监控串口输出
 
 ```bash
@@ -114,94 +200,61 @@ idf.py -p /dev/ttyUSB0 monitor
 
 按 `Ctrl+]` 退出监控。
 
-## 烧录说明
+## 核心功能说明
 
-本项目使用 16MB Flash，分区方案如下：
+### EPUB 智能预缓存
 
-| 分区     | 用途       | 大小  | 偏移地址    |
-|----------|-----------|-------|------------|
-| nvs      | NVS 存储   | 24KB  | 0x9000     |
-| phy_init | PHY 校准   | 4KB   | 0xf000     |
-| factory  | 应用程序   | 4MB   | 0x10000    |
-| littlefs | 用户数据   | 6MB   | 0x410000   |
-| font_data| 字体文件   | 5MB   | 0xa10000   |
-| gbk_table| GBK 编码表 | 64KB  | 0xf10000   |
+EPUB 阅读器配备滑动窗口预缓存机制，显著提升翻页速度：
 
-### 1. 编译并烧录固件
+- **配置**: 当前章节前 2 章 + 后 5 章
+- **性能**: 翻页从 800ms 降至 50ms（16倍提升）
+- **占用**: 典型场景 200-500 KB Flash 空间
 
-```bash
-# 编译项目
-idf.py build
+**使用方法**:
 
-# 烧录固件（自动烧录 factory、bootloader 和分区表）
-idf.py -p /dev/ttyUSB0 flash
+```c
+#include "epub_precache.h"
+
+void app_main(void) {
+    // ... 其他初始化 ...
+    epub_precache_init();  // 就这一行！
+    // ... 其他代码 ...
+}
 ```
 
-### 2. 烧录数据分区
+详细信息请查看: [EPUB_PRECACHE_QUICKREF.md](docs/EPUB_PRECACHE_QUICKREF.md)
 
-固件烧录完成后，需要单独烧录字体文件和 GBK 编码表：
+### 阅读历史管理
 
-```bash
-# 烧录字体文件到 font_data 分区
-python $IDF_PATH/components/esptool_py/parttool/parttool.py \
-  --partition-table-offset 0x8000 \
-  write_partition --partition-name font_data \
-  --input data/msyh-14.25pt.19×25.bin
+自动记录每本书的阅读位置和最近阅读的书籍列表：
 
-# 烧录 GBK 编码表到 gbk_table 分区
-python $IDF_PATH/components/esptool_py/parttool/parttool.py \
-  --partition-table-offset 0x8000 \
-  write_partition --partition-name gbk_table \
-  --input data/gbk_table.bin
+- **自动记录**: 章节跳转时自动保存位置
+- **最近阅读**: 维护最多 10 本最近阅读的书
+- **快速恢复**: 打开书籍自动恢复上次位置
+- **持久化**: NVS Flash 存储，重启不丢失
+
+**使用方法**:
+
+```c
+#include "reading_history.h"
+
+void app_main(void) {
+    nvs_flash_init();
+    reading_history_init();  // 就这一行！
+}
 ```
 
-### 3. 一键烧录脚本
+详细信息请查看: [READING_HISTORY_QUICKREF.md](docs/READING_HISTORY_QUICKREF.md)
 
-创建 `flash_all.sh` 脚本：
+### BLE 文件传输
 
-```bash
-#!/bin/bash
-PARTITION_OFFSET=0x8000
-PORT=/dev/ttyUSB0
+支持通过蓝牙无线传输文件到设备：
 
-echo "========================================="
-echo "  阅星瞳 X4 ESP32-C3 固件烧录脚本"
-echo "========================================="
+- **协议**: 自定义 X4IM 协议
+- **功能**: 文件列表、上传、下载、删除、重命名
+- **性能**: 优化的缓存机制和队列管理
 
-echo ""
-echo "[1/4] 正在编译项目..."
-idf.py build
-
-echo ""
-echo "[2/4] 正在烧录固件..."
-idf.py -p $PORT flash
-
-echo ""
-echo "[3/4] 正在烧录 font_data 分区（字体文件）..."
-python $IDF_PATH/components/esptool_py/parttool/parttool.py \
-  --partition-table-offset $PARTITION_OFFSET \
-  write_partition --partition-name font_data \
-  --input data/msyh-14.25pt.19×25.bin
-
-echo ""
-echo "[4/4] 正在烧录 gbk_table 分区（GBK 编码表）..."
-python $IDF_PATH/components/esptool_py/parttool/parttool.py \
-  --partition-table-offset $PARTITION_OFFSET \
-  write_partition --partition-name gbk_table \
-  --input data/gbk_table.bin
-
-echo ""
-echo "========================================="
-echo "  烧录完成！请重启设备。"
-echo "========================================="
-```
-
-运行脚本：
-
-```bash
-chmod +x flash_all.sh
-./flash_all.sh
-```
+详细信息请查看: [BLE_SD_FILE_MANAGER_ESP32.md](docs/BLE_SD_FILE_MANAGER_ESP32.md)
 
 ## 数据文件说明
 
@@ -209,7 +262,6 @@ chmod +x flash_all.sh
 |-----------------------------------|----------|------------------------------|
 | `data/msyh-14.25pt.19×25.bin`     | ~4.9MB   | 微软雅黑字体，19x25 像素       |
 | `data/gbk_table.bin`              | 64KB     | GBK/GB18030 到 Unicode 编码转换表 |
-| `tools/generate_gbk_table.py`     | -        | GBK 编码表生成脚本             |
 
 ### 重新生成 GBK 编码表
 
@@ -240,10 +292,72 @@ python generate_gbk_table.py
 - 确认 `gbk_table` 分区已正确烧录
 - 检查文件编码是否为 GBK/GB18030 或 UTF-8
 
+### Flash 分区错误
+
+如果遇到 `no such vaddr range` 错误，需要完整刷新：
+
+```bash
+idf.py -p /dev/ttyUSB0 erase-flash flash flash-data
+```
+
+详细信息请查看: [FLASH_GUIDE.md](FLASH_GUIDE.md)
+
+## 性能优化
+
+### 内存优化
+
+本项目已实施多项内存优化方案：
+
+- **编码转换表移到 Flash**: 节省 174KB RAM
+- **字体表移到 Flash**: 节省 30KB RAM
+- **BLE 缓冲区优化**: 节省 10-15KB RAM
+- **启动动画移到 Flash**: 节省 20KB RAM
+
+详细信息请查看: [MEMORY_OPTIMIZATION.md](MEMORY_OPTIMIZATION.md)
+
+### EPUB 解析优化
+
+- 流式解析，降低内存占用
+- 章节级缓存，减少重复解析
+- 异步分页设计，提升响应速度
+
+详细信息请查看: [EPUB_PARSER_IMPROVEMENTS.md](docs/EPUB_PARSER_IMPROVEMENTS.md)
+
+## 版本历史
+
+详细的功能更新记录请查看 [CHANGELOG.md](CHANGELOG.md)
+
+### 最新更新
+
+- **2026-01-09**: 阅读历史管理功能
+- **2026-01-09**: EPUB 章节预缓存功能
+
 ## 技术支持与反馈
 
 - 如有问题，请访问 [ESP32 论坛](https://esp32.com/) 进行咨询
 - 提交 Bug 或功能建议：请在项目 GitHub 仓库创建 Issue
+
+## 文档索引
+
+### 核心功能文档
+- [EPUB 预缓存快速参考](docs/EPUB_PRECACHE_QUICKREF.md)
+- [阅读历史快速参考](docs/READING_HISTORY_QUICKREF.md)
+- [EPUB 解析流程](docs/EPUB_PARSING_PROCESS.md)
+
+### 设计文档
+- [EPUB 预缓存设计](docs/EPUB_PRECACHE_DESIGN.md)
+- [阅读历史指南](docs/READING_HISTORY_GUIDE.md)
+- [BLE 流式修复](docs/BLE_STREAMING_FIX.md)
+
+### 实现文档
+- [EPUB 预缓存实现](docs/EPUB_PRECACHE_IMPLEMENTATION.md)
+- [TXT 阅读器实现](docs/TXT_READER_IMPLEMENTATION.md)
+- [阅读历史实现](docs/READING_HISTORY_SUMMARY.md)
+
+### 故障排查
+- [Flash 刷新指南](FLASH_GUIDE.md)
+- [内存优化方案](MEMORY_OPTIMIZATION.md)
+- [BLE 断连修复](docs/BLE_DISCONNECT_CRASH_FIX.md)
 
 ## 开源协议
 
@@ -254,3 +368,4 @@ python generate_gbk_table.py
 - [ESP-IDF](https://github.com/espressif/esp-idf) - ESP32 开发框架
 - [LittleFS](https://github.com/littlefs-project/littlefs) - 文件系统
 - 微软雅黑字体
+- EPUB 阅读器开源项目
