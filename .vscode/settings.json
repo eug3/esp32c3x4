@@ -1,4 +1,10 @@
 {
-    "cmake.sourceDirectory": "/Users/beijihu/Github/esp32c3x4/app2_example",
-    "idf.pythonInstallPath": "/opt/homebrew/bin/python3"
+    "idf.port": "/dev/tty.usbmodem2101",
+    "idf.openOcdConfigs": [
+        "board/esp32c3-builtin.cfg"
+    ],
+    "idf.espIdfPath": "/Users/beijihu/esp/esp-idf",
+    "idf.toolsPath": "/Users/beijihu/.espressif",
+    "idf.pythonInstallPath": "/opt/homebrew/bin/python3",
+    "idf.flashType": "JTAG"
 }

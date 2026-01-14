@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "WebFetch(domain:cursedhardware.github.io)",
-      "WebSearch",
-      "Bash(idf.py build:*)"
-    ]
-  }
-}
