@@ -17,6 +17,7 @@ static const esp_partition_t *s_font_partition = NULL;
 // mmap 句柄和映射地址
 static spi_flash_mmap_handle_t s_font_mmap_handle = 0;
 static const uint8_t *s_font_mmap_ptr = NULL;
+static size_t s_font_mmap_size = 0;  // 实际 mmap 的大小
 
 // 字体文件信息（假设 19x25 字体，65536 字符）
 #define FONT_TOTAL_CHARS 0x10000u
@@ -47,39 +48,46 @@ bool font_partition_init(void)
              s_font_partition->size / (1024.0 * 1024.0));
     
     // 计算实际需要 mmap 的大小（不超过实际字体数据大小）
-    size_t mmap_size = FONT_MMAP_SIZE;
-    if (mmap_size > s_font_partition->size) {
-        mmap_size = s_font_partition->size;
-    }
+    // ESP32-C3 的 mmap 虚拟地址空间非常有限，尝试多个大小
+    size_t mmap_sizes[] = {
+        2 * 1024 * 1024,    // 2MB - 覆盖约 27,962 个字符
+        1 * 1024 * 1024,    // 1MB - 覆盖约 13,981 个字符（常用汉字）
+        512 * 1024          // 512KB - 覆盖约 6,990 个字符（高频字）
+    };
     
-    ESP_LOGI(TAG, "Attempting to mmap %lu bytes (%.2f MB) of font data...", 
-             (unsigned long)mmap_size, mmap_size / (1024.0 * 1024.0));
+    size_t mmap_size = 0;
+    esp_err_t err = ESP_FAIL;
     
-    // 使用 mmap 将字体分区映射到虚拟地址（零拷贝读取）
-    // 注意：只映射实际需要的大小，而不是整个 5MB 分区
-    esp_err_t err = esp_partition_mmap(s_font_partition, 0, mmap_size,
-                                        SPI_FLASH_MMAP_DATA, 
-                                        (const void **)&s_font_mmap_ptr, 
-                                        &s_font_mmap_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to mmap font partition (%lu bytes): %s", 
-                 (unsigned long)mmap_size, esp_err_to_name(err));
+    for (int i = 0; i < sizeof(mmap_sizes) / sizeof(mmap_sizes[0]); i++) {
+        mmap_size = mmap_sizes[i];
+        if (mmap_size > s_font_partition->size) {
+            mmap_size = s_font_partition->size;
+        }
         
-        // 如果仍然失败，尝试更小的大小（3MB）
-        ESP_LOGW(TAG, "Retrying with 3MB mmap size...");
-        mmap_size = 3 * 1024 * 1024;
+        ESP_LOGI(TAG, "Attempting to mmap %lu bytes (%.2f MB) of font data...", 
+                 (unsigned long)mmap_size, mmap_size / (1024.0 * 1024.0));
+        
+        // 使用 mmap 将字体分区映射到虚拟地址（零拷贝读取）
         err = esp_partition_mmap(s_font_partition, 0, mmap_size,
                                  SPI_FLASH_MMAP_DATA, 
                                  (const void **)&s_font_mmap_ptr, 
                                  &s_font_mmap_handle);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to mmap even with 3MB: %s", esp_err_to_name(err));
-            return false;
+        
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Font partition mmap'ed at %p (zero-copy enabled, size=%.2f MB)", 
+                     (void*)s_font_mmap_ptr, mmap_size / (1024.0 * 1024.0));
+            s_font_mmap_size = mmap_size;  // 记录成功的 mmap 大小
+            break;
+        } else {
+            ESP_LOGW(TAG, "Failed to mmap %lu bytes: %s", 
+                     (unsigned long)mmap_size, esp_err_to_name(err));
         }
     }
     
-    ESP_LOGI(TAG, "Font partition mmap'ed at %p (zero-copy enabled, size=%.2f MB)", 
-             (void*)s_font_mmap_ptr, mmap_size / (1024.0 * 1024.0));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "All mmap attempts failed, font partition unavailable");
+        return false;
+    }
     
     // 检查分区大小是否足够存储完整字体
     size_t required_size = FONT_TOTAL_CHARS * FONT_GLYPH_SIZE;
@@ -104,7 +112,7 @@ bool font_partition_is_available(void)
  */
 const uint8_t* font_partition_get_glyph_ptr(uint32_t unicode)
 {
-    if (s_font_mmap_ptr == NULL) {
+    if (s_font_mmap_ptr == NULL || s_font_partition == NULL) {
         return NULL;
     }
     
@@ -113,17 +121,21 @@ const uint8_t* font_partition_get_glyph_ptr(uint32_t unicode)
     }
     
     size_t offset = unicode * FONT_GLYPH_SIZE;
-    if (offset + FONT_GLYPH_SIZE > s_font_partition->size) {
-        return NULL;
+    
+    // 检查是否在 mmap 范围内
+    if (offset + FONT_GLYPH_SIZE <= s_font_mmap_size) {
+        // 在 mmap 范围内，零拷贝访问
+        return s_font_mmap_ptr + offset;
     }
     
-    return s_font_mmap_ptr + offset;
+    // 超出 mmap 范围，返回 NULL（调用者应使用 font_partition_read_glyph）
+    return NULL;
 }
 
 size_t font_partition_read_glyph(uint32_t unicode, uint8_t *buffer, size_t glyph_size)
 {
-    if (s_font_mmap_ptr == NULL) {
-        ESP_LOGE(TAG, "Font partition not mmap'ed");
+    if (s_font_partition == NULL) {
+        ESP_LOGE(TAG, "Font partition not initialized");
         return 0;
     }
     
@@ -147,8 +159,19 @@ size_t font_partition_read_glyph(uint32_t unicode, uint8_t *buffer, size_t glyph
         return 0;
     }
     
-    // 直接从 mmap 地址复制（比 esp_partition_read 更快）
-    memcpy(buffer, s_font_mmap_ptr + offset, glyph_size);
+    // 优先使用 mmap（如果在范围内）
+    if (s_font_mmap_ptr != NULL && offset + glyph_size <= s_font_mmap_size) {
+        // 从 mmap 地址复制（零拷贝）
+        memcpy(buffer, s_font_mmap_ptr + offset, glyph_size);
+    } else {
+        // 超出 mmap 范围，使用 esp_partition_read（稍慢但可访问整个分区）
+        esp_err_t err = esp_partition_read(s_font_partition, offset, buffer, glyph_size);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to read from partition at offset 0x%lx: %s",
+                     (unsigned long)offset, esp_err_to_name(err));
+            return 0;
+        }
+    }
     
     return glyph_size;
 }

@@ -849,6 +849,10 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         uint16_t flags = data[6] | (data[7] << 8);
         uint32_t payload_size = data[8] | (data[9] << 8) | (data[10] << 16) | (data[11] << 24);
         
+        // 打印原始字节以调试
+        ESP_LOGI(TAG, "X4IM header bytes[8-11]: 0x%02X 0x%02X 0x%02X 0x%02X -> payload_size=%" PRIu32,
+                 data[8], data[9], data[10], data[11], payload_size);
+        
         // 判断是否是 v2 协议（32 字节头）
         bool is_v2 = (length >= X4IM_HEADER_SIZE);
         int header_size = is_v2 ? X4IM_HEADER_SIZE : X4IM_HEADER_SIZE_V1;
@@ -1070,9 +1074,42 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                 s_ble_state.transfer_bytes_received = x4im_rx_state.received_size;
             }
 
-            ESP_LOGI(TAG, "Streaming to file: %" PRIu32 "/%" PRIu32 " bytes (%.1f%%)",
-                     x4im_rx_state.received_size, x4im_rx_state.expected_size,
-                     (float)x4im_rx_state.received_size * 100.0f / x4im_rx_state.expected_size);
+            // 每 10 个包或传输完成时打印详细进度
+            static uint32_t last_log_bytes = 0;
+            static uint32_t last_ui_update_bytes = 0;
+            bool should_log = (x4im_rx_state.received_size - last_log_bytes >= 2440) || 
+                              (x4im_rx_state.received_size >= x4im_rx_state.expected_size);
+            
+            // 传输模式：每接收 5% 或传输完成时刷新界面
+            bool should_update_ui = false;
+            if (s_ble_state.work_mode == BLE_MODE_TRANSFER && x4im_rx_state.expected_size > 0) {
+                uint32_t progress_diff = x4im_rx_state.received_size - last_ui_update_bytes;
+                uint32_t update_threshold = x4im_rx_state.expected_size / 20;  // 5%
+                should_update_ui = (progress_diff >= update_threshold) || 
+                                   (x4im_rx_state.received_size >= x4im_rx_state.expected_size);
+            }
+            
+            if (should_log) {
+                ESP_LOGI(TAG, "Streaming to file: %" PRIu32 "/%" PRIu32 " bytes (%.1f%%) | UI: %" PRIu32 "/%" PRIu32,
+                         x4im_rx_state.received_size, x4im_rx_state.expected_size,
+                         (float)x4im_rx_state.received_size * 100.0f / x4im_rx_state.expected_size,
+                         s_ble_state.transfer_bytes_received, s_ble_state.transfer_bytes_total);
+                last_log_bytes = x4im_rx_state.received_size;
+            }
+            
+            // 刷新传输模式界面
+            if (should_update_ui) {
+                last_ui_update_bytes = x4im_rx_state.received_size;
+                ESP_LOGI(TAG, "Updating transfer UI (%.1f%%)", 
+                         (float)x4im_rx_state.received_size * 100.0f / x4im_rx_state.expected_size);
+                xSemaphoreGive(x4im_rx_mutex);  // 临时释放锁
+                
+                // 只刷新传输进度部分，不全刷屏幕
+                draw_transfer_mode_screen();
+                display_refresh(REFRESH_MODE_PARTIAL);
+                
+                xSemaphoreTake(x4im_rx_mutex, portMAX_DELAY);  // 重新获取锁
+            }
 
             // 检查是否完成
             bool complete = (x4im_rx_state.received_size >= x4im_rx_state.expected_size);
