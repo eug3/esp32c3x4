@@ -1118,8 +1118,6 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
 
     // 检查是否是 X4IM v2 帧头（32 字节）
     // "X4IM" + version(2) + flags(2) + payload_size(4) + sequence(2) + reserved(2) + filename(16)
-    const int X4IM_HEADER_SIZE = 32;
-    
     if (length >= X4IM_HEADER_SIZE && data[0] == 'X' && data[1] == '4' &&
         data[2] == 'I' && data[3] == 'M' && data[4] == 0x02) {
 
