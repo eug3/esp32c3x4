@@ -42,7 +42,7 @@
 static const char *TAG = "BLE_READER";
 
 #define BLE_TEXT_MAX_BYTES 4096  // 减小缓冲区以节省内存 (原8192太大导致内存碎片)
-#define CHARS_PER_SCREEN 100  // 每屏显示的字符数（约数，用于翻页计算）
+// 每屏显示的字符数通过 calculate_chars_per_screen() 动态计算，基于实际屏幕尺寸和字体参数
 
 // 固定 3 槽滑动窗口（-1, 0, +1）
 #define BLE_SLOT_DIR   "/littlefs/ble_slots"
@@ -136,7 +136,6 @@ static uint8_t *s_page_buffer = NULL;
 static const size_t PAGE_BUFFER_SIZE = (SCREEN_WIDTH * SCREEN_HEIGHT) / 8;
 // 记录当前缓冲区中加载的是哪一页的位图，减少重复文件读取
 static uint16_t s_buffered_page_id = 0xFFFF; // 0xFFFF 表示无效/未加载
-static uint16_t s_buffered_book_id = 0;
 
 /**********************
  *  STATIC PROTOTYPES
@@ -1765,6 +1764,42 @@ static void draw_transfer_mode_screen(void)
 }
 
 /**
+ * @brief 计算每屏可显示的字符数
+ * @return 字符数
+ */
+static int calculate_chars_per_screen(void)
+{
+    int chinese_font_height = xt_eink_font_get_height();
+    if (chinese_font_height == 0) {
+        chinese_font_height = 25;  // 默认值
+    }
+
+    int chinese_font_width = 19;  // 默认值
+    xt_eink_glyph_t glyph;
+    if (xt_eink_font_get_glyph(0x4E2D, &glyph) && glyph.width > 0) {
+        chinese_font_width = glyph.width;
+    }
+
+    int line_spacing = 4;
+    int font_height = chinese_font_height + line_spacing;
+
+    // 内容区域从 y=30 开始，底部留 10 像素
+    int content_y = 30;
+    int usable_height = SCREEN_HEIGHT - content_y - 10;
+    int lines_per_screen = usable_height / font_height;
+
+    // 左右各留 10 像素边距
+    int max_width = SCREEN_WIDTH - 20;
+    int chars_per_line = max_width / chinese_font_width;
+    int total_chars = lines_per_screen * chars_per_line;
+
+    ESP_LOGI(TAG, "Calculated chars_per_screen: %d (lines=%d, chars_per_line=%d, font_width=%d, font_height=%d)",
+             total_chars, lines_per_screen, chars_per_line, chinese_font_width, font_height);
+
+    return total_chars;
+}
+
+/**
  * @brief 绘制阅读模式界面
  * @param clear_content 是否清除内容区域（滚动时设为 true）
  */
@@ -1917,12 +1952,14 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
     if (s_ble_state.work_mode == BLE_MODE_TRANSFER) {
         // ==================== 传输模式按键处理 ====================
         handle_transfer_mode_button(screen, btn);
+        // 传输模式需要重绘
+        screen->needs_redraw = true;
     } else {
         // ==================== 阅读模式按键处理 ====================
         handle_reading_mode_button(screen, btn);
+        // 阅读模式的按钮处理函数内部已经自行刷新了屏幕，不需要设置 needs_redraw
+        // 这样可以避免双重刷新（一次局刷 + 一次全刷）
     }
-
-    screen->needs_redraw = true;
 }
 
 /**
@@ -2018,8 +2055,9 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
                 break; // 在确认前不响应
             }
             // 向上滚动：减少字符位置（使用饱和减法避免下溢）
-            if (s_ble_state.char_position >= CHARS_PER_SCREEN) {
-                s_ble_state.char_position -= CHARS_PER_SCREEN;
+            int chars_per_screen_up = calculate_chars_per_screen();
+            if (s_ble_state.char_position >= (size_t)chars_per_screen_up) {
+                s_ble_state.char_position -= (size_t)chars_per_screen_up;
             } else if (s_ble_state.char_position > 0) {
                 s_ble_state.char_position = 0;
             }
@@ -2035,7 +2073,8 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
                 break; // 在确认前不响应
             }
             // 向下滚动：增加字符位置
-            s_ble_state.char_position += CHARS_PER_SCREEN;
+            int chars_per_screen = calculate_chars_per_screen();
+            s_ble_state.char_position += (size_t)chars_per_screen;
 
             // 检测是否超过当前页面的字符数，如果超过则加载下一页
             if (s_ble_state.total_chars > 0 && s_ble_state.char_position >= s_ble_state.total_chars) {
@@ -2057,8 +2096,8 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
                     display_refresh(REFRESH_MODE_FULL);
                 } else {
                     // 已经是最后一页，限制在最后一页的末尾
-                    if (s_ble_state.total_chars > CHARS_PER_SCREEN) {
-                        s_ble_state.char_position = s_ble_state.total_chars - CHARS_PER_SCREEN;
+                    if (s_ble_state.total_chars > (size_t)chars_per_screen) {
+                        s_ble_state.char_position = s_ble_state.total_chars - (size_t)chars_per_screen;
                     } else {
                         s_ble_state.char_position = 0;
                     }
