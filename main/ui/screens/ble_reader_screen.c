@@ -57,17 +57,19 @@ typedef struct {
 static ble_slot_entry_t s_slots[BLE_SLOT_COUNT];
 
 // ========== X4IM v2 命令定义 ==========
-#define X4IM_CMD_SET_MODE   0x8C    // 设置工作模式
-#define X4IM_CMD_GET_MODE   0x8D    // 查询当前模式
-#define X4IM_CMD_FILE_NOTIFY 0x8B   // 文件通知
-#define X4IM_CMD_LIST_FILES 0x8E    // 列表 SD 卡文件
-#define X4IM_CMD_DELETE_FILE 0x8F   // 删除 SD 卡文件/目录
-#define X4IM_CMD_RENAME_FILE 0x90   // 重命名 SD 卡文件/目录
-#define X4IM_CMD_CLEAR_BOOKS 0x91   // 清空书籍目录 (/sdcard/books/)
-#define X4IM_CMD_CREATE_DIR 0x92    // 创建目录
-#define X4IM_CMD_GET_STORAGE_INFO 0x93  // 获取存储信息
-#define X4IM_CMD_READ_FILE 0x94     // 读取文件（下载）
-#define X4IM_CMD_FILE_DATA 0x95     // 文件数据块（ESP32→Client）
+#define X4IM_CMD_SET_MODE          0x8C    // 设置工作模式
+#define X4IM_CMD_GET_MODE          0x8D    // 查询当前模式
+#define X4IM_CMD_FILE_NOTIFY       0x8B    // 文件通知
+#define X4IM_CMD_LIST_FILES        0x8E    // 列表 SD 卡文件
+#define X4IM_CMD_DELETE_FILE       0x8F    // 删除 SD 卡文件/目录
+#define X4IM_CMD_RENAME_FILE       0x90    // 重命名 SD 卡文件/目录
+#define X4IM_CMD_CLEAR_BOOKS       0x91    // 清空书籍目录 (/sdcard/books/)
+#define X4IM_CMD_CREATE_DIR        0x92    // 创建目录
+#define X4IM_CMD_GET_STORAGE_INFO  0x93    // 获取存储信息
+#define X4IM_CMD_READ_FILE         0x94    // 读取文件（下载）
+#define X4IM_CMD_FILE_DATA         0x95    // 文件数据块（ESP32→Client）
+#define X4IM_CMD_POSITION_SNAPSHOT 0x97    // 章节快照（ESP32→Client，哈希）
+#define X4IM_CMD_SET_BOOK_CHAPTER  0x98    // Client→ESP32 设置当前书/章哈希
 
 // 蓝牙读书屏幕实例（导出以供屏幕管理器注册）
 screen_t g_ble_reader_screen = {0};
@@ -76,8 +78,10 @@ screen_t g_ble_reader_screen = {0};
 typedef struct {
     ble_reader_state_t state;           // 当前状态
     ble_work_mode_t work_mode;          // 工作模式（阅读/传输）
-    uint16_t current_book_id;           // 当前书籍ID
-    uint16_t current_page;              // 当前显示的页码
+    uint32_t current_book_hash;         // 当前书籍哈希（来源于 URL hash）
+    uint32_t current_chapter_hash;      // 当前章节哈希（来源于 URL hash）
+    uint16_t current_book_id;           // 兼容旧逻辑的书籍ID（低16位）
+    uint16_t current_page;              // 当前显示的页码/章节索引（兼容字段）
     uint16_t total_pages;               // 总页数
     uint8_t connected_device[6];        // 已连接的设备地址
     bool device_connected;              // 设备是否已连接
@@ -110,6 +114,8 @@ typedef struct {
 static ble_reader_state_internal_t s_ble_state = {
     .state = BLE_READER_STATE_IDLE,
     .work_mode = BLE_MODE_READING,      // 默认阅读模式
+    .current_book_hash = 0,
+    .current_chapter_hash = 0,
     .current_book_id = 0,
     .current_page = 0,
     .total_pages = 0,
@@ -173,6 +179,7 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn);
 
 // 翻页防抖和同步
 static void send_page_sync_notification(uint16_t page_num);
+static void send_position_snapshot(void);
 static void update_cached_window(uint16_t current_page);
 static void __attribute__((unused)) cleanup_old_pages(uint16_t current_page);
 
@@ -256,7 +263,9 @@ static void slot_init(void)
     for (int i = 0; i < BLE_SLOT_COUNT; i++) {
         s_slots[i].logical_index = INT32_MIN;
         s_slots[i].ready = false;
-        snprintf(s_slots[i].path, sizeof(s_slots[i].path), "%s/slot%d.txt", BLE_SLOT_DIR, i);
+        // 将书籍哈希带入文件名，避免不同书籍/章节混用槽文件
+        snprintf(s_slots[i].path, sizeof(s_slots[i].path), "%s/0x%08" PRIx32 "_slot%d.txt",
+                 BLE_SLOT_DIR, s_ble_state.current_book_hash, i);
         unlink(s_slots[i].path); // 只保留干净的三个槽位文件
     }
 }
@@ -681,6 +690,37 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         ESP_LOGI(TAG, "Sent current mode: %s",
                  s_ble_state.work_mode == BLE_MODE_READING ? "READING" : "TRANSFER");
         
+        free((void *)data);
+        return;
+    }
+
+    // ========== 设置书籍/章节哈希 ==========
+    // SET_BOOK_CHAPTER: [0x98, bookHash(4B,LE), chapterHash(4B,LE)] 共9字节
+    if (length == 9 && data[0] == X4IM_CMD_SET_BOOK_CHAPTER) {
+        uint32_t book_hash = (uint32_t)data[1] | ((uint32_t)data[2] << 8) |
+                             ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 24);
+        uint32_t chapter_hash = (uint32_t)data[5] | ((uint32_t)data[6] << 8) |
+                                ((uint32_t)data[7] << 16) | ((uint32_t)data[8] << 24);
+
+        bool changed = (book_hash != s_ble_state.current_book_hash) ||
+                       (chapter_hash != s_ble_state.current_chapter_hash);
+
+        s_ble_state.current_book_hash = book_hash;
+        s_ble_state.current_chapter_hash = chapter_hash;
+        s_ble_state.current_book_id = (uint16_t)(book_hash & 0xFFFF); // 兼容旧字段
+        s_ble_state.current_page = 0;
+        s_ble_state.char_position = 0;
+
+        if (changed) {
+            ESP_LOGI(TAG, "Set book/chapter hash: book=0x%08" PRIx32 ", chapter=0x%08" PRIx32,
+                     book_hash, chapter_hash);
+            // 重建槽文件，避免旧书数据污染
+            slot_init();
+            slot_prepare_window(0);
+            // 发送一次章节快照给 Client，帮助其预加载
+            send_position_snapshot();
+        }
+
         free((void *)data);
         return;
     }
@@ -1540,6 +1580,32 @@ static void send_page_sync_notification(uint16_t page_num)
 }
 
 /**
+ * @brief 发送章节快照到 Client（以哈希标识）
+ * 格式：[0x97, bookHash(4B,LE), chapterHash(4B,LE)] 共9字节
+ */
+static void send_position_snapshot(void)
+{
+    uint8_t snapshot[9];
+    snapshot[0] = X4IM_CMD_POSITION_SNAPSHOT;
+
+    uint32_t book_hash = s_ble_state.current_book_hash;
+    snapshot[1] = (book_hash >> 0) & 0xFF;
+    snapshot[2] = (book_hash >> 8) & 0xFF;
+    snapshot[3] = (book_hash >> 16) & 0xFF;
+    snapshot[4] = (book_hash >> 24) & 0xFF;
+
+    uint32_t chap_hash = s_ble_state.current_chapter_hash;
+    snapshot[5] = (chap_hash >> 0) & 0xFF;
+    snapshot[6] = (chap_hash >> 8) & 0xFF;
+    snapshot[7] = (chap_hash >> 16) & 0xFF;
+    snapshot[8] = (chap_hash >> 24) & 0xFF;
+
+    bool sent = ble_manager_send_data(snapshot, sizeof(snapshot));
+    ESP_LOGI(TAG, "[POSITION_SNAPSHOT] book=0x%08" PRIx32 ", chapter=0x%08" PRIx32 " - %s",
+             book_hash, chap_hash, sent ? "SENT" : "FAILED");
+}
+
+/**
  * @brief 更新三页缓存窗口 (prev, current, next)
  * 并检查缓存中是否存在，不存在则向手机请求
  */
@@ -2023,6 +2089,9 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
                 // 更新缓存窗口（预加载前后页）
                 update_cached_window(s_ble_state.current_page);
 
+                // 发送位置快照（以 ESP32 为准）
+                send_position_snapshot();
+                
                 // 请求手机发送缓存窗口内的页面（前、当前、后）
                 send_page_sync_notification(s_ble_state.current_page);
             }
@@ -2044,6 +2113,9 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
                 // 更新缓存窗口（预加载前后页）
                 update_cached_window(s_ble_state.current_page);
 
+                // 发送位置快照（以 ESP32 为准）
+                send_position_snapshot();
+                
                 // 请求手机发送缓存窗口内的页面（前、当前、后）
                 send_page_sync_notification(s_ble_state.current_page);
             }
@@ -2062,6 +2134,10 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
                 s_ble_state.char_position = 0;
             }
             ESP_LOGI(TAG, "Visual scroll UP: char_position=%zu", s_ble_state.char_position);
+            
+            // 发送位置快照（以 ESP32 为准）
+            send_position_snapshot();
+            
             // 使用局刷刷新内容区域，清除旧内容
             draw_reading_mode_screen(true);
             display_refresh(REFRESH_MODE_PARTIAL);
@@ -2088,6 +2164,9 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
                     // 更新缓存窗口
                     update_cached_window(s_ble_state.current_page);
 
+                    // 发送位置快照（以 ESP32 为准）
+                    send_position_snapshot();
+                    
                     // 请求手机发送新页面
                     send_page_sync_notification(s_ble_state.current_page);
 
@@ -2102,12 +2181,20 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
                         s_ble_state.char_position = 0;
                     }
                     ESP_LOGI(TAG, "Visual scroll DOWN: char_position=%zu (last page)", s_ble_state.char_position);
+                    
+                    // 发送位置快照（以 ESP32 为准）
+                    send_position_snapshot();
+                    
                     draw_reading_mode_screen(true);
                     display_refresh(REFRESH_MODE_PARTIAL);
                 }
             } else {
                 // 仍在当前页面内，使用局刷
                 ESP_LOGI(TAG, "Visual scroll DOWN: char_position=%zu", s_ble_state.char_position);
+                
+                // 发送位置快照（以 ESP32 为准）
+                send_position_snapshot();
+                
                 draw_reading_mode_screen(true);
                 display_refresh(REFRESH_MODE_PARTIAL);
             }
