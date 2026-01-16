@@ -102,3 +102,4 @@ env/
 temp/
 tmp/
 *.log
+.cache/

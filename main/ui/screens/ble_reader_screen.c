@@ -1,6 +1,21 @@
 /**
  * @file ble_reader_screen.c
- * @brief 蓝牙读书屏幕实现 - 分页位图显示，支持滑动窗口缓存
+ * @brief 蓝牙读书屏幕实现 - TXT 文本显示，支持滑动窗口缓存
+ * 
+ * X4IM v2 协议 (32 字节头部):
+ *   magic (4字节) = "X4IM" (0x58 0x34 0x49 0x4D)
+ *   version (1字节) = 0x02 (v2)
+ *   type (1字节) = 文件类型或命令
+ *   flags (2字节, 小端序) = 标志位
+ *   payload_size (4字节, 小端序) = 数据大小
+ *   sequence (2字节, 小端序) = 序列号/页码
+ *   reserved (2字节) = 保留字段
+ *   filename (16字节) = 文件名（UTF-8，以\0结尾）
+ * 
+ * 三槽队列协议:
+ *   - 文件名格式: page_{logicalIndex}
+ *   - 槽位映射: slot_id = abs(logical_index) % 3
+ *   - 窗口范围: [current-1, current, current+1]
  */
 
 #include "ble_reader_screen.h"
@@ -8,11 +23,14 @@
 #include "ble_book_protocol.h"
 #include "ble_cache_manager.h"
 #include "display_engine.h"
+#include "fonts.h"
+#include "xt_eink_font_impl.h"
 #include "../fs_utils.h"     // 共享文件系统工具
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/semphr.h"
 #include "ff.h"           // FATFS for SD card operations
+#include <limits.h>
 #include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
@@ -22,6 +40,21 @@
 #include <dirent.h>
 
 static const char *TAG = "BLE_READER";
+
+#define BLE_TEXT_MAX_BYTES 4096  // 减小缓冲区以节省内存 (原8192太大导致内存碎片)
+#define CHARS_PER_SCREEN 100  // 每屏显示的字符数（约数，用于翻页计算）
+
+// 固定 3 槽滑动窗口（-1, 0, +1）
+#define BLE_SLOT_DIR   "/littlefs/ble_slots"
+#define BLE_SLOT_COUNT 3
+
+typedef struct {
+    int32_t logical_index;   // 对应的逻辑页索引，可为负
+    bool ready;              // 文件是否已写完可读
+    char path[64];           // 槽位文件路径（slot0/1/2）
+} ble_slot_entry_t;
+
+static ble_slot_entry_t s_slots[BLE_SLOT_COUNT];
 
 // ========== X4IM v2 命令定义 ==========
 #define X4IM_CMD_SET_MODE   0x8C    // 设置工作模式
@@ -62,7 +95,11 @@ typedef struct {
     
     // 缓存窗口（三页：当前、前、后）
     uint16_t cached_pages[3];           // 缓存的页码：[prev, current, next]
-    
+
+    // ========== 文本阅读位置 ==========
+    size_t char_position;                // 当前 TXT 文件内的字符位置
+    size_t total_chars;                  // 当前 TXT 文件的总字符数
+
     // ========== 传输模式状态 ==========
     uint32_t transfer_bytes_received;   // 已接收字节数
     uint32_t transfer_bytes_total;      // 总字节数
@@ -80,6 +117,8 @@ static ble_reader_state_internal_t s_ble_state = {
     .page_loaded = false,
     .preload_requested = false,
     .preload_start_page = 0,
+    .char_position = 0,
+    .total_chars = 0,
     .initialization_complete = false,
     .showing_confirm_prompt = false,
     .cached_pages = {0, 0, 0},
@@ -108,6 +147,15 @@ static void on_hide(screen_t *screen);
 static void on_draw(screen_t *screen);
 static void on_event(screen_t *screen, button_t btn, button_event_t event);
 
+// 小窗口槽位管理
+static bool ensure_slot_dir(void);
+static void slot_init(void);
+static int slot_id_from_index(int32_t idx);
+static void slot_prepare_window(int32_t center_index);
+static bool slot_get_path_if_ready(int32_t logical_index, char *out_path, size_t out_size);
+static void slot_mark_ready(int slot_id, int32_t logical_index);
+static bool parse_index_from_name(const char *name, int32_t *out_index);
+
 // 蓝牙回调函数
 static void ble_connect_callback(bool connected);
 static void ble_data_received_callback(const uint8_t *data, uint16_t length);
@@ -118,7 +166,7 @@ static void on_preload_needed(uint16_t book_id, uint16_t start_page, uint8_t pag
 
 // 双模式界面绘制
 static void draw_transfer_mode_screen(void);
-static void draw_reading_mode_screen(void);
+static void draw_reading_mode_screen(bool clear_content);
 
 // 双模式按键处理
 static void handle_transfer_mode_button(screen_t *screen, button_t btn);
@@ -177,37 +225,262 @@ static void deinit_page_buffer(void)
     }
 }
 
+// ========== 三槽滑动窗口工具 ==========
+
+static bool ensure_slot_dir(void)
+{
+    struct stat st;
+    if (stat(BLE_SLOT_DIR, &st) != 0) {
+        if (mkdir(BLE_SLOT_DIR, 0755) != 0) {
+            ESP_LOGE(TAG, "Failed to create slot dir: %s", BLE_SLOT_DIR);
+            return false;
+        }
+    }
+    return true;
+}
+
+static int slot_id_from_index(int32_t idx)
+{
+    int m = idx % BLE_SLOT_COUNT;
+    if (m < 0) {
+        m += BLE_SLOT_COUNT;
+    }
+    return m;
+}
+
+static void slot_init(void)
+{
+    if (!ensure_slot_dir()) {
+        return;
+    }
+
+    for (int i = 0; i < BLE_SLOT_COUNT; i++) {
+        s_slots[i].logical_index = INT32_MIN;
+        s_slots[i].ready = false;
+        snprintf(s_slots[i].path, sizeof(s_slots[i].path), "%s/slot%d.txt", BLE_SLOT_DIR, i);
+        unlink(s_slots[i].path); // 只保留干净的三个槽位文件
+    }
+}
+
+static void slot_prepare_window(int32_t center_index)
+{
+    if (!ensure_slot_dir()) {
+        return;
+    }
+
+    int32_t targets[BLE_SLOT_COUNT] = {center_index - 1, center_index, center_index + 1};
+    for (int i = 0; i < BLE_SLOT_COUNT; i++) {
+        int slot_id = slot_id_from_index(targets[i]);
+        ble_slot_entry_t *slot = &s_slots[slot_id];
+
+        if (slot->logical_index != targets[i]) {
+            // 该槽位要被复用，删除旧文件并标记 pending
+            unlink(slot->path);
+            slot->logical_index = targets[i];
+            slot->ready = false;
+        }
+    }
+}
+
+static bool slot_get_path_if_ready(int32_t logical_index, char *out_path, size_t out_size)
+{
+    int slot_id = slot_id_from_index(logical_index);
+    ble_slot_entry_t *slot = &s_slots[slot_id];
+
+    if (slot->logical_index != logical_index || !slot->ready) {
+        return false;
+    }
+
+    if (out_path != NULL && out_size > 0) {
+        snprintf(out_path, out_size, "%s", slot->path);
+    }
+    return true;
+}
+
+static void slot_mark_ready(int slot_id, int32_t logical_index)
+{
+    if (slot_id < 0 || slot_id >= BLE_SLOT_COUNT) {
+        return;
+    }
+
+    s_slots[slot_id].logical_index = logical_index;
+    s_slots[slot_id].ready = true;
+}
+
+static bool parse_index_from_name(const char *name, int32_t *out_index)
+{
+    if (name == NULL || out_index == NULL) {
+        return false;
+    }
+
+    // 在文件名中找到第一个数字或负号开始的位置
+    const char *p = name;
+    while (*p != '\0' && !((*p >= '0' && *p <= '9') || *p == '-')) {
+        p++;
+    }
+    if (*p == '\0') {
+        return false;
+    }
+
+    char *end_ptr = NULL;
+    long v = strtol(p, &end_ptr, 10);
+    if (end_ptr == p) {
+        return false;
+    }
+
+    *out_index = (int32_t)v;
+    return true;
+}
+
 /**
  * @brief 标记页面已加载（实际数据在littlefs中，不预加载）
  */
 static bool load_current_page(void)
 {
-    if (s_ble_state.current_book_id == 0) {
+    char slot_path[64];
+
+    if (!slot_get_path_if_ready((int32_t)s_ble_state.current_page, slot_path, sizeof(slot_path))) {
+        ESP_LOGW(TAG, "Page slot pending: idx=%d", (int)s_ble_state.current_page);
         s_ble_state.page_loaded = false;
         return false;
     }
 
-    // 检查页面缓存是否存在（仅检查，不加载到内存）
-    // 页面数据存储在littlefs中，on_draw时按需读取
-    char filename[64];
-    snprintf(filename, sizeof(filename), "/littlefs/ble_pages/book_%04x_page_%05u.bin",
-             s_ble_state.current_book_id, s_ble_state.current_page);
-    
-    FILE *f = fopen(filename, "rb");
+    FILE *f = fopen(slot_path, "rb");
     if (f != NULL) {
         fclose(f);
         s_ble_state.page_loaded = true;
-        
-        // 更新阅读位置，触发预加载检查
-        ble_cache_update_read_position(s_ble_state.current_book_id, 
-                                       s_ble_state.current_page);
         return true;
     }
 
-    ESP_LOGW(TAG, "Page file not found: book=%04x, page=%u",
-             s_ble_state.current_book_id, s_ble_state.current_page);
+    ESP_LOGW(TAG, "Page file not found in slot: %s (idx=%d)", slot_path, (int)s_ble_state.current_page);
     s_ble_state.page_loaded = false;
     return false;
+}
+
+static int utf8_char_len(unsigned char c)
+{
+    if ((c & 0x80u) == 0) return 1;
+    if ((c & 0xE0u) == 0xC0u) return 2;
+    if ((c & 0xF0u) == 0xE0u) return 3;
+    if ((c & 0xF8u) == 0xF0u) return 4;
+    return 1;
+}
+
+/**
+ * @brief 计算 UTF-8 字符串中的字符数（不是字节数）
+ */
+static size_t count_utf8_chars(const char *str)
+{
+    if (str == NULL || *str == '\0') {
+        return 0;
+    }
+
+    size_t count = 0;
+    const char *p = str;
+
+    while (*p != '\0') {
+        int clen = utf8_char_len((unsigned char)*p);
+        if (clen <= 0) clen = 1;
+        p += clen;
+        count++;
+    }
+
+    return count;
+}
+
+static void draw_wrapped_text(int x, int y, int max_width, int max_height, const char *text, size_t char_offset)
+{
+    if (text == NULL || *text == '\0') {
+        return;
+    }
+
+    // 安全检查：如果 char_offset 异常大，限制在合理范围内
+    size_t max_chars = count_utf8_chars(text);
+    if (char_offset > max_chars) {
+        char_offset = 0;  // 重置到开头，避免越界
+        ESP_LOGW(TAG, "char_offset %zu > max_chars %zu, resetting to 0", char_offset, max_chars);
+    }
+
+    sFONT *ui_font = display_get_default_ascii_font();
+    if (ui_font == NULL) {
+        ESP_LOGE(TAG, "ui_font is NULL!");
+        return;
+    }
+
+    int chinese_font_height = xt_eink_font_get_height();
+    if (chinese_font_height <= 0) {
+        chinese_font_height = 25;
+    }
+    int line_spacing = 4;
+    int line_height = chinese_font_height + line_spacing;
+
+    // 跳过 char_offset 个字符，找到开始显示的位置
+    const char *p = text;
+    size_t char_count = 0;
+
+    while (*p != '\0' && char_count < char_offset) {
+        int clen = utf8_char_len((unsigned char)*p);
+        if (clen <= 0) clen = 1;
+        p += clen;
+        char_count++;
+    }
+
+    // 从跳过的位置开始绘制
+    char line[256];
+    int line_len = 0;
+    int cur_y = y;
+
+    while (*p != '\0' && cur_y + line_height <= y + max_height) {
+        if (*p == '\n') {
+            p++;
+            if (line_len > 0) {
+                line[line_len] = '\0';
+                display_draw_text_font(x, cur_y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
+                line_len = 0;
+            }
+            cur_y += line_height;
+            continue;
+        }
+
+        int clen = utf8_char_len((unsigned char)*p);
+        if (clen <= 0) clen = 1;
+        if (line_len + clen >= (int)sizeof(line) - 1) {
+            line[line_len] = '\0';
+            display_draw_text_font(x, cur_y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
+            line_len = 0;
+            cur_y += line_height;
+
+            if (cur_y + line_height > y + max_height) {
+                break;
+            }
+            continue;
+        }
+
+        memcpy(line + line_len, p, clen);
+        line_len += clen;
+        line[line_len] = '\0';
+
+        int width = display_get_text_width_font(line, ui_font);
+        if (width > max_width && line_len > clen) {
+            line_len -= clen;
+            line[line_len] = '\0';
+            display_draw_text_font(x, cur_y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
+            line_len = 0;
+            cur_y += line_height;
+
+            if (cur_y + line_height > y + max_height) {
+                break;
+            }
+            continue;
+        }
+
+        p += clen;
+    }
+
+    if (line_len > 0 && cur_y + line_height <= y + max_height) {
+        line[line_len] = '\0';
+        display_draw_text_font(x, cur_y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
+    }
 }
 
 /**
@@ -247,9 +520,11 @@ static struct {
     FILE *file_handle;          // 直接写入文件，不使用内存缓冲区
     char filename[64];          // 当前写入的文件名
     uint16_t current_page;
+    int32_t logical_index;      // 对应的滑动窗口索引（可为负）
+    int slot_id;                // 当前写入的槽位 ID
     bool use_sd_card;           // 是否写入SD卡（传输模式）
     uint16_t flags;             // X4IM v2 flags
-} x4im_rx_state = {0};
+} x4im_rx_state = {.logical_index = -1, .slot_id = -1};
 
 // X4IM v2 协议常量
 #define X4IM_HEADER_SIZE        32      // v2 帧头长度
@@ -290,6 +565,8 @@ static void deinit_x4im_mutex(void)
     x4im_rx_state.receiving = false;
     x4im_rx_state.expected_size = 0;
     x4im_rx_state.received_size = 0;
+    x4im_rx_state.logical_index = -1;
+    x4im_rx_state.slot_id = -1;
     
     // 删除互斥锁
     if (x4im_rx_mutex != NULL) {
@@ -839,36 +1116,29 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         return;
     }
 
-    // 检查是否是 X4IM 帧头 (v2: 32字节, v1: 12字节 兼容)  
+    // 检查是否是 X4IM v2 帧头（32 字节）
     // "X4IM" + version(2) + flags(2) + payload_size(4) + sequence(2) + reserved(2) + filename(16)
-    // X4IM协议处理
-    if (length >= X4IM_HEADER_SIZE_V1 && data[0] == 'X' && data[1] == '4' &&
-        data[2] == 'I' && data[3] == 'M') {
+    const int X4IM_HEADER_SIZE = 32;
+    
+    if (length >= X4IM_HEADER_SIZE && data[0] == 'X' && data[1] == '4' &&
+        data[2] == 'I' && data[3] == 'M' && data[4] == 0x02) {
 
         // 解析帧头
         uint16_t flags = data[6] | (data[7] << 8);
         uint32_t payload_size = data[8] | (data[9] << 8) | (data[10] << 16) | (data[11] << 24);
         
-        // 打印原始字节以调试
-        ESP_LOGI(TAG, "X4IM header bytes[8-11]: 0x%02X 0x%02X 0x%02X 0x%02X -> payload_size=%" PRIu32,
-                 data[8], data[9], data[10], data[11], payload_size);
+        ESP_LOGI(TAG, "X4IM v2 header: payload_size=%" PRIu32, payload_size);
         
-        // 判断是否是 v2 协议（32 字节头）
-        bool is_v2 = (length >= X4IM_HEADER_SIZE);
-        int header_size = is_v2 ? X4IM_HEADER_SIZE : X4IM_HEADER_SIZE_V1;
-        
-        // 提取文件名（v2 协议，偏移 16，最多 15 字符）
+        // 提取文件名（偏移 16，最多 15 字符）
         char recv_filename[16] = {0};
-        if (is_v2 && length >= X4IM_HEADER_SIZE) {
-            memcpy(recv_filename, &data[16], 15);
-            recv_filename[15] = '\0';
-        }
+        memcpy(recv_filename, &data[16], 15);
+        recv_filename[15] = '\0';
         
         // 检查是否需要存储到 SD 卡
         bool use_sd = (flags & X4IM_FLAGS_STORAGE_SD) != 0;
         
-        ESP_LOGI(TAG, "X4IM frame: v%d, flags=0x%04X, payload=%" PRIu32 ", sd=%d, name='%s'",
-             is_v2 ? 2 : 1, flags, payload_size, use_sd, recv_filename);
+        ESP_LOGI(TAG, "X4IM frame: v2, flags=0x%04X, payload=%" PRIu32 ", sd=%d, name='%s'",
+             flags, payload_size, use_sd, recv_filename);
 
         // ========== 模式检查 ==========
         // 阅读模式下，拒绝 SD 卡写入
@@ -897,8 +1167,11 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
             // 准备文件路径
             x4im_rx_state.use_sd_card = use_sd;
             x4im_rx_state.flags = flags;
-            
+            x4im_rx_state.slot_id = -1;
+            x4im_rx_state.logical_index = -1;
+
             if (use_sd) {
+                // ========== SD 卡存储（传输模式）==========
                 // 创建 /sdcard/books 目录（如果不存在）
                 mkdir("/sdcard/books", 0755);
                 
@@ -923,11 +1196,34 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                              s_ble_state.transfer_file_count);
                 }
             } else {
-                // LittleFS 路径：阅读模式缓存
-                snprintf(x4im_rx_state.filename, sizeof(x4im_rx_state.filename), 
-                         "/littlefs/ble_pages/book_%04x_page_%05u.bin",
-                         s_ble_state.current_book_id ? s_ble_state.current_book_id : 1,
-                         s_ble_state.current_page);
+                // ========== LittleFS 存储（阅读模式三槽队列）==========
+                // 从文件名解析逻辑索引（必须包含有效索引）
+                int32_t incoming_index = INT32_MIN;
+                if (!parse_index_from_name(recv_filename, &incoming_index)) {
+                    ESP_LOGE(TAG, "Invalid filename for LittleFS (must be 'page_{index}'): %s", recv_filename);
+                    xSemaphoreGive(x4im_rx_mutex);
+                    free((void *)data);
+                    return;
+                }
+                
+                // LittleFS 路径：三槽队列，槽位 = idx mod 3
+                if (!ensure_slot_dir()) {
+                    xSemaphoreGive(x4im_rx_mutex);
+                    free((void *)data);
+                    return;
+                }
+
+                int slot_id = slot_id_from_index(incoming_index);
+                x4im_rx_state.slot_id = slot_id;
+                x4im_rx_state.logical_index = incoming_index;
+
+                ble_slot_entry_t *slot = &s_slots[slot_id];
+                // 复用槽位前先清理旧文件并重置状态
+                unlink(slot->path);
+                slot->logical_index = incoming_index;
+                slot->ready = false;
+
+                snprintf(x4im_rx_state.filename, sizeof(x4im_rx_state.filename), "%s", slot->path);
             }
 
             // 打开文件准备流式写入
@@ -965,6 +1261,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
             }
 
             // 如果帧头后还有数据，直接写入文件
+            const int header_size = X4IM_HEADER_SIZE;  // v2 固定 32 字节
             if (length > header_size) {
                 uint32_t copy_len = length - header_size;
                 if (copy_len > payload_size) {
@@ -1006,6 +1303,10 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                 ESP_LOGI(TAG, "Size: %" PRIu32 " bytes", x4im_rx_state.received_size);
                 ESP_LOGI(TAG, "Storage: %s", x4im_rx_state.use_sd_card ? "SD Card" : "LittleFS");
                 ESP_LOGI(TAG, "============================");
+
+                if (!x4im_rx_state.use_sd_card && x4im_rx_state.slot_id >= 0) {
+                    slot_mark_ready(x4im_rx_state.slot_id, x4im_rx_state.logical_index);
+                }
 
                 xSemaphoreGive(x4im_rx_mutex);
 
@@ -1124,6 +1425,10 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                 ESP_LOGI(TAG, "Size: %" PRIu32 " bytes", x4im_rx_state.received_size);
                 ESP_LOGI(TAG, "Storage: %s", x4im_rx_state.use_sd_card ? "SD Card" : "LittleFS");
                 ESP_LOGI(TAG, "=========================================");
+
+                if (!x4im_rx_state.use_sd_card && x4im_rx_state.slot_id >= 0) {
+                    slot_mark_ready(x4im_rx_state.slot_id, x4im_rx_state.logical_index);
+                }
                 
                 xSemaphoreGive(x4im_rx_mutex);
 
@@ -1146,8 +1451,26 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                         ESP_LOGI(TAG, "Showing confirm prompt: Click CONFIRM to start reading");
                     }
 
-                    // 标记页面已加载
-                    s_ble_state.page_loaded = true;
+                    if (x4im_rx_state.logical_index == (int32_t)s_ble_state.current_page) {
+                        // 只在当前页完成时统计字符数
+                        char filename[64];
+                        snprintf(filename, sizeof(filename), "%s", x4im_rx_state.filename);
+                        FILE *f = fopen(filename, "rb");
+                        if (f != NULL) {
+                            static char text_buf[BLE_TEXT_MAX_BYTES];
+                            size_t read = fread(text_buf, 1, sizeof(text_buf) - 1, f);
+                            fclose(f);
+                            text_buf[read] = '\0';
+                            s_ble_state.total_chars = count_utf8_chars(text_buf);
+                            ESP_LOGI(TAG, "Page loaded: %zu UTF-8 characters", s_ble_state.total_chars);
+                        } else {
+                            s_ble_state.total_chars = 0;
+                            ESP_LOGW(TAG, "Failed to count characters in page");
+                        }
+                    }
+
+                    // 标记页面已加载（仅对当前页）
+                    s_ble_state.page_loaded = (x4im_rx_state.logical_index == (int32_t)s_ble_state.current_page);
                 }
 
                 // 触发重绘
@@ -1230,31 +1553,19 @@ static void update_cached_window(uint16_t current_page)
     s_ble_state.cached_pages[1] = current_page;
     s_ble_state.cached_pages[2] = current_page + 1;
 
-    ESP_LOGI(TAG, "Updated cache window: prev=%u, current=%u, next=%u",
-             s_ble_state.cached_pages[0],
-             s_ble_state.cached_pages[1],
-             s_ble_state.cached_pages[2]);
-    
-    // 检查三页缓存是否存在，不存在则请求手机发送
-    for (int i = 0; i < 3; i++) {
-        uint16_t page = s_ble_state.cached_pages[i];
-        
-        // 检查该页是否已缓存
-        char filename[64];
-        snprintf(filename, sizeof(filename), "/littlefs/ble_pages/book_%04x_page_%05u.bin",
-                 s_ble_state.current_book_id, page);
-        
-        FILE *f = fopen(filename, "rb");
-        if (f == NULL) {
-            // 缓存不存在，请求手机发送该页
-            ESP_LOGI(TAG, "Cache miss for page %u, already sent PAGE:%u notification", page, current_page);
-            // 注意：send_page_sync_notification(current_page) 已在 on_event() 中调用
-            // 手机会根据 current_page 自动发送 [page-1, page, page+1] 三页
-        } else {
-            fclose(f);
-            ESP_LOGI(TAG, "Cache hit for page %u", page);
-        }
-    }
+    // 重建 3 槽窗口映射：-1,0,+1 对应 slot0/1/2（取模）
+    slot_prepare_window((int32_t)current_page);
+
+    bool ready_prev = slot_get_path_if_ready((int32_t)s_ble_state.cached_pages[0], NULL, 0);
+    bool ready_curr = slot_get_path_if_ready((int32_t)s_ble_state.cached_pages[1], NULL, 0);
+    bool ready_next = slot_get_path_if_ready((int32_t)s_ble_state.cached_pages[2], NULL, 0);
+
+    s_ble_state.page_loaded = ready_curr;
+
+    ESP_LOGI(TAG, "Cache window -> prev:%u(%s) curr:%u(%s) next:%u(%s)",
+             s_ble_state.cached_pages[0], ready_prev ? "ready" : "pending",
+             s_ble_state.cached_pages[1], ready_curr ? "ready" : "pending",
+             s_ble_state.cached_pages[2], ready_next ? "ready" : "pending");
 }
 
 /**
@@ -1352,7 +1663,7 @@ static void on_draw(screen_t *screen)
         draw_transfer_mode_screen();
     } else {
         // ==================== 阅读模式界面 ====================
-        draw_reading_mode_screen();
+        draw_reading_mode_screen(false);
     }
 
     // 刷新墨水屏显示（使用全刷模式保证显示清晰）
@@ -1457,143 +1768,144 @@ static void draw_transfer_mode_screen(void)
 
 /**
  * @brief 绘制阅读模式界面
+ * @param clear_content 是否清除内容区域（滚动时设为 true）
  */
-static void draw_reading_mode_screen(void)
+static void draw_reading_mode_screen(bool clear_content)
 {
-    // 绘制标题栏
-    int title_y = 20;
-    display_draw_text_menu(20, title_y, "蓝牙读书", COLOR_BLACK, COLOR_WHITE);
+    // 左上角状态区域（和电池信息一样的高度）
+    int top_y = 5;
 
-    // 绘制连接状态
-    int status_y = 60;
+    // 绘制状态行（左上角）：蓝牙 + 状态 + 页码
+    char status_line[64] = "蓝牙";
     const char *status_str = NULL;
     switch (s_ble_state.state) {
         case BLE_READER_STATE_IDLE:
-            status_str = "状态: 空闲";
+            status_str = "空闲";
             break;
         case BLE_READER_STATE_WAITING:
-            status_str = "状态: 等待连接...";
+            status_str = "等待连接";
             break;
         case BLE_READER_STATE_CONNECTING:
-            status_str = "状态: 连接中...";
+            status_str = "连接中";
             break;
         case BLE_READER_STATE_CONNECTED:
-            status_str = "状态: 已连接";
+            status_str = "已连接";
             break;
         case BLE_READER_STATE_RECEIVING:
-            status_str = "状态: 接收中...";
+            status_str = "接收中";
             break;
         case BLE_READER_STATE_READING:
-            status_str = "状态: 阅读中";
+            status_str = "阅读中";
             break;
         default:
-            status_str = "状态: 未知";
+            status_str = "未知";
             break;
     }
-    display_draw_text_menu(20, status_y, status_str, COLOR_BLACK, COLOR_WHITE);
 
-    // 绘制页面内容（直接显示缓存，不等待 page_loaded）
-    if (s_ble_state.current_book_id != 0) {
-        // 检查内存缓冲中是否已经是当前页
-        bool buffer_valid = (s_page_buffer != NULL) &&
-                           (s_buffered_book_id == s_ble_state.current_book_id) &&
-                           (s_buffered_page_id == s_ble_state.current_page);
-        
-        if (buffer_valid) {
-            // 缓存命中，直接绘制
-            uint8_t *framebuffer = display_get_framebuffer();
-            if (framebuffer != NULL) {
-                memcpy(framebuffer, s_page_buffer, PAGE_BUFFER_SIZE);
-            }
-        } else {
-            // 缓存未命中，需要从文件读取
-            char filename[64];
-            snprintf(filename, sizeof(filename), "/littlefs/ble_pages/book_%04x_page_%05u.bin",
-                     s_ble_state.current_book_id, s_ble_state.current_page);
-    
-            FILE *f = fopen(filename, "rb");
-            if (f != NULL) {
-                uint8_t *framebuffer = display_get_framebuffer();
-                if (framebuffer != NULL) {
-                    if (s_page_buffer != NULL) {
-                        size_t read = fread(s_page_buffer, 1, PAGE_BUFFER_SIZE, f);
-                        if (read > 0) {
-                            // 读取成功，更新缓冲区状态
-                            s_buffered_book_id = s_ble_state.current_book_id;
-                            s_buffered_page_id = s_ble_state.current_page;
-                            memcpy(framebuffer, s_page_buffer, read);
-                            ESP_LOGI(TAG, "Bitmap loaded to buffer and displayed");
-                        }
-                    } else {
-                        // 无页面缓冲区，直接读到帧缓冲
-                        size_t read = fread(framebuffer, 1, PAGE_BUFFER_SIZE, f);
-                        if (read > 0) {
-                            // 不设置缓冲区标志，避免误判缓存命中
-                            ESP_LOGW(TAG, "Bitmap loaded directly to framebuffer (%zu bytes)", read);
-                        }
-                    }
-                } else {
-                    ESP_LOGE(TAG, "Framebuffer not available");
-                }
-                fclose(f);
-            } else {
-                // 页面缺失，显示提示
-                // 重置缓冲区状态，因为它不匹配当前页
-                s_buffered_page_id = 0xFFFF;
-                
-                display_draw_text_menu(20, 100, "缓存缺失", COLOR_BLACK, COLOR_WHITE);
-                display_draw_text_menu(20, 140, s_page_buffer ? "正在从手机请求..." : "缓冲未分配，直接显示", COLOR_BLACK, COLOR_WHITE);
-                
-                // 如果正在接收数据，显示进度
-                if (x4im_rx_state.receiving && x4im_rx_state.expected_size > 0) {
-                    char progress[64];
-                    float percent = (float)x4im_rx_state.received_size * 100.0f / x4im_rx_state.expected_size;
-                    snprintf(progress, sizeof(progress), "接收中: %.0f%% (%lu/%lu 字节)",
-                             percent, (unsigned long)x4im_rx_state.received_size, (unsigned long)x4im_rx_state.expected_size);
-                    display_draw_text_menu(20, 180, progress, COLOR_BLACK, COLOR_WHITE);
-                }
-            }
-        }
-    } else {
-        display_draw_text_menu(20, 100, "未选择书籍", COLOR_BLACK, COLOR_WHITE);
-        display_draw_text_menu(20, 140, "等待手机发送内容...", COLOR_BLACK, COLOR_WHITE);
-    }
+    // 拼接状态字符串
+    snprintf(status_line + strlen(status_line), sizeof(status_line) - strlen(status_line),
+             " %s", status_str);
 
-    // 绘制页码信息
+    // 如果有书籍，拼接页码
     if (s_ble_state.current_book_id != 0) {
-        char page_info[64];
         if (s_ble_state.total_pages > 0) {
-            snprintf(page_info, sizeof(page_info), "第 %u / %u 页",
-                     s_ble_state.current_page + 1, s_ble_state.total_pages);
+            snprintf(status_line + strlen(status_line), sizeof(status_line) - strlen(status_line),
+                     " %u/%u", s_ble_state.current_page + 1, s_ble_state.total_pages);
         } else {
-            snprintf(page_info, sizeof(page_info), "第 %u 页",
-                     s_ble_state.current_page + 1);
+            snprintf(status_line + strlen(status_line), sizeof(status_line) - strlen(status_line),
+                     " %u", s_ble_state.current_page + 1);
         }
-        display_draw_text_menu(20, SCREEN_HEIGHT - 60, page_info, COLOR_BLACK, COLOR_WHITE);
     }
 
-    // 显示初始化确认提示
+    display_draw_text_menu(0, top_y, status_line, COLOR_BLACK, COLOR_WHITE);
+
+    // 显示初始化确认提示（未确认时显示）
     if (s_ble_state.current_book_id != 0 && !s_ble_state.initialization_complete) {
-        display_draw_text_menu(20, SCREEN_HEIGHT / 2 - 40,
-                               "点击确认开始阅读",
+        // 屏幕中央显示确认提示
+        int center_y = SCREEN_HEIGHT / 2;
+        display_draw_text_menu(20, center_y - 40, "点击确认开始阅读",
                                COLOR_BLACK, COLOR_WHITE);
-        display_draw_text_menu(20, SCREEN_HEIGHT / 2,
-                               "按 确认 键",
+        display_draw_text_menu(20, center_y, "按 确认 键",
                                COLOR_BLACK, COLOR_WHITE);
         s_ble_state.showing_confirm_prompt = true;
-    } else {
-        s_ble_state.showing_confirm_prompt = false;
-    }
 
-    // 绘制底部提示
-    if (!s_ble_state.initialization_complete && s_ble_state.current_book_id != 0) {
+        // 底部按键提示
         display_draw_text_menu(20, SCREEN_HEIGHT - 40,
                                "确认: 开始",
                                COLOR_BLACK, COLOR_WHITE);
+    } else if (s_ble_state.current_book_id == 0) {
+        // 未选择书籍
+        display_draw_text_menu(20, 100, "未选择书籍", COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_menu(20, 140, "等待手机发送内容...", COLOR_BLACK, COLOR_WHITE);
+        s_ble_state.showing_confirm_prompt = false;
     } else {
-        display_draw_text_menu(20, SCREEN_HEIGHT - 40,
-                               "上: 上页  下: 下页  返回: 退出",
-                               COLOR_BLACK, COLOR_WHITE);
+        // 已确认，显示内容
+        s_ble_state.showing_confirm_prompt = false;
+
+        // 如果需要清除内容区域（滚动时）
+        if (clear_content) {
+            int content_x = 10;
+            int content_y = 30;
+            int content_width = SCREEN_WIDTH - 20;
+            int content_height = SCREEN_HEIGHT - content_y - 10;
+            display_clear_region(content_x, content_y, content_width, content_height, COLOR_WHITE);
+        }
+
+        // 绘制页面内容（TXT 直接渲染）
+        char slot_path[64];
+        bool slot_ready = slot_get_path_if_ready((int32_t)s_ble_state.current_page, slot_path, sizeof(slot_path));
+
+        if (slot_ready) {
+            // 使用互斥锁防止与 BLE 接收冲突
+            static char text_buf[BLE_TEXT_MAX_BYTES];
+
+            if (x4im_rx_mutex != NULL && xSemaphoreTake(x4im_rx_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                FILE *f = fopen(slot_path, "rb");
+                if (f != NULL) {
+                    size_t read = fread(text_buf, 1, sizeof(text_buf) - 1, f);
+                    fclose(f);
+
+                    // 确保数据有效且有内容
+                    if (read > 0) {
+                        text_buf[read] = '\0';
+
+                        // 内容区域从顶部信息下方开始，留出足够空间
+                        int content_x = 10;
+                        int content_y = 30;  // 左上角信息之后开始
+                        int content_width = SCREEN_WIDTH - 20;
+                        int content_height = SCREEN_HEIGHT - content_y - 10;
+                        draw_wrapped_text(content_x, content_y, content_width, content_height, text_buf, s_ble_state.char_position);
+                    } else {
+                        // 文件为空，显示提示
+                        display_draw_text_menu(20, 100, "文件为空", COLOR_BLACK, COLOR_WHITE);
+                    }
+                } else {
+                    slot_ready = false;  // 文件被移除或打开失败，按等待处理
+                }
+                xSemaphoreGive(x4im_rx_mutex);
+            } else {
+                // 获取互斥锁超时或失败，显示等待提示
+                display_draw_text_menu(20, 100, "正在加载...", COLOR_BLACK, COLOR_WHITE);
+            }
+        }
+
+        if (!slot_ready) {
+            // 页面缺失或尚未写完，显示等待提示
+            display_draw_text_menu(20, 100, "等待加载...", COLOR_BLACK, COLOR_WHITE);
+
+            // 如果正在接收这一页，显示进度
+            if (x4im_rx_state.receiving &&
+                x4im_rx_state.expected_size > 0 &&
+                x4im_rx_state.logical_index == (int32_t)s_ble_state.current_page) {
+                char progress[64];
+                float percent = (float)x4im_rx_state.received_size * 100.0f / x4im_rx_state.expected_size;
+                snprintf(progress, sizeof(progress), "接收中: %.0f%% (%lu/%lu 字节)",
+                         percent, (unsigned long)x4im_rx_state.received_size, (unsigned long)x4im_rx_state.expected_size);
+                display_draw_text_menu(20, 140, progress, COLOR_BLACK, COLOR_WHITE);
+            } else {
+                display_draw_text_menu(20, 140, "正在从手机请求...", COLOR_BLACK, COLOR_WHITE);
+            }
+        }
     }
 }
 
@@ -1662,43 +1974,105 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
 {
     switch (btn) {
         case BTN_LEFT:
-        case BTN_VOLUME_UP:
-            // 上一页 - 立即翻页（有缓存就显示）
+            // 请求上一个 TXT 文本
             if (s_ble_state.current_book_id != 0 && !s_ble_state.initialization_complete) {
                 break; // 在确认前不响应翻页
             }
             if (s_ble_state.current_page > 0) {
-                // 立即翻到上一页（无防抖，有缓存直接显示）
+                // 立即翻到上一页
                 s_ble_state.current_page--;
-                
-                ESP_LOGI(TAG, "Page turned to: %u (UP)", s_ble_state.current_page);
-                
+                s_ble_state.char_position = 0;  // 重置字符位置
+
+                ESP_LOGI(TAG, "Requesting previous page: %u", s_ble_state.current_page);
+
                 // 更新缓存窗口（预加载前后页）
                 update_cached_window(s_ble_state.current_page);
-                
+
                 // 请求手机发送缓存窗口内的页面（前、当前、后）
                 send_page_sync_notification(s_ble_state.current_page);
             }
             break;
 
         case BTN_RIGHT:
-        case BTN_VOLUME_DOWN:
-            // 下一页 - 立即翻页（有缓存就显示）
+            // 请求下一个 TXT 文本
             if (s_ble_state.current_book_id != 0 && !s_ble_state.initialization_complete) {
                 break; // 在确认前不响应翻页
             }
-            if (s_ble_state.total_pages == 0 || 
+            if (s_ble_state.total_pages == 0 ||
                 s_ble_state.current_page < s_ble_state.total_pages - 1) {
-                // 立即翻到下一页（无防抖，有缓存直接显示）
+                // 立即翻到下一页
                 s_ble_state.current_page++;
-                
-                ESP_LOGI(TAG, "Page turned to: %u (DOWN)", s_ble_state.current_page);
-                
+                s_ble_state.char_position = 0;  // 重置字符位置
+
+                ESP_LOGI(TAG, "Requesting next page: %u", s_ble_state.current_page);
+
                 // 更新缓存窗口（预加载前后页）
                 update_cached_window(s_ble_state.current_page);
-                
+
                 // 请求手机发送缓存窗口内的页面（前、当前、后）
                 send_page_sync_notification(s_ble_state.current_page);
+            }
+            break;
+
+        case BTN_VOLUME_UP:
+            // 视觉上一页（向上滚动）- 使用局刷
+            if (s_ble_state.current_book_id != 0 && !s_ble_state.initialization_complete) {
+                break; // 在确认前不响应
+            }
+            // 向上滚动：减少字符位置（使用饱和减法避免下溢）
+            if (s_ble_state.char_position >= CHARS_PER_SCREEN) {
+                s_ble_state.char_position -= CHARS_PER_SCREEN;
+            } else if (s_ble_state.char_position > 0) {
+                s_ble_state.char_position = 0;
+            }
+            ESP_LOGI(TAG, "Visual scroll UP: char_position=%zu", s_ble_state.char_position);
+            // 使用局刷刷新内容区域，清除旧内容
+            draw_reading_mode_screen(true);
+            display_refresh(REFRESH_MODE_PARTIAL);
+            break;
+
+        case BTN_VOLUME_DOWN:
+            // 视觉下一页（向下滚动）- 使用局刷
+            if (s_ble_state.current_book_id != 0 && !s_ble_state.initialization_complete) {
+                break; // 在确认前不响应
+            }
+            // 向下滚动：增加字符位置
+            s_ble_state.char_position += CHARS_PER_SCREEN;
+
+            // 检测是否超过当前页面的字符数，如果超过则加载下一页
+            if (s_ble_state.total_chars > 0 && s_ble_state.char_position >= s_ble_state.total_chars) {
+                // 需要加载下一页
+                if (s_ble_state.total_pages == 0 || s_ble_state.current_page < s_ble_state.total_pages - 1) {
+                    s_ble_state.current_page++;
+                    s_ble_state.char_position = 0;  // 重置到下一页的开始
+
+                    ESP_LOGI(TAG, "Auto-loading next page: %u", s_ble_state.current_page);
+
+                    // 更新缓存窗口
+                    update_cached_window(s_ble_state.current_page);
+
+                    // 请求手机发送新页面
+                    send_page_sync_notification(s_ble_state.current_page);
+
+                    // 使用全刷新，因为是新页面
+                    draw_reading_mode_screen(false);
+                    display_refresh(REFRESH_MODE_FULL);
+                } else {
+                    // 已经是最后一页，限制在最后一页的末尾
+                    if (s_ble_state.total_chars > CHARS_PER_SCREEN) {
+                        s_ble_state.char_position = s_ble_state.total_chars - CHARS_PER_SCREEN;
+                    } else {
+                        s_ble_state.char_position = 0;
+                    }
+                    ESP_LOGI(TAG, "Visual scroll DOWN: char_position=%zu (last page)", s_ble_state.char_position);
+                    draw_reading_mode_screen(true);
+                    display_refresh(REFRESH_MODE_PARTIAL);
+                }
+            } else {
+                // 仍在当前页面内，使用局刷
+                ESP_LOGI(TAG, "Visual scroll DOWN: char_position=%zu", s_ble_state.char_position);
+                draw_reading_mode_screen(true);
+                display_refresh(REFRESH_MODE_PARTIAL);
             }
             break;
 
@@ -1776,6 +2150,10 @@ static void on_show(screen_t *screen)
     if (!init_page_buffer()) {
         ESP_LOGW(TAG, "Page buffer allocation failed due to fragmentation, will read pages directly to framebuffer");
     }
+
+    // 初始化三槽窗口目录并重置状态
+    slot_init();
+    slot_prepare_window((int32_t)s_ble_state.current_page);
 
     // 注册蓝牙回调
     ble_manager_register_connect_cb(ble_connect_callback);
@@ -1883,6 +2261,8 @@ void ble_reader_screen_set_current_book(uint16_t book_id)
     s_ble_state.current_page = 0;
     s_ble_state.state = BLE_READER_STATE_READING;
 
+    update_cached_window(s_ble_state.current_page);
+
     // 尝试加载第一页
     load_current_page();
 }
@@ -1895,6 +2275,7 @@ void ble_reader_screen_goto_page(uint16_t page_num)
     }
 
     s_ble_state.current_page = page_num;
+    update_cached_window(s_ble_state.current_page);
     load_current_page();
 
     screen_t *screen = screen_manager_get_current();
@@ -1915,6 +2296,7 @@ void ble_reader_screen_next_page(void)
     }
 
     s_ble_state.current_page++;
+    update_cached_window(s_ble_state.current_page);
     load_current_page();
 
     screen_t *screen = screen_manager_get_current();
@@ -1930,6 +2312,7 @@ void ble_reader_screen_prev_page(void)
     }
 
     s_ble_state.current_page--;
+    update_cached_window(s_ble_state.current_page);
     load_current_page();
 
     screen_t *screen = screen_manager_get_current();
