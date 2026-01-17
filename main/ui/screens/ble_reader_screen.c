@@ -44,6 +44,11 @@ static const char *TAG = "BLE_READER";
 #define BLE_TEXT_MAX_BYTES 4096  // 减小缓冲区以节省内存 (原8192太大导致内存碎片)
 // 每屏显示的字符数通过 calculate_chars_per_screen() 动态计算，基于实际屏幕尺寸和字体参数
 
+// 内容区域布局常量（显示、翻页、消耗计算统一使用）
+#define BLE_CONTENT_Y_START 30      // 内容区域起始 Y（页码信息下方）
+#define BLE_CONTENT_BOTTOM_MARGIN 10 // 底部留白
+#define BLE_CONTENT_X_MARGIN 10      // 左右边距
+
 // 固定 3 槽滑动窗口（-1, 0, +1）
 #define BLE_SLOT_DIR   "/littlefs/ble_slots"
 #define BLE_SLOT_COUNT 3
@@ -107,6 +112,11 @@ typedef struct {
     // ========== 文本阅读位置 ==========
     size_t char_position;                // 当前 TXT 文件内的字符位置
     size_t total_chars;                  // 当前 TXT 文件的总字符数
+
+    // ===== 翻页游标与历史 =====
+    size_t last_page_consumed;           // 最近一次绘制实际消耗的显示字符数（不含换行，忽略换行后的前导空白）
+    size_t history_char_pos[16];         // 历史页起始游标（字符位置）
+    uint8_t history_len;                 // 历史深度
 
     // ========== 传输模式状态 ==========
     uint32_t transfer_bytes_received;   // 已接收字节数
@@ -379,120 +389,131 @@ static int utf8_char_len(unsigned char c)
 }
 
 /**
- * @brief 计算 UTF-8 字符串中的字符数（不是字节数）
+ * @brief 计算 UTF-8 字符串的显示字符数（含换行符，每个 \n 计 1 字符）
  */
 static size_t count_utf8_chars(const char *str)
 {
-    if (str == NULL || *str == '\0') {
-        return 0;
-    }
-
+    if (!str) return 0;
     size_t count = 0;
-    const char *p = str;
-
-    while (*p != '\0') {
-        int clen = utf8_char_len((unsigned char)*p);
-        if (clen <= 0) clen = 1;
-        p += clen;
+    for (const char *p = str; *p; ) {
+        int clen = (*p == '\n') ? 1 : utf8_char_len((unsigned char)*p);
+        p += (clen > 0) ? clen : 1;
         count++;
     }
-
     return count;
 }
 
-static void draw_wrapped_text(int x, int y, int max_width, int max_height, const char *text, size_t char_offset)
+
+/**
+ * @brief 获取字体布局参数
+ */
+static void get_text_layout_params(sFONT **font, int *line_height)
 {
-    if (text == NULL || *text == '\0') {
-        return;
-    }
+    *font = display_get_default_ascii_font();
+    int font_h = xt_eink_font_get_height();
+    *line_height = ((font_h > 0) ? font_h : 25) + 4;  // 字体高度 + 行距
+}
 
-    // 安全检查：如果 char_offset 异常大，限制在合理范围内
-    size_t max_chars = count_utf8_chars(text);
-    if (char_offset > max_chars) {
-        char_offset = 0;  // 重置到开头，避免越界
-        ESP_LOGW(TAG, "char_offset %zu > max_chars %zu, resetting to 0", char_offset, max_chars);
-    }
+/**
+ * @brief 通用文本处理：绘制或测量消耗字符数
+ * @return 消耗的字符数（含换行符）
+ */
+static size_t process_wrapped_text(int x, int y, int max_width, int max_height,
+                                   const char *text, size_t char_offset, bool do_draw)
+{
+    if (!text || !*text) return 0;
 
-    sFONT *ui_font = display_get_default_ascii_font();
-    if (ui_font == NULL) {
-        ESP_LOGE(TAG, "ui_font is NULL!");
-        return;
-    }
+    sFONT *font;
+    int line_height;
+    get_text_layout_params(&font, &line_height);
+    if (!font) return 0;
 
-    int chinese_font_height = xt_eink_font_get_height();
-    if (chinese_font_height <= 0) {
-        chinese_font_height = 25;
-    }
-    int line_spacing = 4;
-    int line_height = chinese_font_height + line_spacing;
-
-    // 跳过 char_offset 个字符，找到开始显示的位置
+    // 跳过 char_offset 个字符到达起始位置
     const char *p = text;
-    size_t char_count = 0;
-
-    while (*p != '\0' && char_count < char_offset) {
-        int clen = utf8_char_len((unsigned char)*p);
-        if (clen <= 0) clen = 1;
-        p += clen;
-        char_count++;
+    for (size_t i = 0; i < char_offset && *p; i++) {
+        int clen = (*p == '\n') ? 1 : utf8_char_len((unsigned char)*p);
+        p += (clen > 0) ? clen : 1;
     }
 
-    // 从跳过的位置开始绘制
     char line[256];
     int line_len = 0;
-    int cur_y = y;
+    int cur_y = do_draw ? y : 0;
+    int y_limit = do_draw ? (y + max_height) : max_height;
+    size_t consumed = 0;
 
-    while (*p != '\0' && cur_y + line_height <= y + max_height) {
+    while (*p && cur_y + line_height <= y_limit) {
+        // 换行符处理
         if (*p == '\n') {
-            p++;
-            if (line_len > 0) {
+            if (do_draw && line_len > 0) {
                 line[line_len] = '\0';
-                display_draw_text_font(x, cur_y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
-                line_len = 0;
+                display_draw_text_font(x, cur_y, line, font, COLOR_BLACK, COLOR_WHITE);
             }
+            line_len = 0;
             cur_y += line_height;
+            consumed++;
+            p++;
             continue;
         }
 
         int clen = utf8_char_len((unsigned char)*p);
         if (clen <= 0) clen = 1;
+
+        // 行缓冲溢出保护
         if (line_len + clen >= (int)sizeof(line) - 1) {
-            line[line_len] = '\0';
-            display_draw_text_font(x, cur_y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
+            if (do_draw) {
+                line[line_len] = '\0';
+                display_draw_text_font(x, cur_y, line, font, COLOR_BLACK, COLOR_WHITE);
+            }
             line_len = 0;
             cur_y += line_height;
-
-            if (cur_y + line_height > y + max_height) {
-                break;
-            }
+            if (cur_y + line_height > y_limit) break;
             continue;
         }
 
+        // 尝试添加字符
         memcpy(line + line_len, p, clen);
         line_len += clen;
         line[line_len] = '\0';
 
-        int width = display_get_text_width_font(line, ui_font);
-        if (width > max_width && line_len > clen) {
+        // 检测超宽
+        if (display_get_text_width_font(line, font) > max_width && line_len > clen) {
+            // 回退当前字符，输出当前行
             line_len -= clen;
             line[line_len] = '\0';
-            display_draw_text_font(x, cur_y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
+            if (do_draw) {
+                display_draw_text_font(x, cur_y, line, font, COLOR_BLACK, COLOR_WHITE);
+            }
             line_len = 0;
             cur_y += line_height;
-
-            if (cur_y + line_height > y + max_height) {
-                break;
-            }
+            if (cur_y + line_height > y_limit) break;
+            // 不移动 p，下次循环重新处理这个字符
             continue;
         }
 
+        // 成功添加字符
+        consumed++;
         p += clen;
     }
 
-    if (line_len > 0 && cur_y + line_height <= y + max_height) {
+    // 输出最后一行
+    if (do_draw && line_len > 0 && cur_y + line_height <= y_limit) {
         line[line_len] = '\0';
-        display_draw_text_font(x, cur_y, line, ui_font, COLOR_BLACK, COLOR_WHITE);
+        display_draw_text_font(x, cur_y, line, font, COLOR_BLACK, COLOR_WHITE);
     }
+
+    return consumed;
+}
+
+static void draw_wrapped_text(int x, int y, int max_width, int max_height,
+                              const char *text, size_t char_offset)
+{
+    process_wrapped_text(x, y, max_width, max_height, text, char_offset, true);
+}
+
+static size_t measure_wrapped_consumed(int max_width, int max_height,
+                                       const char *text, size_t char_offset)
+{
+    return process_wrapped_text(0, 0, max_width, max_height, text, char_offset, false);
 }
 
 /**
@@ -1545,7 +1566,7 @@ static void __attribute__((unused)) handle_page_data(const uint8_t *data, size_t
                     }
 
                     if (x4im_rx_state.logical_index == (int32_t)s_ble_state.current_page) {
-                        // 只在当前页完成时统计字符数
+                        // 只在当前页完成时统计字符数（不包含换行符）
                         char filename[64];
                         snprintf(filename, sizeof(filename), "%s", x4im_rx_state.filename);
                         FILE *f = fopen(filename, "rb");
@@ -1555,7 +1576,7 @@ static void __attribute__((unused)) handle_page_data(const uint8_t *data, size_t
                             fclose(f);
                             text_buf[read] = '\0';
                             s_ble_state.total_chars = count_utf8_chars(text_buf);
-                            ESP_LOGI(TAG, "Page loaded: %zu UTF-8 characters", s_ble_state.total_chars);
+                            ESP_LOGI(TAG, "Page loaded: %zu display characters (excluding newlines)", s_ble_state.total_chars);
                         } else {
                             s_ble_state.total_chars = 0;
                             ESP_LOGW(TAG, "Failed to count characters in page");
@@ -1915,13 +1936,11 @@ static int calculate_chars_per_screen(void)
     int line_spacing = 4;
     int font_height = chinese_font_height + line_spacing;
 
-    // 内容区域从 y=30 开始，底部留 10 像素
-    int content_y = 30;
-    int usable_height = SCREEN_HEIGHT - content_y - 10;
+    // 使用统一的内容区域布局常量
+    int usable_height = SCREEN_HEIGHT - BLE_CONTENT_Y_START - BLE_CONTENT_BOTTOM_MARGIN;
     int lines_per_screen = usable_height / font_height;
-
-    // 左右各留 10 像素边距
-    int max_width = SCREEN_WIDTH - 20;
+    // 左右各留边距
+    int max_width = SCREEN_WIDTH - 2 * BLE_CONTENT_X_MARGIN;
     int chars_per_line = max_width / chinese_font_width;
     int total_chars = lines_per_screen * chars_per_line;
 
@@ -2009,11 +2028,9 @@ static void draw_reading_mode_screen(bool clear_content)
 
         // 如果需要清除内容区域（滚动时）
         if (clear_content) {
-            int content_x = 10;
-            int content_y = 30;
-            int content_width = SCREEN_WIDTH - 20;
-            int content_height = SCREEN_HEIGHT - content_y - 10;
-            display_clear_region(content_x, content_y, content_width, content_height, COLOR_WHITE);
+            int content_width = SCREEN_WIDTH - 2 * BLE_CONTENT_X_MARGIN;
+            int content_height = SCREEN_HEIGHT - BLE_CONTENT_Y_START - BLE_CONTENT_BOTTOM_MARGIN;
+            display_clear_region(BLE_CONTENT_X_MARGIN, BLE_CONTENT_Y_START, content_width, content_height, COLOR_WHITE);
         }
 
         // 绘制页面内容（TXT 直接渲染）
@@ -2034,12 +2051,12 @@ static void draw_reading_mode_screen(bool clear_content)
                     if (read > 0) {
                         text_buf[read] = '\0';
 
-                        // 内容区域从顶部信息下方开始，留出足够空间
-                        int content_x = 10;
-                        int content_y = 30;  // 左上角信息之后开始
-                        int content_width = SCREEN_WIDTH - 20;
-                        int content_height = SCREEN_HEIGHT - content_y - 10;
-                        draw_wrapped_text(content_x, content_y, content_width, content_height, text_buf, s_ble_state.char_position);
+                        // 内容区域：使用统一的布局常量
+                        int content_width = SCREEN_WIDTH - 2 * BLE_CONTENT_X_MARGIN;
+                        int content_height = SCREEN_HEIGHT - BLE_CONTENT_Y_START - BLE_CONTENT_BOTTOM_MARGIN;
+                        // 先计算本页可消耗的显示字符数（用于精确翻页）
+                        s_ble_state.last_page_consumed = measure_wrapped_consumed(content_width, content_height, text_buf, s_ble_state.char_position);
+                        draw_wrapped_text(BLE_CONTENT_X_MARGIN, BLE_CONTENT_Y_START, content_width, content_height, text_buf, s_ble_state.char_position);
                     } else {
                         // 文件为空，显示提示
                         display_draw_text_menu(20, 100, "文件为空", COLOR_BLACK, COLOR_WHITE);
@@ -2192,10 +2209,9 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
             if (s_ble_state.current_book_id != 0 && !s_ble_state.initialization_complete) {
                 break; // 在确认前不响应
             }
-            // 向上滚动：减少字符位置（使用饱和减法避免下溢）
-            int chars_per_screen_up = calculate_chars_per_screen();
-            if (s_ble_state.char_position >= (size_t)chars_per_screen_up) {
-                s_ble_state.char_position -= (size_t)chars_per_screen_up;
+            // 精确上一页：从历史栈恢复上一页起始游标
+            if (s_ble_state.history_len > 0) {
+                s_ble_state.char_position = s_ble_state.history_char_pos[--s_ble_state.history_len];
             } else if (s_ble_state.char_position > 0) {
                 s_ble_state.char_position = 0;
             }
@@ -2214,9 +2230,17 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
             if (s_ble_state.current_book_id != 0 && !s_ble_state.initialization_complete) {
                 break; // 在确认前不响应
             }
-            // 向下滚动：增加字符位置
-            int chars_per_screen = calculate_chars_per_screen();
-            s_ble_state.char_position += (size_t)chars_per_screen;
+            // 精确下一页：记录当前页起点到历史，然后按实际消耗推进游标
+            if (s_ble_state.history_len < (uint8_t)(sizeof(s_ble_state.history_char_pos)/sizeof(s_ble_state.history_char_pos[0]))) {
+                s_ble_state.history_char_pos[s_ble_state.history_len++] = s_ble_state.char_position;
+            }
+            size_t step = s_ble_state.last_page_consumed;
+            int chars_per_screen_est = calculate_chars_per_screen();
+            // 确保至少翻一整屏：取实际测量与估算中的较大值
+            if (step < (size_t)((chars_per_screen_est > 0) ? chars_per_screen_est : 1)) {
+                step = (size_t)((chars_per_screen_est > 0) ? chars_per_screen_est : 1);
+            }
+            s_ble_state.char_position += step;
 
             // 检测是否超过当前页面的字符数，如果超过则加载下一页
             if (s_ble_state.total_chars > 0 && s_ble_state.char_position >= s_ble_state.total_chars) {
@@ -2240,9 +2264,11 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
                     draw_reading_mode_screen(false);
                     display_refresh(REFRESH_MODE_FULL);
                 } else {
-                    // 已经是最后一页，限制在最后一页的末尾
-                    if (s_ble_state.total_chars > (size_t)chars_per_screen) {
-                        s_ble_state.char_position = s_ble_state.total_chars - (size_t)chars_per_screen;
+                    // 已经是最后一页：限制在最后一页的末尾，使用 step 作为估算宽度
+                    // 最后一页时同样取“实际消耗/估算”的较大值，避免只滚动一行
+                    size_t tail_est = (s_ble_state.last_page_consumed > step) ? s_ble_state.last_page_consumed : step;
+                    if (s_ble_state.total_chars > tail_est) {
+                        s_ble_state.char_position = s_ble_state.total_chars - tail_est;
                     } else {
                         s_ble_state.char_position = 0;
                     }
