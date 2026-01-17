@@ -57,6 +57,10 @@ typedef struct {
 static ble_slot_entry_t s_slots[BLE_SLOT_COUNT];
 
 // ========== X4IM v2 命令定义 ==========
+// 魔术头：所有命令必须以此开头，避免与 UTF-8 文本冲突
+#define X4IM_MAGIC_HEADER_0        0xA5
+#define X4IM_MAGIC_HEADER_1        0x5A
+
 #define X4IM_CMD_SET_MODE          0x8C    // 设置工作模式
 #define X4IM_CMD_GET_MODE          0x8D    // 查询当前模式
 #define X4IM_CMD_FILE_NOTIFY       0x8B    // 文件通知
@@ -147,10 +151,10 @@ static uint16_t s_buffered_page_id = 0xFFFF; // 0xFFFF 表示无效/未加载
  *  STATIC PROTOTYPES
  **********************/
 
-static void on_show(screen_t *screen);
-static void on_hide(screen_t *screen);
-static void on_draw(screen_t *screen);
-static void on_event(screen_t *screen, button_t btn, button_event_t event);
+static void __attribute__((unused)) on_show(screen_t *screen);
+static void __attribute__((unused)) on_hide(screen_t *screen);
+static void __attribute__((unused)) on_draw(screen_t *screen);
+static void __attribute__((unused)) on_event(screen_t *screen, button_t btn, button_event_t event);
 
 // 小窗口槽位管理
 static bool ensure_slot_dir(void);
@@ -166,21 +170,21 @@ static void ble_connect_callback(bool connected);
 static void ble_data_received_callback(const uint8_t *data, uint16_t length);
 
 // 协议回调
-static bool on_page_ready(uint16_t book_id, uint16_t page_num);
-static void on_preload_needed(uint16_t book_id, uint16_t start_page, uint8_t page_count);
+static bool __attribute__((unused)) on_page_ready(uint16_t book_id, uint16_t page_num);
+static void __attribute__((unused)) on_preload_needed(uint16_t book_id, uint16_t start_page, uint8_t page_count);
 
 // 双模式界面绘制
-static void draw_transfer_mode_screen(void);
-static void draw_reading_mode_screen(bool clear_content);
+static void __attribute__((unused)) draw_transfer_mode_screen(void);
+static void __attribute__((unused)) draw_reading_mode_screen(bool clear_content);
 
 // 双模式按键处理
-static void handle_transfer_mode_button(screen_t *screen, button_t btn);
-static void handle_reading_mode_button(screen_t *screen, button_t btn);
+static void __attribute__((unused)) handle_transfer_mode_button(screen_t *screen, button_t btn);
+static void __attribute__((unused)) handle_reading_mode_button(screen_t *screen, button_t btn);
 
 // 翻页防抖和同步
-static void send_page_sync_notification(uint16_t page_num);
-static void send_position_snapshot(void);
-static void update_cached_window(uint16_t current_page);
+static void __attribute__((unused)) send_page_sync_notification(uint16_t page_num);
+static void __attribute__((unused)) send_position_snapshot(void);
+static void __attribute__((unused)) update_cached_window(uint16_t current_page);
 static void __attribute__((unused)) cleanup_old_pages(uint16_t current_page);
 
 /**********************
@@ -631,6 +635,9 @@ static void scan_directory_recursive(const char *path, int *file_count, int *dir
     depth--;
 }
 
+// 前向声明
+static void handle_page_data(const uint8_t *data, size_t length);
+
 /**
  * @brief 蓝牙数据接收回调 - 支持 X4IM 位图协议（流式写入文件）
  */
@@ -656,10 +663,39 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
     ESP_LOGI(TAG, "First 4 bytes: 0x%02X 0x%02X 0x%02X 0x%02X",
              data[0], data[1], data[2], data[3]);
 
+    // ========== 检查魔术头（命令包） ==========
+    // 所有命令包必须以 [0xA5, 0x5A, CMD, ...] 开头
+    bool is_command = false;
+    if (length >= 3 && data[0] == X4IM_MAGIC_HEADER_0 && data[1] == X4IM_MAGIC_HEADER_1) {
+        is_command = true;
+        ESP_LOGI(TAG, "Detected command packet, CMD=0x%02X", data[2]);
+    } else {
+        ESP_LOGI(TAG, "Detected data packet (no magic header), treating as page data");
+    }
+
+    // 如果不是命令包，按普通数据处理（页面数据）
+    if (!is_command) {
+        // 旧的页面数据处理逻辑
+        if (s_ble_state.work_mode != BLE_MODE_READING) {
+            ESP_LOGW(TAG, "Data packet received but not in READING mode, discarding");
+            free((void *)data);
+            return;
+        }
+
+        // 将数据写入槽位（handle_page_data 会负责释放 data 内存）
+        handle_page_data(data, length);
+        return;  // handle_page_data 已经释放了 data，这里不需要再释放
+    }
+
+    // 以下是命令处理逻辑，跳过魔术头
+    const uint8_t *cmd_data = &data[2];  // 跳过 [0xA5, 0x5A]
+    size_t cmd_length = length - 2;
+    uint8_t cmd = cmd_data[0];
+
     // ========== 处理模式控制命令 ==========
-    // SET_MODE 命令：2字节 [0x8C, mode]
-    if (length == 2 && data[0] == X4IM_CMD_SET_MODE) {
-        uint8_t new_mode = data[1];
+    // SET_MODE 命令：[0xA5, 0x5A, 0x8C, mode] 共4字节
+    if (cmd_length == 2 && cmd == X4IM_CMD_SET_MODE) {
+        uint8_t new_mode = cmd_data[1];
         ESP_LOGI(TAG, "Received SET_MODE command: %s",
                  new_mode == BLE_MODE_READING ? "READING" : "TRANSFER");
         
@@ -680,8 +716,8 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         return;
     }
     
-    // GET_MODE 命令：1字节 [0x8D]
-    if (length == 1 && data[0] == X4IM_CMD_GET_MODE) {
+    // GET_MODE 命令：[0xA5, 0x5A, 0x8D] 共3字节
+    if (cmd_length == 1 && cmd == X4IM_CMD_GET_MODE) {
         ESP_LOGI(TAG, "Received GET_MODE query");
         
         // 发送当前模式 [0x8D, mode]
@@ -695,12 +731,12 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
     }
 
     // ========== 设置书籍/章节哈希 ==========
-    // SET_BOOK_CHAPTER: [0x98, bookHash(4B,LE), chapterHash(4B,LE)] 共9字节
-    if (length == 9 && data[0] == X4IM_CMD_SET_BOOK_CHAPTER) {
-        uint32_t book_hash = (uint32_t)data[1] | ((uint32_t)data[2] << 8) |
-                             ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 24);
-        uint32_t chapter_hash = (uint32_t)data[5] | ((uint32_t)data[6] << 8) |
-                                ((uint32_t)data[7] << 16) | ((uint32_t)data[8] << 24);
+    // SET_BOOK_CHAPTER: [0xA5, 0x5A, 0x98, bookHash(4B,LE), chapterHash(4B,LE)] 共11字节
+    if (cmd_length == 9 && cmd == X4IM_CMD_SET_BOOK_CHAPTER) {
+        uint32_t book_hash = (uint32_t)cmd_data[1] | ((uint32_t)cmd_data[2] << 8) |
+                             ((uint32_t)cmd_data[3] << 16) | ((uint32_t)cmd_data[4] << 24);
+        uint32_t chapter_hash = (uint32_t)cmd_data[5] | ((uint32_t)cmd_data[6] << 8) |
+                                ((uint32_t)cmd_data[7] << 16) | ((uint32_t)cmd_data[8] << 24);
 
         bool changed = (book_hash != s_ble_state.current_book_hash) ||
                        (chapter_hash != s_ble_state.current_chapter_hash);
@@ -727,17 +763,17 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
 
     // ========== SD 卡文件管理命令 ==========
     // LIST_FILES 命令：扫描 /sdcard/ 根目录
-    // 格式: [0x8E, 路径长度, 路径...] - 可选路径，默认 /sdcard/
-    if (length >= 1 && data[0] == X4IM_CMD_LIST_FILES) {
+    // 格式: [0xA5, 0x5A, 0x8E, 路径长度, 路径...] - 可选路径，默认 /sdcard/
+    if (cmd_length >= 1 && cmd == X4IM_CMD_LIST_FILES) {
         const char *scan_path = "/sdcard";
         char path_buf[256] = {0};
 
-        if (length > 1) {
-            // 有路径参数： [0x8E, 路径长度, 路径...]
-            int path_len = data[1];
-            if (path_len > length - 2) path_len = length - 2;
+        if (cmd_length > 1) {
+            // 有路径参数： [0xA5, 0x5A, 0x8E, 路径长度, 路径...]
+            int path_len = cmd_data[1];
+            if (path_len > cmd_length - 2) path_len = cmd_length - 2;
             if (path_len > sizeof(path_buf) - 1) path_len = sizeof(path_buf) - 1;
-            memcpy(path_buf, &data[2], path_len);
+            memcpy(path_buf, &cmd_data[2], path_len);
             path_buf[path_len] = '\0';
             if (path_len > 0) {
                 scan_path = path_buf;
@@ -805,9 +841,9 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         return;
     }
 
-    // DELETE_FILE 命令：[0x8F, 路径...]
+    // DELETE_FILE 命令：[0xA5, 0x5A, 0x8F, 路径...]
     // 客户端已发送完整路径（包含/sdcard/）
-    if (length > 1 && data[0] == X4IM_CMD_DELETE_FILE) {
+    if (cmd_length > 1 && cmd == X4IM_CMD_DELETE_FILE) {
         char *filepath = malloc(512);
         if (!filepath) {
             ESP_LOGE(TAG, "Failed to allocate filepath buffer for DELETE_FILE");
@@ -816,9 +852,9 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
             free((void *)data);
             return;
         }
-        int name_len = length - 1;
+        int name_len = cmd_length - 1;
         if (name_len > 511) name_len = 511;
-        memcpy(filepath, &data[1], name_len);
+        memcpy(filepath, &cmd_data[1], name_len);
         filepath[name_len] = '\0';
 
         ESP_LOGI(TAG, "Deleting: %s", filepath);
@@ -879,8 +915,8 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         return;
     }
 
-    // CLEAR_BOOKS 命令：1字节 [0x91] - 清空 /sdcard/books 目录
-    if (length == 1 && data[0] == X4IM_CMD_CLEAR_BOOKS) {
+    // CLEAR_BOOKS 命令：[0xA5, 0x5A, 0x91] - 清空 /sdcard/books 目录
+    if (cmd_length == 1 && cmd == X4IM_CMD_CLEAR_BOOKS) {
         ESP_LOGW(TAG, "Received CLEAR_BOOKS command - deleting all files in /sdcard/books");
 
         // 使用 fs_list_dir 获取文件列表
@@ -920,9 +956,9 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         return;
     }
 
-    // CREATE_DIR 命令：[0x92, 路径...]
+    // CREATE_DIR 命令：[0xA5, 0x5A, 0x92, 路径...]
     // 客户端已发送完整路径，直接创建即可
-    if (length > 1 && data[0] == X4IM_CMD_CREATE_DIR) {
+    if (cmd_length > 1 && cmd == X4IM_CMD_CREATE_DIR) {
         char *dirpath = malloc(512);
         if (!dirpath) {
             ESP_LOGE(TAG, "Failed to allocate dirpath buffer for CREATE_DIR");
@@ -931,9 +967,9 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
             free((void *)data);
             return;
         }
-        int name_len = length - 1;
+        int name_len = cmd_length - 1;
         if (name_len > 511) name_len = 511;
-        memcpy(dirpath, &data[1], name_len);
+        memcpy(dirpath, &cmd_data[1], name_len);
         dirpath[name_len] = '\0';
 
         ESP_LOGI(TAG, "Creating directory: %s", dirpath);
@@ -953,25 +989,25 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         return;
     }
 
-    // RENAME_FILE 命令：[0x90, 旧名长度, 旧名..., 新名长度, 新名...]
+    // RENAME_FILE 命令：[0xA5, 0x5A, 0x90, 旧名长度, 旧名..., 新名长度, 新名...]
     // 客户端已发送完整路径（包含/sdcard/）
-    if (length > 2 && data[0] == X4IM_CMD_RENAME_FILE) {
+    if (cmd_length > 2 && cmd == X4IM_CMD_RENAME_FILE) {
         int offset = 1;
-        int old_len = data[offset++];
-        if (old_len > length - offset - 1) old_len = length - offset - 1;
+        int old_len = cmd_data[offset++];
+        if (old_len > cmd_length - offset - 1) old_len = cmd_length - offset - 1;
         if (old_len > 490) old_len = 490;
 
         char oldpath[512];
-        memcpy(oldpath, &data[offset], old_len);
+        memcpy(oldpath, &cmd_data[offset], old_len);
         oldpath[old_len] = '\0';
         offset += old_len;
 
-        int new_len = data[offset++];
-        if (new_len > length - offset) new_len = length - offset;
+        int new_len = cmd_data[offset++];
+        if (new_len > cmd_length - offset) new_len = cmd_length - offset;
         if (new_len > 490) new_len = 490;
 
         char newpath[512];
-        memcpy(newpath, &data[offset], new_len);
+        memcpy(newpath, &cmd_data[offset], new_len);
         newpath[new_len] = '\0';
 
         ESP_LOGI(TAG, "Renaming: %s -> %s", oldpath, newpath);
@@ -990,8 +1026,8 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         return;
     }
 
-    // GET_STORAGE_INFO 命令：1字节 [0x93]
-    if (length == 1 && data[0] == X4IM_CMD_GET_STORAGE_INFO) {
+    // GET_STORAGE_INFO 命令：[0xA5, 0x5A, 0x93]
+    if (cmd_length == 1 && cmd == X4IM_CMD_GET_STORAGE_INFO) {
         ESP_LOGI(TAG, "Received GET_STORAGE_INFO command - scanning entire SD card");
 
         // 递归扫描 /sdcard/ 目录
@@ -1051,16 +1087,16 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         return;
     }
 
-    // READ_FILE 命令：[0x94, 偏移(4字节), 大小(4字节), 路径...]
+    // READ_FILE 命令：[0xA5, 0x5A, 0x94, 偏移(4字节), 大小(4字节), 路径...]
     // 读取文件的指定范围并发送给客户端
-    if (length > 9 && data[0] == X4IM_CMD_READ_FILE) {
-        uint32_t offset = data[1] | (data[2] << 8) | (data[3] << 16) | (data[4] << 24);
-        uint32_t read_size = data[5] | (data[6] << 8) | (data[7] << 16) | (data[8] << 24);
+    if (cmd_length > 9 && cmd == X4IM_CMD_READ_FILE) {
+        uint32_t offset = cmd_data[1] | (cmd_data[2] << 8) | (cmd_data[3] << 16) | (cmd_data[4] << 24);
+        uint32_t read_size = cmd_data[5] | (cmd_data[6] << 8) | (cmd_data[7] << 16) | (cmd_data[8] << 24);
         
         char filepath[512];
-        int path_len = length - 9;
+        int path_len = cmd_length - 9;
         if (path_len > sizeof(filepath) - 1) path_len = sizeof(filepath) - 1;
-        memcpy(filepath, &data[9], path_len);
+        memcpy(filepath, &cmd_data[9], path_len);
         filepath[path_len] = '\0';
 
         ESP_LOGI(TAG, "Reading file: %s (offset=%u, size=%u)", filepath, offset, read_size);
@@ -1155,6 +1191,18 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         return;
     }
 
+    // ========== 未识别的命令 ==========
+    ESP_LOGW(TAG, "Unknown command in packet: CMD=0x%02X, length=%zu", cmd, cmd_length);
+    free((void *)data);
+}
+
+/**
+ * @brief 处理页面数据（非命令数据）
+ * @param data 数据指针（会在函数内部释放）
+ * @param length 数据长度
+ */
+static void __attribute__((unused)) handle_page_data(const uint8_t *data, size_t length)
+{
     // 检查是否是 X4IM v2 帧头（32 字节）
     // "X4IM" + version(2) + flags(2) + payload_size(4) + sequence(2) + reserved(2) + filename(16)
     if (length >= X4IM_HEADER_SIZE && data[0] == 'X' && data[1] == '4' &&
@@ -1377,12 +1425,19 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                     screen->needs_redraw = true;
                     screen_manager_draw();
                 }
+                
+                // header packet 处理完成，释放内存并返回
+                free((void *)data);
+                return;
             } else {
                 xSemaphoreGive(x4im_rx_mutex);
+                // 还需要继续接收，释放内存并返回
+                free((void *)data);
+                return;
             }
         }
         
-        // 处理完毕，释放内存
+        // header packet 处理失败分支也要释放并返回
         free((void *)data);
         return;
     }
@@ -1398,10 +1453,11 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
             if (written != copy_len) {
                 ESP_LOGE(TAG, "File write error: expected %" PRIu32 ", wrote %lu", copy_len, (unsigned long)written);
                 fclose(x4im_rx_state.file_handle);
-                free((void *)data);  // 释放内存
                 x4im_rx_state.file_handle = NULL;
                 x4im_rx_state.receiving = false;
                 xSemaphoreGive(x4im_rx_mutex);
+                // 错误处理：释放内存并返回
+                free((void *)data);
                 return;
             }
 
@@ -1516,6 +1572,10 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                     screen->needs_redraw = true;
                     screen_manager_draw();
                 }
+                
+                // 完成接收，释放内存并返回
+                free((void *)data);
+                return;
             } else {
                 // 传输模式：定期触发重绘以更新进度
                 if (s_ble_state.work_mode == BLE_MODE_TRANSFER) {
@@ -1530,13 +1590,19 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                     }
                 }
                 xSemaphoreGive(x4im_rx_mutex);
+                // 继续接收中，释放内存并返回
+                free((void *)data);
+                return;
             }
         } else {
             xSemaphoreGive(x4im_rx_mutex);
+            // 未在接收状态，释放内存并返回
+            free((void *)data);
+            return;
         }
     }
     
-    // 所有路径最后都要释放内存
+    // 无法获取互斥锁，释放内存并返回
     free((void *)data);
 }
 
@@ -2340,7 +2406,7 @@ void ble_reader_screen_init(void)
     ESP_LOGI(TAG, "BLE reader screen initialized");
 }
 
-screen_t* ble_reader_screen_get_instance(void)
+screen_t* __attribute__((unused)) ble_reader_screen_get_instance(void)
 {
     if (g_ble_reader_screen.name == NULL) {
         ble_reader_screen_init();
@@ -2348,12 +2414,12 @@ screen_t* ble_reader_screen_get_instance(void)
     return &g_ble_reader_screen;
 }
 
-ble_reader_state_t ble_reader_screen_get_state(void)
+ble_reader_state_t __attribute__((unused)) ble_reader_screen_get_state(void)
 {
     return s_ble_state.state;
 }
 
-bool ble_reader_screen_connect_device(const uint8_t *addr)
+bool __attribute__((unused)) ble_reader_screen_connect_device(const uint8_t *addr)
 {
     if (addr == NULL) {
         return false;
@@ -2368,7 +2434,7 @@ bool ble_reader_screen_connect_device(const uint8_t *addr)
     return ble_manager_connect(addr);
 }
 
-void ble_reader_screen_disconnect(void)
+void __attribute__((unused)) ble_reader_screen_disconnect(void)
 {
     ESP_LOGI(TAG, "Disconnecting from device");
 
@@ -2379,7 +2445,7 @@ void ble_reader_screen_disconnect(void)
     }
 }
 
-void ble_reader_screen_set_current_book(uint16_t book_id)
+void __attribute__((unused)) ble_reader_screen_set_current_book(uint16_t book_id)
 {
     s_ble_state.current_book_id = book_id;
     s_ble_state.current_page = 0;
@@ -2391,7 +2457,7 @@ void ble_reader_screen_set_current_book(uint16_t book_id)
     load_current_page();
 }
 
-void ble_reader_screen_goto_page(uint16_t page_num)
+void __attribute__((unused)) ble_reader_screen_goto_page(uint16_t page_num)
 {
     if (s_ble_state.current_book_id == 0) {
         ESP_LOGW(TAG, "No book selected");
@@ -2408,7 +2474,7 @@ void ble_reader_screen_goto_page(uint16_t page_num)
     }
 }
 
-void ble_reader_screen_next_page(void)
+void __attribute__((unused)) ble_reader_screen_next_page(void)
 {
     if (s_ble_state.current_book_id == 0) {
         return;
@@ -2429,7 +2495,7 @@ void ble_reader_screen_next_page(void)
     }
 }
 
-void ble_reader_screen_prev_page(void)
+void __attribute__((unused)) ble_reader_screen_prev_page(void)
 {
     if (s_ble_state.current_book_id == 0 || s_ble_state.current_page == 0) {
         return;
@@ -2448,7 +2514,7 @@ void ble_reader_screen_prev_page(void)
 /**
  * @brief 设置 BLE 工作模式
  */
-void ble_reader_set_mode(ble_work_mode_t mode)
+void __attribute__((unused)) ble_reader_set_mode(ble_work_mode_t mode)
 {
     if (s_ble_state.work_mode == mode) {
         return; // 模式相同，无需切换
@@ -2483,7 +2549,7 @@ void ble_reader_set_mode(ble_work_mode_t mode)
 /**
  * @brief 获取当前 BLE 工作模式
  */
-ble_work_mode_t ble_reader_get_mode(void)
+ble_work_mode_t __attribute__((unused)) ble_reader_get_mode(void)
 {
     return s_ble_state.work_mode;
 }

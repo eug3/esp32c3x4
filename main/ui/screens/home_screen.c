@@ -166,7 +166,7 @@ static void on_hide(screen_t *screen)
 
 static void on_draw(screen_t *screen)
 {
-    ESP_LOGI(TAG, "on_draw START");
+    ESP_LOGI(TAG, "on_draw START, stack high water: %d", uxTaskGetStackHighWaterMark(NULL));
     
     if (s_context == NULL) {
         ESP_LOGW(TAG, "s_context is NULL!");
@@ -184,13 +184,19 @@ static void on_draw(screen_t *screen)
     int title_y = 20;
     ESP_LOGI(TAG, "Drawing title...");
     display_draw_text_menu(20, title_y, "Monster For Pan", COLOR_BLACK, COLOR_WHITE);
+    ESP_LOGI(TAG, "Title drawn, checking version...");
 
     // 绘制版本信息
-    if (s_context->version_str != NULL) {
-        char ver_str[96];
+    ESP_LOGI(TAG, "s_context=%p, version_str=%p", (void*)s_context, 
+             s_context ? (void*)s_context->version_str : NULL);
+    if (s_context != NULL && s_context->version_str != NULL) {
+        ESP_LOGI(TAG, "Drawing version: %s", s_context->version_str);
+        // 使用静态缓冲区减少栈压力
+        static char ver_str[96];
         snprintf(ver_str, sizeof(ver_str), "版本: %s", s_context->version_str);
         display_draw_text_menu(20, SCREEN_HEIGHT - 30, ver_str, COLOR_BLACK, COLOR_WHITE);
     }
+    ESP_LOGI(TAG, "Version drawn");
 
     // 绘制菜单
     int menu_start_y = 100;
@@ -198,8 +204,14 @@ static void on_draw(screen_t *screen)
     int menu_width = 400;
     int menu_x = (SCREEN_WIDTH - menu_width) / 2;
 
-    // 获取上次阅读信息
-    last_read_info_t last_read = txt_reader_get_last_read();
+    // 获取上次阅读信息 - 使用静态变量减少栈压力
+    ESP_LOGI(TAG, "Getting last read info...");
+    static last_read_info_t last_read;
+    last_read = txt_reader_get_last_read();
+    ESP_LOGI(TAG, "Got last read info, valid=%d", last_read.valid);
+
+    // 使用静态缓冲区
+    static char last_read_text[256];
 
     for (int i = 0; i < MENU_ITEM_COUNT; i++) {
         int item_y = menu_start_y + i * menu_item_height;
@@ -211,7 +223,7 @@ static void on_draw(screen_t *screen)
 
         // 确定菜单项文字
         const char *item_text = s_menu_items[i].label;
-        char last_read_text[256] = {0};
+        memset(last_read_text, 0, sizeof(last_read_text));
 
         if (i == MENU_ITEM_LAST_READ) {
             // 上次阅读项显示书名
@@ -379,14 +391,14 @@ static void draw_single_menu_item(int index, bool is_selected)
     }
 
     if (is_selected) {
-        // 绘制填充矩形
-        Paint_DrawRectangle(local_x, local_y, local_x + menu_width + 20, local_y + region_height - 1,
+        // 绘制填充矩形（完整的60像素高度）
+        Paint_DrawRectangle(local_x, local_y+1, local_x + menu_width + 20, local_y + region_height,
                            BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
         // 绘制文字（白色前景，黑色背景）
         paint_draw_text_utf8(menu_x, local_y + text_y, s_menu_items[index].label, menu_font, WHITE, BLACK);
     } else {
-        // 绘制空心矩形
-        Paint_DrawRectangle(local_x, local_y, local_x + menu_width + 20, local_y + region_height - 1,
+        // 绘制空心矩形（完整的60像素高度）
+        Paint_DrawRectangle(local_x, local_y+1, local_x + menu_width + 20, local_y + region_height ,
                            BLACK, DOT_PIXEL_1X1, DRAW_FILL_EMPTY);
         // 绘制文字（黑色前景，白色背景）
         paint_draw_text_utf8(menu_x, local_y + text_y, s_menu_items[index].label, menu_font, BLACK, WHITE);
@@ -416,7 +428,10 @@ static void draw_single_menu_item(int index, bool is_selected)
             UBYTE temp_data = temp_buffer[temp_y * (region_width / 8) + temp_byte];
             bool pixel = (temp_data & (1 << temp_bit)) != 0;
             
-            // 计算物理framebuffer位置（ROTATE_270）
+// 计算物理framebuffer位置（ROTATE_270）
+            // 逻辑坐标(logic_x, logic_y)映射到物理坐标(phys_x, phys_y)
+            //   phys_x = logic_y + temp_y
+            //   phys_y = (480 - 1) - (logic_x + temp_x)  // 480是物理高度
             int phys_x = logic_y + temp_y;
             int phys_y = (480 - 1) - temp_x;
             

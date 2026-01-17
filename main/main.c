@@ -561,8 +561,8 @@ void app_main(void)
     // Xteink X4: 初始化显示引擎和屏幕管理器
     // ============================================================================
 
-    // 创建屏幕上下文
-    screen_context_t context = {0};
+    // 创建屏幕上下文 - 使用静态变量确保生命周期持续整个程序运行
+    static screen_context_t context = {0};
     context.battery_pct = read_battery_percentage();
     context.version_str = VERSION_STRING;
 

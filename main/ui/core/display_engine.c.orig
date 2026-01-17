@@ -205,17 +205,9 @@ sFONT* display_get_default_ascii_font(void)
 
 sFONT* display_get_menu_font(void)
 {
-    ESP_LOGI(TAG, "display_get_menu_font ENTER");
-    // 菜单界面必须与"菜单中文高度"匹配，但不能受用户字体影响。
+    // 菜单界面必须与“菜单中文高度”匹配，但不能受用户字体影响。
     // 这里按菜单中文字体高度自动挑选合适的 ASCII 字号。
-    sFONT *font = choose_ascii_font_by_cjk_height_menu();
-    ESP_LOGI(TAG, "choose_ascii_font_by_cjk_height_menu returned: %p", (void*)font);
-    if (font == NULL) {
-        ESP_LOGE(TAG, "choose_ascii_font_by_cjk_height_menu returned NULL! Using Font16");
-        return &Font16;
-    }
-    ESP_LOGI(TAG, "display_get_menu_font EXIT: W=%d H=%d", font->Width, font->Height);
-    return font;
+    return choose_ascii_font_by_cjk_height_menu();
 }
 
 static int get_cjk_typical_width(void)
@@ -844,24 +836,6 @@ void display_clear_region(int x, int y, int width, int height, uint8_t color)
 
 void display_refresh(refresh_mode_t mode)
 {
-    // 检查可用内存，防止 SPI DMA 分配失败导致崩溃
-    size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_DMA);
-    size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
-    ESP_LOGI(TAG, "Before refresh: DMA free=%zu, largest=%zu", free_heap, largest_block);
-    
-    // SPI DMA 需要至少几KB的连续内存，如果内存不足则等待或跳过
-    if (largest_block < 4096) {
-        ESP_LOGW(TAG, "Low DMA memory! Skipping refresh to prevent crash");
-        // 尝试触发垃圾回收
-        vTaskDelay(pdMS_TO_TICKS(100));
-        largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
-        if (largest_block < 4096) {
-            ESP_LOGE(TAG, "Still low DMA memory (%zu), aborting refresh", largest_block);
-            return;
-        }
-        ESP_LOGI(TAG, "DMA memory recovered to %zu", largest_block);
-    }
-    
     lock_engine();
 
     // 统计刷新前（不含电量叠加）的帧缓存变化量
@@ -1142,62 +1116,24 @@ int display_draw_text_font(int x, int y, const char *text, sFONT *font, uint8_t 
 
 int display_draw_text_menu(int x, int y, const char *text, uint8_t color, uint8_t bg_color)
 {
-    ESP_LOGI(TAG, "display_draw_text_menu ENTER: text='%s' x=%d y=%d", text ? text : "(null)", x, y);
-    
     if (text == NULL || *text == '\0') {
-        ESP_LOGW(TAG, "display_draw_text_menu: text is NULL or empty");
         return 0;
     }
 
-    ESP_LOGI(TAG, "Calling display_get_menu_font...");
     sFONT *font = display_get_menu_font();
-    ESP_LOGI(TAG, "display_get_menu_font returned: %p", (void*)font);
-    
     if (font == NULL) {
         ESP_LOGE(TAG, "Menu font is NULL! Using fallback Font16");
         font = &Font16;
     }
-    
-    ESP_LOGI(TAG, "Font check: Width=%d Height=%d table=%p", 
-             font->Width, font->Height, (void*)font->table);
-    
-    // 检查字体表是否有效
-    if (font->table == NULL) {
-        ESP_LOGE(TAG, "Font table is NULL! Cannot draw text");
-        return 0;
-    }
-    
-    // 检查 framebuffer
-    if (s_framebuffer == NULL) {
-        ESP_LOGE(TAG, "Framebuffer is NULL! Cannot draw text");
-        return 0;
-    }
-    
-    // 检查 Paint.Image
-    ESP_LOGI(TAG, "Paint.Image=%p s_framebuffer=%p", (void*)Paint.Image, (void*)s_framebuffer);
-    if (Paint.Image == NULL) {
-        ESP_LOGE(TAG, "Paint.Image is NULL! Attempting to fix...");
-        Paint_SelectImage(s_framebuffer);
-        if (Paint.Image == NULL) {
-            ESP_LOGE(TAG, "Cannot fix Paint.Image! Aborting draw");
-            return 0;
-        }
-    }
 
-    ESP_LOGI(TAG, "Calling lock_engine...");
     lock_engine();
-    ESP_LOGI(TAG, "lock_engine done, starting draw loop");
-    
     int width;
     if (text_has_non_ascii(text)) {
-        ESP_LOGI(TAG, "Drawing UTF-8 text");
         width = draw_text_utf8_menu_locked(x, y, text, font, color, bg_color);
     } else {
-        ESP_LOGI(TAG, "Drawing ASCII text");
         const int ascii_adv = (int)font->Width;
         int cur_x = x;
         for (const char *p = text; *p != '\0'; p++) {
-            ESP_LOGD(TAG, "Drawing char '%c' at x=%d", *p, cur_x);
             Paint_DrawChar(cur_x, y, *p, font, color, bg_color);
             cur_x += ascii_adv;
         }
@@ -1208,8 +1144,6 @@ int display_draw_text_menu(int x, int y, const char *text, uint8_t color, uint8_
         }
     }
     unlock_engine();
-    
-    ESP_LOGI(TAG, "display_draw_text_menu EXIT: width=%d", width);
 
     return width;
 }

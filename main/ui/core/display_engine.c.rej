@@ -1,0 +1,16 @@
+@@ -206,9 +206,14 @@
+ sFONT* display_get_menu_font(void)
+ {
+     // 菜单界面必须与"菜单中文高度"匹配，但不能受用户字体影响。
+     // 这里按菜单中文字体高度自动挑选合适的 ASCII 字号。
+-    return choose_ascii_font_by_cjk_height_menu();
++    sFONT *font = choose_ascii_font_by_cjk_height_menu();
++    if (font == NULL) {
++        ESP_LOGE(TAG, "choose_ascii_font_by_cjk_height_menu returned NULL! Using Font16");
++        return &Font16;
++    }
++    return font;
+ }
+ 
+ static int get_cjk_typical_width(void)
+ 

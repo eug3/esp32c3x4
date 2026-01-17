@@ -474,6 +474,7 @@ bool xt_eink_font_menu_get_glyph(uint32_t ch, xt_eink_glyph_t *glyph)
     // 使用菜单默认字体而不是当前用户字体
     xt_eink_font_t *font = (xt_eink_font_t *)xt_eink_font_get_menu_default_font();
     if (font == NULL || glyph == NULL) {
+        ESP_LOGW(TAG, "Menu font not available (ch=U+%04X)", ch);
         return false;
     }
 
