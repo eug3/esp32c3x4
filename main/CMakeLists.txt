@@ -90,6 +90,10 @@ idf_component_register(SRCS
                        "ui/epub/chapter_buffer.c"
                        "ui/txt/txt_reader.c"
                        "ui/txt/gb18030_conv.c"
+                       # VFS (Virtual File System)
+                       "ui/vfs/vfs_reader.c"
+                       "ui/vfs/vfs_ble_impl.c"
+
 
                        # Bluetooth (NimBLE on ESP-IDF 6.1)
                        "ui/ble/ble_manager.c"

@@ -18,13 +18,14 @@
 static const char *TAG = "DISP_ENGINE";
 
 // ============================================================================
-// 帧缓冲区优化：静态分配 + DMA 对齐
+// 帧缓冲区优化：静态分配
 // ============================================================================
 // 帧缓冲（1bpp，物理尺寸800x480 = 48KB）
 // 注意：逻辑尺寸是480x800，通过ROTATE_270旋转显示
-// 优化：使用静态分配避免堆碎片，DRAM_ATTR 确保在内部 RAM
+// 优化：使用静态分配避免堆碎片
+// 重要：不使用DRAM_ATTR，因为SPI驱动会自动复制到DMA缓冲区，不需要占用DMA heap
 #define FRAMEBUFFER_SIZE ((800 * 480) / 8)
-static DRAM_ATTR uint8_t s_framebuffer_static[FRAMEBUFFER_SIZE] __attribute__((aligned(4)));
+static uint8_t s_framebuffer_static[FRAMEBUFFER_SIZE] __attribute__((aligned(4)));
 static uint8_t *s_framebuffer = NULL;
 
 // 帧缓冲区借用状态（用于 BLE 传输模式）

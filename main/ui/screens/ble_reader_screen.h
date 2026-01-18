@@ -56,4 +56,23 @@ screen_t* ble_reader_screen_get_instance(void);
  */
 void ble_reader_screen_disconnect(void);
 
+/**
+ * @brief 切换到指定章节（VFS集成API）
+ * @param chapter_index 章节索引（0-based）
+ * @return true 成功，false 失败
+ */
+bool ble_reader_switch_chapter(int chapter_index);
+
+/**
+ * @brief 获取当前章节（VFS集成API）
+ * @return 章节索引（0-based），-1表示错误
+ */
+int ble_reader_get_current_chapter(void);
+
+/**
+ * @brief 获取总章节数（VFS集成API）
+ * @return 章节数，-1表示未知或错误
+ */
+int ble_reader_get_total_chapters(void);
+
 #endif // BLE_READER_SCREEN_H

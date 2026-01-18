@@ -12,9 +12,9 @@
  *   reserved (2字节) = 保留字段
  *   filename (16字节) = 文件名（UTF-8，以\0结尾）
  * 
- * 三槽队列协议:
+ * VFS 三页缓存协议:
  *   - 文件名格式: page_{logicalIndex}
- *   - 槽位映射: slot_id = abs(logical_index) % 3
+ *   - VFS页面映射: page_id = abs(logical_index) % 3
  *   - 窗口范围: [current-1, current, current+1]
  */
 
@@ -26,6 +26,7 @@
 #include "fonts.h"
 #include "xt_eink_font_impl.h"
 #include "../fs_utils.h"     // 共享文件系统工具
+#include "../vfs/vfs_reader.h" // VFS虚拟文件系统
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/semphr.h"
@@ -49,17 +50,17 @@ static const char *TAG = "BLE_READER";
 #define BLE_CONTENT_BOTTOM_MARGIN 10 // 底部留白
 #define BLE_CONTENT_X_MARGIN 10      // 左右边距
 
-// 固定 3 槽滑动窗口（-1, 0, +1）
-#define BLE_SLOT_DIR   "/littlefs/ble_slots"
-#define BLE_SLOT_COUNT 3
+// ========== 固定 3 页滑动窗口（-1, 0, +1）用于BLE接收管理 ==========
+#define BLE_VFS_CACHE_DIR   "/littlefs/ble_vfs"
+#define BLE_VFS_PAGE_COUNT 3
 
 typedef struct {
     int32_t logical_index;   // 对应的逻辑页索引，可为负
     bool ready;              // 文件是否已写完可读
-    char path[64];           // 槽位文件路径（slot0/1/2）
-} ble_slot_entry_t;
+    char path[64];           // VFS页面文件路径（page0/1/2）
+} ble_vfs_page_entry_t;
 
-static ble_slot_entry_t s_slots[BLE_SLOT_COUNT];
+static ble_vfs_page_entry_t s_vfs_pages[BLE_VFS_PAGE_COUNT];
 
 // ========== X4IM v2 命令定义 ==========
 // 魔术头：所有命令必须以此开头，避免与 UTF-8 文本冲突
@@ -79,6 +80,9 @@ static ble_slot_entry_t s_slots[BLE_SLOT_COUNT];
 #define X4IM_CMD_FILE_DATA         0x95    // 文件数据块（ESP32→Client）
 #define X4IM_CMD_POSITION_SNAPSHOT 0x97    // 章节快照（ESP32→Client，哈希）
 #define X4IM_CMD_SET_BOOK_CHAPTER  0x98    // Client→ESP32 设置当前书/章哈希
+#define X4IM_CMD_LIST_CHAPTERS     0x99    // ESP32→Client 请求章节列表
+#define X4IM_CMD_CHAPTER_INFO      0x9A    // Client→ESP32 章节信息（JSON）
+#define X4IM_CMD_SELECT_CHAPTER    0x9B    // ESP32→Client 选择章节
 
 // 蓝牙读书屏幕实例（导出以供屏幕管理器注册）
 screen_t g_ble_reader_screen = {0};
@@ -123,6 +127,21 @@ typedef struct {
     uint32_t transfer_bytes_total;      // 总字节数
     char transfer_filename[64];         // 当前传输的文件名
     uint16_t transfer_file_count;       // 已传输文件数
+    
+    // ========== VFS集成 ==========
+    vfs_file_t *vfs_book;              // VFS虚拟文件对象
+    
+    // ========== 章节浏览 ==========
+    bool chapter_browser_active;       // 是否处于章节选择模式
+    int chapter_list_count;            // 可用章节总数
+    int chapter_list_selection;        // 当前选择的章节索引
+    char book_title[128];              // 书名
+    struct {
+        int index;                     // 章节索引
+        char title[128];               // 章节标题
+        int page_count;                // 页数
+        bool available;                // 是否可读（已下载）
+    } chapter_list[64];                // 最多64章
 } ble_reader_state_internal_t;
 
 static ble_reader_state_internal_t s_ble_state = {
@@ -146,6 +165,10 @@ static ble_reader_state_internal_t s_ble_state = {
     .transfer_bytes_total = 0,
     .transfer_filename = {0},
     .transfer_file_count = 0,
+    .chapter_browser_active = false,
+    .chapter_list_count = 0,
+    .chapter_list_selection = 0,
+    .book_title = {0},
 };
 
 // 屏幕上下文
@@ -166,13 +189,18 @@ static void __attribute__((unused)) on_hide(screen_t *screen);
 static void __attribute__((unused)) on_draw(screen_t *screen);
 static void __attribute__((unused)) on_event(screen_t *screen, button_t btn, button_event_t event);
 
+// VFS 页面管理（用于BLE接收）
+static bool ensure_vfs_cache_dir(void);
+static void vfs_page_init(void);
+static int vfs_page_id_from_index(int32_t idx);
+static void vfs_prepare_window(int32_t center_index);
+static bool vfs_get_path_if_ready(int32_t logical_index, char *out_path, size_t out_size);
+static void vfs_mark_page_ready(int page_id, int32_t logical_index);
+static bool load_current_page(void);
+static bool init_page_buffer(void);
+static void deinit_page_buffer(void);
+
 // 小窗口槽位管理
-static bool ensure_slot_dir(void);
-static void slot_init(void);
-static int slot_id_from_index(int32_t idx);
-static void slot_prepare_window(int32_t center_index);
-static bool slot_get_path_if_ready(int32_t logical_index, char *out_path, size_t out_size);
-static void slot_mark_ready(int slot_id, int32_t logical_index);
 static bool parse_index_from_name(const char *name, int32_t *out_index);
 
 // 蓝牙回调函数
@@ -186,6 +214,15 @@ static void __attribute__((unused)) on_preload_needed(uint16_t book_id, uint16_t
 // 双模式界面绘制
 static void __attribute__((unused)) draw_transfer_mode_screen(void);
 static void __attribute__((unused)) draw_reading_mode_screen(bool clear_content);
+
+// 章节浏览
+static void request_chapter_list(void);
+static void parse_chapter_info_json(const char *json_data, size_t json_len);
+static void enter_chapter_browser(void);
+static void exit_chapter_browser(void);
+static void draw_chapter_browser_screen(void);
+static void handle_chapter_browser_button(screen_t *screen, button_t btn);
+static void select_and_load_chapter(int chapter_index);
 
 // 双模式按键处理
 static void __attribute__((unused)) handle_transfer_mode_button(screen_t *screen, button_t btn);
@@ -212,12 +249,8 @@ static bool init_page_buffer(void)
         size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
         ESP_LOGI(TAG, "Heap free=%zu, largest=%zu before page buffer alloc", free_internal, largest_internal);
 
-        // 恢复原策略：ESP32-C3没有SPIRAM，会自动fallback到malloc
-        s_page_buffer = (uint8_t *)heap_caps_malloc(PAGE_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
-        if (s_page_buffer == NULL) {
-            // 尝试从内部RAM分配
-            s_page_buffer = (uint8_t *)malloc(PAGE_BUFFER_SIZE);
-        }
+        // 使用普通heap，不占用DMA内存
+        s_page_buffer = (uint8_t *)heap_caps_malloc(PAGE_BUFFER_SIZE, MALLOC_CAP_8BIT);
         if (s_page_buffer != NULL) {
             ESP_LOGI(TAG, "Page buffer allocated at %p (%zu bytes)",
                      s_page_buffer, PAGE_BUFFER_SIZE);
@@ -231,7 +264,6 @@ static bool init_page_buffer(void)
     }
     return true;
 }
-
 /**
  * @brief 释放页面缓冲区
  */
@@ -245,88 +277,100 @@ static void deinit_page_buffer(void)
     }
 }
 
+
 // ========== 三槽滑动窗口工具 ==========
 
-static bool ensure_slot_dir(void)
+static bool ensure_vfs_cache_dir(void)
 {
     struct stat st;
-    if (stat(BLE_SLOT_DIR, &st) != 0) {
-        if (mkdir(BLE_SLOT_DIR, 0755) != 0) {
-            ESP_LOGE(TAG, "Failed to create slot dir: %s", BLE_SLOT_DIR);
+    if (stat(BLE_VFS_CACHE_DIR, &st) != 0) {
+        if (mkdir(BLE_VFS_CACHE_DIR, 0755) != 0) {
+            ESP_LOGE(TAG, "Failed to create VFS cache dir: %s", BLE_VFS_CACHE_DIR);
             return false;
         }
     }
     return true;
 }
 
-static int slot_id_from_index(int32_t idx)
+static int vfs_page_id_from_index(int32_t idx)
 {
-    int m = idx % BLE_SLOT_COUNT;
+    int m = idx % BLE_VFS_PAGE_COUNT;
     if (m < 0) {
-        m += BLE_SLOT_COUNT;
+        m += BLE_VFS_PAGE_COUNT;
     }
     return m;
 }
 
-static void slot_init(void)
+static void vfs_page_init(void)
 {
-    if (!ensure_slot_dir()) {
+    if (!ensure_vfs_cache_dir()) {
         return;
     }
 
-    for (int i = 0; i < BLE_SLOT_COUNT; i++) {
-        s_slots[i].logical_index = INT32_MIN;
-        s_slots[i].ready = false;
+    for (int i = 0; i < BLE_VFS_PAGE_COUNT; i++) {
+        s_vfs_pages[i].logical_index = INT32_MIN;
+        s_vfs_pages[i].ready = false;
         // 将书籍哈希带入文件名，避免不同书籍/章节混用槽文件
-        snprintf(s_slots[i].path, sizeof(s_slots[i].path), "%s/0x%08" PRIx32 "_slot%d.txt",
-                 BLE_SLOT_DIR, s_ble_state.current_book_hash, i);
-        unlink(s_slots[i].path); // 只保留干净的三个槽位文件
+        snprintf(s_vfs_pages[i].path, sizeof(s_vfs_pages[i].path), "%s/0x%08" PRIx32 "_page%d.txt",
+                 BLE_VFS_CACHE_DIR, s_ble_state.current_book_hash, i);
+        unlink(s_vfs_pages[i].path); // 只保留干净的三个VFS页面文件
     }
 }
 
-static void slot_prepare_window(int32_t center_index)
+static void vfs_prepare_window(int32_t center_index)
 {
-    if (!ensure_slot_dir()) {
+    if (!ensure_vfs_cache_dir()) {
         return;
     }
 
-    int32_t targets[BLE_SLOT_COUNT] = {center_index - 1, center_index, center_index + 1};
-    for (int i = 0; i < BLE_SLOT_COUNT; i++) {
-        int slot_id = slot_id_from_index(targets[i]);
-        ble_slot_entry_t *slot = &s_slots[slot_id];
+    int32_t targets[BLE_VFS_PAGE_COUNT] = {center_index - 1, center_index, center_index + 1};
+    for (int i = 0; i < BLE_VFS_PAGE_COUNT; i++) {
+        int page_id = vfs_page_id_from_index(targets[i]);
+        ble_vfs_page_entry_t *page = &s_vfs_pages[page_id];
 
-        if (slot->logical_index != targets[i]) {
-            // 该槽位要被复用，删除旧文件并标记 pending
-            unlink(slot->path);
-            slot->logical_index = targets[i];
-            slot->ready = false;
+        if (page->logical_index != targets[i]) {
+            // 该VFS页面要被复用，删除旧文件并标记 pending
+            unlink(page->path);
+            page->logical_index = targets[i];
+            page->ready = false;
         }
     }
 }
 
-static bool slot_get_path_if_ready(int32_t logical_index, char *out_path, size_t out_size)
+static bool vfs_get_path_if_ready(int32_t logical_index, char *out_path, size_t out_size)
 {
-    int slot_id = slot_id_from_index(logical_index);
-    ble_slot_entry_t *slot = &s_slots[slot_id];
+    int page_id = vfs_page_id_from_index(logical_index);
+    ble_vfs_page_entry_t *page = &s_vfs_pages[page_id];
 
-    if (slot->logical_index != logical_index || !slot->ready) {
+    if (page->logical_index != logical_index || !page->ready) {
         return false;
     }
 
     if (out_path != NULL && out_size > 0) {
-        snprintf(out_path, out_size, "%s", slot->path);
+        snprintf(out_path, out_size, "%s", page->path);
     }
     return true;
 }
 
-static void slot_mark_ready(int slot_id, int32_t logical_index)
+static void vfs_mark_page_ready(int page_id, int32_t logical_index)
 {
-    if (slot_id < 0 || slot_id >= BLE_SLOT_COUNT) {
+    if (page_id < 0 || page_id >= BLE_VFS_PAGE_COUNT) {
         return;
     }
 
-    s_slots[slot_id].logical_index = logical_index;
-    s_slots[slot_id].ready = true;
+    s_vfs_pages[page_id].logical_index = logical_index;
+    s_vfs_pages[page_id].ready = true;
+}
+
+/**
+ * @brief 标记页面已加载（VFS版本 - 由 vfs_read 自动处理）
+ */
+static bool load_current_page(void)
+{
+    // 此函数已弃用 - VFS API会自动处理缓存
+    // 保留此函数以维持兼容性
+    s_ble_state.page_loaded = (s_ble_state.vfs_book != NULL);
+    return s_ble_state.page_loaded;
 }
 
 static bool parse_index_from_name(const char *name, int32_t *out_index)
@@ -354,30 +398,6 @@ static bool parse_index_from_name(const char *name, int32_t *out_index)
     return true;
 }
 
-/**
- * @brief 标记页面已加载（实际数据在littlefs中，不预加载）
- */
-static bool load_current_page(void)
-{
-    char slot_path[64];
-
-    if (!slot_get_path_if_ready((int32_t)s_ble_state.current_page, slot_path, sizeof(slot_path))) {
-        ESP_LOGW(TAG, "Page slot pending: idx=%d", (int)s_ble_state.current_page);
-        s_ble_state.page_loaded = false;
-        return false;
-    }
-
-    FILE *f = fopen(slot_path, "rb");
-    if (f != NULL) {
-        fclose(f);
-        s_ble_state.page_loaded = true;
-        return true;
-    }
-
-    ESP_LOGW(TAG, "Page file not found in slot: %s (idx=%d)", slot_path, (int)s_ble_state.current_page);
-    s_ble_state.page_loaded = false;
-    return false;
-}
 
 static int utf8_char_len(unsigned char c)
 {
@@ -568,10 +588,10 @@ static struct {
     char filename[64];          // 当前写入的文件名
     uint16_t current_page;
     int32_t logical_index;      // 对应的滑动窗口索引（可为负）
-    int slot_id;                // 当前写入的槽位 ID
+    int page_id;                // 当前写入的VFS页面 ID
     bool use_sd_card;           // 是否写入SD卡（传输模式）
     uint16_t flags;             // X4IM v2 flags
-} x4im_rx_state = {.logical_index = -1, .slot_id = -1};
+} x4im_rx_state = {.logical_index = -1, .page_id = -1};
 
 // X4IM v2 协议常量
 #define X4IM_HEADER_SIZE        32      // v2 帧头长度
@@ -613,7 +633,7 @@ static void deinit_x4im_mutex(void)
     x4im_rx_state.expected_size = 0;
     x4im_rx_state.received_size = 0;
     x4im_rx_state.logical_index = -1;
-    x4im_rx_state.slot_id = -1;
+    x4im_rx_state.page_id = -1;
     
     // 删除互斥锁
     if (x4im_rx_mutex != NULL) {
@@ -647,7 +667,7 @@ static void scan_directory_recursive(const char *path, int *file_count, int *dir
         }
 
         // 使用堆分配路径缓冲，避免栈溢出
-        char *full_path = malloc(512);
+        char *full_path = heap_caps_malloc(512, MALLOC_CAP_8BIT);
         if (!full_path) {
             ESP_LOGE(TAG, "Failed to allocate path buffer during scan");
             break;
@@ -785,9 +805,9 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         if (changed) {
             ESP_LOGI(TAG, "Set book/chapter hash: book=0x%08" PRIx32 ", chapter=0x%08" PRIx32,
                      book_hash, chapter_hash);
-            // 重建槽文件，避免旧书数据污染
-            slot_init();
-            slot_prepare_window(0);
+            // 重建 VFS 页面文件，避免旧书数据污染
+            vfs_page_init();
+            vfs_prepare_window(0);
             // 发送一次章节快照给 Client，帮助其预加载
             send_position_snapshot();
         }
@@ -879,7 +899,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
     // DELETE_FILE 命令：[0xA5, 0x5A, 0x8F, 路径...]
     // 客户端已发送完整路径（包含/sdcard/）
     if (cmd_length > 1 && cmd == X4IM_CMD_DELETE_FILE) {
-        char *filepath = malloc(512);
+        char *filepath = heap_caps_malloc(512, MALLOC_CAP_8BIT);
         if (!filepath) {
             ESP_LOGE(TAG, "Failed to allocate filepath buffer for DELETE_FILE");
             uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};
@@ -967,7 +987,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         }
 
         int deleted = 0;
-        char *filepath = malloc(512);
+        char *filepath = heap_caps_malloc(512, MALLOC_CAP_8BIT);
         if (filepath) {
             for (int i = 0; i < count; i++) {
                 if (!files[i].is_directory) {
@@ -994,7 +1014,7 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
     // CREATE_DIR 命令：[0xA5, 0x5A, 0x92, 路径...]
     // 客户端已发送完整路径，直接创建即可
     if (cmd_length > 1 && cmd == X4IM_CMD_CREATE_DIR) {
-        char *dirpath = malloc(512);
+        char *dirpath = heap_caps_malloc(512, MALLOC_CAP_8BIT);
         if (!dirpath) {
             ESP_LOGE(TAG, "Failed to allocate dirpath buffer for CREATE_DIR");
             uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};
@@ -1165,9 +1185,9 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
             read_size = file_size - offset;
         }
 
-        // 分块发送文件数据（每块最大256字节）
+        // 分块发送文件数据（每块最大11256字节）
         const uint32_t CHUNK_SIZE = 256;
-        uint8_t *chunk_buffer = malloc(CHUNK_SIZE + 13);  // 13字节头部
+        uint8_t *chunk_buffer = heap_caps_malloc(CHUNK_SIZE + 13, MALLOC_CAP_8BIT);  // 13字节头部
         if (!chunk_buffer) {
             ESP_LOGE(TAG, "Failed to allocate chunk buffer");
             fclose(file);
@@ -1222,6 +1242,55 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         uint8_t end_marker[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
         ble_manager_send_data(end_marker, 2);
 
+        free((void *)data);
+        return;
+    }
+
+    // ========== 章节信息（CHAPTER_INFO） ==========
+    // CHAPTER_INFO: [0xA5, 0x5A, 0x9A, total_chapters, json_len_low, json_len_high, json_data...]
+    if (cmd_length >= 4 && cmd == X4IM_CMD_CHAPTER_INFO) {
+        uint8_t total_chapters = cmd_data[1];
+        uint16_t json_len = cmd_data[2] | (cmd_data[3] << 8);
+        
+        ESP_LOGI(TAG, "Received CHAPTER_INFO: %d chapters, JSON length=%d", total_chapters, json_len);
+        
+        // 如果这是头部包（只有头部，没有JSON数据）
+        if (cmd_length == 4) {
+            ESP_LOGI(TAG, "CHAPTER_INFO header received, waiting for JSON data...");
+            free((void *)data);
+            return;
+        }
+        
+        // 提取JSON数据
+        if (cmd_length > 4) {
+            size_t json_data_len = cmd_length - 4;
+            if (json_data_len > json_len) {
+                json_data_len = json_len;
+            }
+            
+            // 创建NULL结尾的JSON字符串
+            char *json_str = heap_caps_malloc(json_data_len + 1, MALLOC_CAP_8BIT);
+            if (json_str) {
+                memcpy(json_str, &cmd_data[4], json_data_len);
+                json_str[json_data_len] = '\0';
+                
+                ESP_LOGI(TAG, "Parsing chapter info JSON (%zu bytes)", json_data_len);
+                
+                // 解析JSON
+                parse_chapter_info_json(json_str, json_data_len);
+                
+                free(json_str);
+                
+                // 如果章节浏览器已激活，刷新显示
+                if (s_ble_state.chapter_browser_active) {
+                    draw_chapter_browser_screen();
+                    display_refresh(REFRESH_MODE_FULL);
+                }
+            } else {
+                ESP_LOGE(TAG, "Failed to allocate memory for JSON parsing");
+            }
+        }
+        
         free((void *)data);
         return;
     }
@@ -1287,7 +1356,7 @@ static void __attribute__((unused)) handle_page_data(const uint8_t *data, size_t
             // 准备文件路径
             x4im_rx_state.use_sd_card = use_sd;
             x4im_rx_state.flags = flags;
-            x4im_rx_state.slot_id = -1;
+            x4im_rx_state.page_id = -1;
             x4im_rx_state.logical_index = -1;
 
             if (use_sd) {
@@ -1327,23 +1396,23 @@ static void __attribute__((unused)) handle_page_data(const uint8_t *data, size_t
                 }
                 
                 // LittleFS 路径：三槽队列，槽位 = idx mod 3
-                if (!ensure_slot_dir()) {
+                if (!ensure_vfs_cache_dir()) {
                     xSemaphoreGive(x4im_rx_mutex);
                     free((void *)data);
                     return;
                 }
 
-                int slot_id = slot_id_from_index(incoming_index);
-                x4im_rx_state.slot_id = slot_id;
+                int page_id = vfs_page_id_from_index(incoming_index);
+                x4im_rx_state.page_id = page_id;
                 x4im_rx_state.logical_index = incoming_index;
 
-                ble_slot_entry_t *slot = &s_slots[slot_id];
-                // 复用槽位前先清理旧文件并重置状态
-                unlink(slot->path);
-                slot->logical_index = incoming_index;
-                slot->ready = false;
+                ble_vfs_page_entry_t *page = &s_vfs_pages[page_id];
+                // 复用VFS页面前先清理旧文件并重置状态
+                unlink(page->path);
+                page->logical_index = incoming_index;
+                page->ready = false;
 
-                snprintf(x4im_rx_state.filename, sizeof(x4im_rx_state.filename), "%s", slot->path);
+                snprintf(x4im_rx_state.filename, sizeof(x4im_rx_state.filename), "%s", page->path);
             }
 
             // 打开文件准备流式写入
@@ -1424,8 +1493,8 @@ static void __attribute__((unused)) handle_page_data(const uint8_t *data, size_t
                 ESP_LOGI(TAG, "Storage: %s", x4im_rx_state.use_sd_card ? "SD Card" : "LittleFS");
                 ESP_LOGI(TAG, "============================");
 
-                if (!x4im_rx_state.use_sd_card && x4im_rx_state.slot_id >= 0) {
-                    slot_mark_ready(x4im_rx_state.slot_id, x4im_rx_state.logical_index);
+                if (!x4im_rx_state.use_sd_card && x4im_rx_state.page_id >= 0) {
+                    vfs_mark_page_ready(x4im_rx_state.page_id, x4im_rx_state.logical_index);
                 }
 
                 xSemaphoreGive(x4im_rx_mutex);
@@ -1554,8 +1623,8 @@ static void __attribute__((unused)) handle_page_data(const uint8_t *data, size_t
                 ESP_LOGI(TAG, "Storage: %s", x4im_rx_state.use_sd_card ? "SD Card" : "LittleFS");
                 ESP_LOGI(TAG, "=========================================");
 
-                if (!x4im_rx_state.use_sd_card && x4im_rx_state.slot_id >= 0) {
-                    slot_mark_ready(x4im_rx_state.slot_id, x4im_rx_state.logical_index);
+                if (!x4im_rx_state.use_sd_card && x4im_rx_state.page_id >= 0) {
+                    vfs_mark_page_ready(x4im_rx_state.page_id, x4im_rx_state.logical_index);
                 }
                 
                 xSemaphoreGive(x4im_rx_mutex);
@@ -1585,17 +1654,24 @@ static void __attribute__((unused)) handle_page_data(const uint8_t *data, size_t
                         snprintf(filename, sizeof(filename), "%s", x4im_rx_state.filename);
                         FILE *f = fopen(filename, "rb");
                         if (f != NULL) {
-                            static char text_buf[BLE_TEXT_MAX_BYTES];
-                            size_t read = fread(text_buf, 1, sizeof(text_buf) - 1, f);
+                            char *text_buf = heap_caps_malloc(BLE_TEXT_MAX_BYTES, MALLOC_CAP_8BIT);
+                            if (!text_buf) {
+                                ESP_LOGE(TAG, "Failed to allocate text_buf");
+                                fclose(f);
+                                goto page_load_done;
+                            }
+                            size_t read = fread(text_buf, 1, BLE_TEXT_MAX_BYTES - 1, f);
                             fclose(f);
                             text_buf[read] = '\0';
                             s_ble_state.total_chars = count_utf8_chars(text_buf);
                             ESP_LOGI(TAG, "Page loaded: %zu display characters (excluding newlines)", s_ble_state.total_chars);
+                            free(text_buf);
                         } else {
                             s_ble_state.total_chars = 0;
                             ESP_LOGW(TAG, "Failed to count characters in page");
                         }
                     }
+page_load_done:
 
                     // 标记页面已加载（仅对当前页）
                     s_ble_state.page_loaded = (x4im_rx_state.logical_index == (int32_t)s_ble_state.current_page);
@@ -1669,11 +1745,16 @@ static bool on_page_ready(uint16_t book_id, uint16_t page_num)
 
 static void send_page_sync_notification(uint16_t page_num)
 {
-    // Construct page notification message
-    char msg[32];
-    snprintf(msg, sizeof(msg), "PAGE:%u", page_num);
+    // Construct page notification message: PAGE:book:chapter
+    char msg[64];
+    int current_chapter = vfs_get_current_chapter(s_ble_state.vfs_book);
+    if (current_chapter < 0) current_chapter = 0;
+    
+    snprintf(msg, sizeof(msg), "PAGE:0x%08lX:%d", 
+             (unsigned long)s_ble_state.current_book_hash, current_chapter);
 
-    ESP_LOGI(TAG, "Sending page notification: %s", msg);
+    ESP_LOGI(TAG, "Sending chapter request: %s (book=0x%08lX, chapter=%d)", 
+             msg, (unsigned long)s_ble_state.current_book_hash, current_chapter);
 
     // Send via BLE
     bool sent = ble_manager_send_notification((const uint8_t *)msg, strlen(msg));
@@ -1717,16 +1798,16 @@ static void update_cached_window(uint16_t current_page)
     s_ble_state.cached_pages[1] = current_page;
     s_ble_state.cached_pages[2] = current_page + 1;
 
-    // 重建 3 槽窗口映射：-1,0,+1 对应 slot0/1/2（取模）
-    slot_prepare_window((int32_t)current_page);
+    // 重建 3 页 VFS 窗口映射：-1,0,+1 对应 page0/1/2（取模）
+    vfs_prepare_window((int32_t)current_page);
 
-    bool ready_prev = slot_get_path_if_ready((int32_t)s_ble_state.cached_pages[0], NULL, 0);
-    bool ready_curr = slot_get_path_if_ready((int32_t)s_ble_state.cached_pages[1], NULL, 0);
-    bool ready_next = slot_get_path_if_ready((int32_t)s_ble_state.cached_pages[2], NULL, 0);
+    bool ready_prev = vfs_get_path_if_ready((int32_t)s_ble_state.cached_pages[0], NULL, 0);
+    bool ready_curr = vfs_get_path_if_ready((int32_t)s_ble_state.cached_pages[1], NULL, 0);
+    bool ready_next = vfs_get_path_if_ready((int32_t)s_ble_state.cached_pages[2], NULL, 0);
 
     s_ble_state.page_loaded = ready_curr;
 
-    ESP_LOGI(TAG, "Cache window -> prev:%u(%s) curr:%u(%s) next:%u(%s)",
+    ESP_LOGI(TAG, "VFS cache window -> prev:%u(%s) curr:%u(%s) next:%u(%s)",
              s_ble_state.cached_pages[0], ready_prev ? "ready" : "pending",
              s_ble_state.cached_pages[1], ready_curr ? "ready" : "pending",
              s_ble_state.cached_pages[2], ready_next ? "ready" : "pending");
@@ -2047,67 +2128,85 @@ static void draw_reading_mode_screen(bool clear_content)
             display_clear_region(BLE_CONTENT_X_MARGIN, BLE_CONTENT_Y_START, content_width, content_height, COLOR_WHITE);
         }
 
-        // 绘制页面内容（TXT 直接渲染）
-        char slot_path[64];
-        bool slot_ready = slot_get_path_if_ready((int32_t)s_ble_state.current_page, slot_path, sizeof(slot_path));
-
-        if (slot_ready) {
+        // 绘制页面内容（使用VFS API透明读取）
+        char *page_buffer = heap_caps_malloc(BLE_TEXT_MAX_BYTES, MALLOC_CAP_8BIT);
+        bool vfs_page_ready = false;
+        int bytes_read = 0;
+        
+        if (!page_buffer) {
+            // 内存分配失败
+            ESP_LOGE(TAG, "Failed to allocate page_buffer");
+            display_draw_text_menu(20, 100, "内存不足", COLOR_BLACK, COLOR_WHITE);
+        } else if (s_ble_state.vfs_book == NULL) {
+            // VFS未初始化
+            display_draw_text_menu(20, 100, "VFS未初始化", COLOR_BLACK, COLOR_WHITE);
+            free(page_buffer);
+        } else {
             // 使用互斥锁防止与 BLE 接收冲突
-            static char text_buf[BLE_TEXT_MAX_BYTES];
-
             if (x4im_rx_mutex != NULL && xSemaphoreTake(x4im_rx_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                FILE *f = fopen(slot_path, "rb");
-                if (f != NULL) {
-                    size_t read = fread(text_buf, 1, sizeof(text_buf) - 1, f);
-                    fclose(f);
+                // VFS已处理缓存，直接读取当前位置的数据
+                bytes_read = vfs_read(s_ble_state.vfs_book, page_buffer, sizeof(page_buffer) - 1);
+                vfs_page_ready = (bytes_read > 0);
+            
+                if (vfs_page_ready) {
+                    page_buffer[bytes_read] = '\0';
 
-                    // 确保数据有效且有内容
-                    if (read > 0) {
-                        text_buf[read] = '\0';
-
-                        // 内容区域：使用统一的布局常量
-                        int content_width = SCREEN_WIDTH - 2 * BLE_CONTENT_X_MARGIN;
-                        int content_height = SCREEN_HEIGHT - BLE_CONTENT_Y_START - BLE_CONTENT_BOTTOM_MARGIN;
-                        // 先计算本页可消耗的显示字符数（用于精确翻页）
-                        s_ble_state.last_page_consumed = measure_wrapped_consumed(content_width, content_height, text_buf, s_ble_state.char_position);
-                        draw_wrapped_text(BLE_CONTENT_X_MARGIN, BLE_CONTENT_Y_START, content_width, content_height, text_buf, s_ble_state.char_position);
-                    } else {
-                        // 文件为空，显示提示
-                        display_draw_text_menu(20, 100, "文件为空", COLOR_BLACK, COLOR_WHITE);
-                    }
+                    // 内容区域：使用统一的布局常量
+                    int content_width = SCREEN_WIDTH - 2 * BLE_CONTENT_X_MARGIN;
+                    int content_height = SCREEN_HEIGHT - BLE_CONTENT_Y_START - BLE_CONTENT_BOTTOM_MARGIN;
+                    // 先计算本页可消耗的显示字符数（用于精确翻页）
+                    s_ble_state.last_page_consumed = measure_wrapped_consumed(content_width, content_height, page_buffer, s_ble_state.char_position);
+                    draw_wrapped_text(BLE_CONTENT_X_MARGIN, BLE_CONTENT_Y_START, content_width, content_height, page_buffer, s_ble_state.char_position);
                 } else {
-                    slot_ready = false;  // 文件被移除或打开失败，按等待处理
+                    // 文件为空，显示提示
+                    display_draw_text_menu(20, 100, "文件为空", COLOR_BLACK, COLOR_WHITE);
                 }
                 xSemaphoreGive(x4im_rx_mutex);
             } else {
                 // 获取互斥锁超时或失败，显示等待提示
                 display_draw_text_menu(20, 100, "正在加载...", COLOR_BLACK, COLOR_WHITE);
             }
-        }
 
-        if (!slot_ready) {
-            // 页面缺失或尚未写完，显示等待提示
-            display_draw_text_menu(20, 100, "等待加载...", COLOR_BLACK, COLOR_WHITE);
-
-            // 如果正在接收这一页，显示进度
-            if (x4im_rx_state.receiving &&
-                x4im_rx_state.expected_size > 0 &&
-                x4im_rx_state.logical_index == (int32_t)s_ble_state.current_page) {
-                char progress[64];
-                float percent = (float)x4im_rx_state.received_size * 100.0f / x4im_rx_state.expected_size;
-                snprintf(progress, sizeof(progress), "接收中: %.0f%% (%lu/%lu 字节)",
-                         percent, (unsigned long)x4im_rx_state.received_size, (unsigned long)x4im_rx_state.expected_size);
-                display_draw_text_menu(20, 140, progress, COLOR_BLACK, COLOR_WHITE);
-            } else {
-                display_draw_text_menu(20, 140, "正在从手机请求...", COLOR_BLACK, COLOR_WHITE);
+            if (!vfs_page_ready) {
+                // 页面缺失或尚未写完，显示等待提示
+                display_draw_text_menu(20, 100, "等待加载...", COLOR_BLACK, COLOR_WHITE);
+                // 如果正在接收这一页，显示进度
+                if (x4im_rx_state.receiving &&
+                    x4im_rx_state.expected_size > 0 &&
+                    x4im_rx_state.logical_index == (int32_t)s_ble_state.current_page) {
+                    char progress[64];
+                    float percent = (float)x4im_rx_state.received_size * 100.0f / x4im_rx_state.expected_size;
+                    snprintf(progress, sizeof(progress), "接收中: %.0f%% (%lu/%lu 字节)",
+                             percent, (unsigned long)x4im_rx_state.received_size, (unsigned long)x4im_rx_state.expected_size);
+                    display_draw_text_menu(20, 140, progress, COLOR_BLACK, COLOR_WHITE);
+                } else {
+                    display_draw_text_menu(20, 140, "正在从手机请求...", COLOR_BLACK, COLOR_WHITE);
+                }
             }
+            
+            free(page_buffer);
         }
     }
 }
 
 static void on_event(screen_t *screen, button_t btn, button_event_t event)
 {
+    // 长按CONFIRM键进入章节浏览模式
+    if (event == BTN_EVENT_LONG_PRESSED && btn == BTN_CONFIRM) {
+        if (s_ble_state.vfs_book != NULL && s_ble_state.device_connected && 
+            s_ble_state.work_mode == BLE_MODE_READING) {
+            enter_chapter_browser();
+            return;
+        }
+    }
+    
     if (event != BTN_EVENT_PRESSED) {
+        return;
+    }
+
+    // 章节浏览模式优先处理
+    if (s_ble_state.chapter_browser_active) {
+        handle_chapter_browser_button(screen, btn);
         return;
     }
 
@@ -2268,6 +2367,60 @@ static inline void scroll_down(void) {
     }
 }
 
+/** @brief 切换到上一章 */
+static inline void chapter_previous(void) {
+    if (s_ble_state.vfs_book != NULL) {
+        int current_ch = vfs_get_current_chapter(s_ble_state.vfs_book);
+        if (current_ch > 0) {
+            if (vfs_switch_chapter(s_ble_state.vfs_book, current_ch - 1)) {
+                // 重置页面位置到新章节开头
+                s_ble_state.current_page = 0;
+                s_ble_state.char_position = 0;
+                s_ble_state.history_len = 0;
+                
+                ESP_LOGI(TAG, "Chapter previous: %d -> %d", current_ch, current_ch - 1);
+                update_cached_window(0);
+                send_position_snapshot();
+                send_page_sync_notification(0);
+                
+                // 刷新屏幕显示新章节
+                draw_reading_mode_screen(false);
+                display_refresh(REFRESH_MODE_FULL);
+            }
+        } else {
+            ESP_LOGW(TAG, "Already at first chapter");
+        }
+    }
+}
+
+/** @brief 切换到下一章 */
+static inline void chapter_next(void) {
+    if (s_ble_state.vfs_book != NULL) {
+        int current_ch = vfs_get_current_chapter(s_ble_state.vfs_book);
+        int total_ch = vfs_get_total_chapters(s_ble_state.vfs_book);
+        
+        if (total_ch > 0 && current_ch < total_ch - 1) {
+            if (vfs_switch_chapter(s_ble_state.vfs_book, current_ch + 1)) {
+                // 重置页面位置到新章节开头
+                s_ble_state.current_page = 0;
+                s_ble_state.char_position = 0;
+                s_ble_state.history_len = 0;
+                
+                ESP_LOGI(TAG, "Chapter next: %d -> %d", current_ch, current_ch + 1);
+                update_cached_window(0);
+                send_position_snapshot();
+                send_page_sync_notification(0);
+                
+                // 刷新屏幕显示新章节
+                draw_reading_mode_screen(false);
+                display_refresh(REFRESH_MODE_FULL);
+            }
+        } else {
+            ESP_LOGW(TAG, "Already at last chapter or total_chapters unknown");
+        }
+    }
+}
+
 /**
  * @brief 阅读模式按键处理
  */
@@ -2287,12 +2440,16 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
             break;
 
         case BTN_VOLUME_UP:
+            // 音量键短按：滚动/翻页
+            // 长按：进入章节浏览
             if (can_control_paging()) {
                 scroll_up();
             }
             break;
 
         case BTN_VOLUME_DOWN:
+            // 音量键短按：滚动/翻页  
+            // 长按：章节切换
             if (can_control_paging()) {
                 scroll_down();
             }
@@ -2328,6 +2485,8 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
             break;
 
         default:
+            // 其他按键：可用于章节导航
+            ESP_LOGD(TAG, "Button not handled: %d", btn);
             break;
     }
 }
@@ -2373,9 +2532,26 @@ static void on_show(screen_t *screen)
         ESP_LOGW(TAG, "Page buffer allocation failed due to fragmentation, will read pages directly to framebuffer");
     }
 
-    // 初始化三槽窗口目录并重置状态
-    slot_init();
-    slot_prepare_window((int32_t)s_ble_state.current_page);
+    // 初始化VFS系统
+    vfs_init();
+    
+    // 打开BLE虚拟文件（使用当前的书籍/章节哈希）
+    char vfs_uri[256];
+    snprintf(vfs_uri, sizeof(vfs_uri), "ble://weread_novel");
+    s_ble_state.vfs_book = vfs_open(vfs_uri);
+    
+    if (s_ble_state.vfs_book != NULL) {
+        // 设置总章节数 (1章节或多章节取决于实际内容)
+        vfs_set_total_chapters(s_ble_state.vfs_book, 1);
+        vfs_set_prefetch_window(s_ble_state.vfs_book, 5);  // 预加载5页
+        ESP_LOGI(TAG, "VFS book opened successfully");
+    } else {
+        ESP_LOGW(TAG, "Failed to open VFS book");
+    }
+
+    // 初始化VFS三页窗口目录并重置状态
+    vfs_page_init();
+    vfs_prepare_window((int32_t)s_ble_state.current_page);
 
     // 注册蓝牙回调
     ble_manager_register_connect_cb(ble_connect_callback);
@@ -2407,6 +2583,13 @@ static void on_hide(screen_t *screen)
     // 在断开连接完成后再销毁 BLE 协议栈
     ble_manager_deinit();
     ble_book_protocol_deinit();
+
+    // 关闭VFS虚拟文件
+    if (s_ble_state.vfs_book != NULL) {
+        vfs_close(s_ble_state.vfs_book);
+        s_ble_state.vfs_book = NULL;
+        ESP_LOGI(TAG, "VFS book closed");
+    }
 
     // 释放页面缓冲区
     deinit_page_buffer();
@@ -2458,6 +2641,62 @@ void __attribute__((unused)) ble_reader_screen_disconnect(void)
 }
 
 /**
+ * @brief 切换到指定章节（公开API）
+ * @param chapter_index 章节索引（0-based）
+ * @return true 成功，false 失败
+ */
+bool __attribute__((unused)) ble_reader_switch_chapter(int chapter_index)
+{
+    if (s_ble_state.vfs_book == NULL) {
+        ESP_LOGE(TAG, "VFS book not initialized");
+        return false;
+    }
+    
+    if (vfs_switch_chapter(s_ble_state.vfs_book, chapter_index)) {
+        // 重置页面位置到新章节开头
+        s_ble_state.current_page = 0;
+        s_ble_state.char_position = 0;
+        s_ble_state.history_len = 0;
+        
+        ESP_LOGI(TAG, "Switched to chapter %d", chapter_index);
+        update_cached_window(0);
+        send_position_snapshot();
+        send_page_sync_notification(0);
+        
+        // 刷新屏幕
+        draw_reading_mode_screen(false);
+        display_refresh(REFRESH_MODE_FULL);
+        return true;
+    }
+    
+    return false;
+}
+
+/**
+ * @brief 获取当前章节
+ * @return 章节索引（0-based），-1表示错误
+ */
+int __attribute__((unused)) ble_reader_get_current_chapter(void)
+{
+    if (s_ble_state.vfs_book == NULL) {
+        return -1;
+    }
+    return vfs_get_current_chapter(s_ble_state.vfs_book);
+}
+
+/**
+ * @brief 获取总章节数
+ * @return 章节数，-1表示未知或错误
+ */
+int __attribute__((unused)) ble_reader_get_total_chapters(void)
+{
+    if (s_ble_state.vfs_book == NULL) {
+        return -1;
+    }
+    return vfs_get_total_chapters(s_ble_state.vfs_book);
+}
+
+/**
  * @brief 设置 BLE 工作模式
  */
 void __attribute__((unused)) ble_reader_set_mode(ble_work_mode_t mode)
@@ -2490,5 +2729,345 @@ void __attribute__((unused)) ble_reader_set_mode(ble_work_mode_t mode)
 
     // 触发重绘
     g_ble_reader_screen.needs_redraw = true;
+}
+
+// ============================================================================
+// 章节浏览实现
+// ============================================================================
+
+/**
+ * @brief 请求章节列表（发送 LIST_CHAPTERS 命令）
+ */
+static void request_chapter_list(void) {
+    if (!s_ble_state.device_connected) {
+        ESP_LOGW(TAG, "Device not connected, cannot request chapter list");
+        return;
+    }
+    
+    // 构建 LIST_CHAPTERS 请求
+    uint8_t cmd[64];
+    int len = 0;
+    
+    cmd[len++] = 0xA5;  // Magic 0
+    cmd[len++] = 0x5A;  // Magic 1
+    cmd[len++] = X4IM_CMD_LIST_CHAPTERS;  // 0x99
+    
+    // 书籍ID（使用当前book_hash的字符串表示）
+    char book_id[32];
+    snprintf(book_id, sizeof(book_id), "0x%08lX", (unsigned long)s_ble_state.current_book_hash);
+    int book_id_len = strlen(book_id);
+    cmd[len++] = (uint8_t)book_id_len;
+    memcpy(&cmd[len], book_id, book_id_len);
+    len += book_id_len;
+    
+    // 发送请求
+    ble_manager_send_notification(cmd, len);
+    
+    ESP_LOGI(TAG, "📚 Requested chapter list for book: %s", book_id);
+}
+
+/**
+ * @brief 解析章节信息JSON
+ * @param json_data JSON字符串
+ * @param json_len JSON长度
+ */
+static void parse_chapter_info_json(const char *json_data, size_t json_len) {
+    // 简单的JSON解析（实际项目中应使用cJSON库）
+    // 预期格式: {"book_title":"三体","chapters":[{"index":0,"title":"第一章","page_count":45,"available":true},...]}
+    
+    // 重置章节列表
+    s_ble_state.chapter_list_count = 0;
+    memset(s_ble_state.book_title, 0, sizeof(s_ble_state.book_title));
+    
+    // 提取书名（查找 "book_title":"..."）
+    const char *title_start = strstr(json_data, "\"book_title\":\"");
+    if (title_start) {
+        title_start += 14;  // 跳过 "book_title":"
+        const char *title_end = strchr(title_start, '"');
+        if (title_end) {
+            int title_len = title_end - title_start;
+            if (title_len > 0 && title_len < sizeof(s_ble_state.book_title)) {
+                memcpy(s_ble_state.book_title, title_start, title_len);
+                s_ble_state.book_title[title_len] = '\0';
+            }
+        }
+    }
+    
+    // 提取章节数组（查找 "chapters":[...]）
+    const char *chapters_start = strstr(json_data, "\"chapters\":[");
+    if (!chapters_start) {
+        ESP_LOGW(TAG, "No chapters array found in JSON");
+        return;
+    }
+    
+    chapters_start += 12;  // 跳过 "chapters":[
+    const char *ptr = chapters_start;
+    
+    // 解析每个章节对象
+    while (*ptr && s_ble_state.chapter_list_count < 64) {
+        // 查找下一个 {
+        ptr = strchr(ptr, '{');
+        if (!ptr) break;
+        ptr++;
+        
+        // 解析 index
+        const char *index_str = strstr(ptr, "\"index\":");
+        if (index_str) {
+            index_str += 8;
+            s_ble_state.chapter_list[s_ble_state.chapter_list_count].index = atoi(index_str);
+        }
+        
+        // 解析 title
+        const char *title_str = strstr(ptr, "\"title\":\"");
+        if (title_str) {
+            title_str += 9;
+            const char *title_end = strchr(title_str, '"');
+            if (title_end) {
+                int len = title_end - title_str;
+                if (len > 0 && len < 128) {
+                    memcpy(s_ble_state.chapter_list[s_ble_state.chapter_list_count].title, 
+                           title_str, len);
+                    s_ble_state.chapter_list[s_ble_state.chapter_list_count].title[len] = '\0';
+                }
+            }
+        }
+        
+        // 解析 page_count
+        const char *pages_str = strstr(ptr, "\"page_count\":");
+        if (pages_str) {
+            pages_str += 13;
+            s_ble_state.chapter_list[s_ble_state.chapter_list_count].page_count = atoi(pages_str);
+        }
+        
+        // 解析 available (默认所有章节都可读)
+        s_ble_state.chapter_list[s_ble_state.chapter_list_count].available = true;
+        
+        s_ble_state.chapter_list_count++;
+        
+        // 查找下一个对象
+        ptr = strchr(ptr, '}');
+        if (!ptr) break;
+        ptr++;
+    }
+    
+    ESP_LOGI(TAG, "📖 Parsed %d chapters from JSON", s_ble_state.chapter_list_count);
+    if (s_ble_state.book_title[0]) {
+        ESP_LOGI(TAG, "   Book: %s", s_ble_state.book_title);
+    }
+}
+
+/**
+ * @brief 进入章节浏览模式
+ */
+static void enter_chapter_browser(void) {
+    ESP_LOGI(TAG, "Entering chapter browser mode");
+    
+    s_ble_state.chapter_browser_active = true;
+    s_ble_state.chapter_list_selection = vfs_get_current_chapter(s_ble_state.vfs_book);
+    
+    // 如果还没有章节列表，请求一次
+    if (s_ble_state.chapter_list_count == 0) {
+        request_chapter_list();
+        
+        // 显示加载提示
+        display_clear(0xFF);
+        display_draw_text_font(SCREEN_WIDTH/2 - 100, 60, "正在获取章节列表...", &Font20, 0, 0xFF);
+        display_refresh(REFRESH_MODE_FULL);
+    } else {
+        // 直接显示章节列表
+        draw_chapter_browser_screen();
+        display_refresh(REFRESH_MODE_FULL);
+    }
+}
+
+/**
+ * @brief 退出章节浏览模式
+ */
+static void exit_chapter_browser(void) {
+    ESP_LOGI(TAG, "Exiting chapter browser mode");
+    
+    s_ble_state.chapter_browser_active = false;
+    
+    // 返回阅读界面
+    draw_reading_mode_screen(false);
+    display_refresh(REFRESH_MODE_FULL);
+}
+
+/**
+ * @brief 绘制章节浏览界面
+ */
+static void draw_chapter_browser_screen(void) {
+    display_clear(0xFF);
+    
+    // 标题栏
+    char title_buf[160];  // 增加缓冲区大小避免截断
+    if (s_ble_state.book_title[0]) {
+        snprintf(title_buf, sizeof(title_buf), "%s (共%d章)", 
+                 s_ble_state.book_title, s_ble_state.chapter_list_count);
+    } else {
+        snprintf(title_buf, sizeof(title_buf), "章节选择 (共%d章)", 
+                 s_ble_state.chapter_list_count);
+    }
+    display_draw_text_font(10, 10, title_buf, &Font16, 0, 0xFF);
+    
+    if (s_ble_state.chapter_list_count == 0) {
+        // 无章节数据
+        display_draw_text_font(SCREEN_WIDTH/2 - 60, 100, "无可用章节", &Font20, 0, 0xFF);
+        display_draw_text_font(SCREEN_WIDTH/2 - 70, 130, "按任意键返回", &Font16, 0, 0xFF);
+        return;
+    }
+    
+    // 显示章节列表（最多显示8个）
+    const int MAX_VISIBLE = 8;
+    const int LINE_HEIGHT = 22;
+    const int START_Y = 40;
+    
+    // 计算显示范围
+    int start_idx = s_ble_state.chapter_list_selection;
+    if (start_idx > s_ble_state.chapter_list_count - MAX_VISIBLE) {
+        start_idx = s_ble_state.chapter_list_count - MAX_VISIBLE;
+    }
+    if (start_idx < 0) start_idx = 0;
+    
+    int end_idx = start_idx + MAX_VISIBLE;
+    if (end_idx > s_ble_state.chapter_list_count) {
+        end_idx = s_ble_state.chapter_list_count;
+    }
+    
+    // 绘制章节列表
+    int display_row = 0;
+    for (int i = start_idx; i < end_idx; i++) {
+        // 只显示可用的章节
+        if (!s_ble_state.chapter_list[i].available) {
+            continue;
+        }
+        
+        int y = START_Y + display_row * LINE_HEIGHT;
+        char line_buf[96];
+        
+        // 选中标记
+        const char *marker = (i == s_ble_state.chapter_list_selection) ? ">" : " ";
+        
+        // 章节标题（截断长标题）
+        snprintf(line_buf, sizeof(line_buf), "%s %d. %.40s", 
+                 marker, i + 1, s_ble_state.chapter_list[i].title);
+        
+        // 使用反色表示选中状态
+        if (i == s_ble_state.chapter_list_selection) {
+            display_draw_text_font(5, y, line_buf, &Font16, 0xFF, 0);
+        } else {
+            display_draw_text_font(10, y, line_buf, &Font16, 0, 0xFF);
+        }
+        
+        display_row++;
+    }
+    
+    // 底部提示
+    display_draw_text_font(10, SCREEN_HEIGHT - 20, "Vol+/-选择  OK选中  Back返回", &Font12, 0, 0xFF);
+}
+
+/**
+ * @brief 处理章节浏览模式的按键
+ */
+static void handle_chapter_browser_button(screen_t *screen, button_t btn) {
+    switch (btn) {
+        case BTN_VOLUME_UP:  // 上一章
+            if (s_ble_state.chapter_list_selection > 0) {
+                // 跳过不可用的章节
+                do {
+                    s_ble_state.chapter_list_selection--;
+                } while (s_ble_state.chapter_list_selection >= 0 && 
+                         !s_ble_state.chapter_list[s_ble_state.chapter_list_selection].available);
+                
+                if (s_ble_state.chapter_list_selection < 0) {
+                    s_ble_state.chapter_list_selection = 0;
+                }
+                
+                draw_chapter_browser_screen();
+                display_refresh(REFRESH_MODE_PARTIAL);
+            }
+            break;
+            
+        case BTN_VOLUME_DOWN:  // 下一章
+            if (s_ble_state.chapter_list_selection < s_ble_state.chapter_list_count - 1) {
+                // 跳过不可用的章节
+                do {
+                    s_ble_state.chapter_list_selection++;
+                } while (s_ble_state.chapter_list_selection < s_ble_state.chapter_list_count && 
+                         !s_ble_state.chapter_list[s_ble_state.chapter_list_selection].available);
+                
+                if (s_ble_state.chapter_list_selection >= s_ble_state.chapter_list_count) {
+                    s_ble_state.chapter_list_selection = s_ble_state.chapter_list_count - 1;
+                }
+                
+                draw_chapter_browser_screen();
+                display_refresh(REFRESH_MODE_PARTIAL);
+            }
+            break;
+            
+        case BTN_CONFIRM:  // 确认选择
+        case BTN_RIGHT:
+            if (s_ble_state.chapter_list_count > 0 && 
+                s_ble_state.chapter_list[s_ble_state.chapter_list_selection].available) {
+                select_and_load_chapter(s_ble_state.chapter_list_selection);
+            }
+            break;
+            
+        case BTN_LEFT:  // 返回
+        case BTN_BACK:
+            exit_chapter_browser();
+            break;
+            
+        default:
+            break;
+    }
+}
+
+/**
+ * @brief 选择并加载指定章节
+ */
+static void select_and_load_chapter(int chapter_index) {
+    ESP_LOGI(TAG, "📖 User selected chapter %d: %s", 
+             chapter_index + 1, 
+             s_ble_state.chapter_list[chapter_index].title);
+    
+    // 发送 SELECT_CHAPTER 命令到 Client
+    uint8_t cmd[4] = {
+        0xA5, 0x5A,                    // Magic
+        X4IM_CMD_SELECT_CHAPTER,       // 0x9B
+        (uint8_t)chapter_index
+    };
+    ble_manager_send_notification(cmd, sizeof(cmd));
+    
+    // 切换到该章节
+    if (ble_reader_switch_chapter(chapter_index)) {
+        // 退出章节浏览模式，进入阅读模式
+        s_ble_state.chapter_browser_active = false;
+        
+        // 显示加载提示
+        display_clear(0xFF);
+        display_draw_text_font(SCREEN_WIDTH/2 - 80, 100, "正在加载章节...", &Font20, 0, 0xFF);
+        display_refresh(REFRESH_MODE_FULL);
+        
+        // 等待一会让 Client 准备数据
+        vTaskDelay(pdMS_TO_TICKS(500));
+        
+        // 显示章节内容
+        draw_reading_mode_screen(false);
+        display_refresh(REFRESH_MODE_FULL);
+    } else {
+        ESP_LOGE(TAG, "Failed to switch to chapter %d", chapter_index);
+        
+        // 显示错误提示
+        display_clear(0xFF);
+        display_draw_text_font(SCREEN_WIDTH/2 - 70, 100, "章节加载失败", &Font20, 0, 0xFF);
+        display_draw_text_font(SCREEN_WIDTH/2 - 70, 130, "按任意键返回", &Font16, 0, 0xFF);
+        display_refresh(REFRESH_MODE_FULL);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        
+        // 返回章节列表
+        draw_chapter_browser_screen();
+        display_refresh(REFRESH_MODE_FULL);
+    }
 }
 
