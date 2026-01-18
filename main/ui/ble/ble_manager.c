@@ -593,12 +593,6 @@ void ble_manager_register_data_received_cb(ble_on_data_received_cb cb)
     s_ble.data_received_cb = cb;
 }
 
-void ble_manager_register_device_found_cb(ble_on_device_found_cb cb)
-{
-    // 不支持扫描功能
-    (void)cb;
-}
-
 bool ble_manager_start_advertising(void)
 {
     if (!s_ble.initialized) {
@@ -630,34 +624,6 @@ bool ble_manager_stop_advertising(void)
     s_ble.advertising = false;
     ESP_LOGI(TAG, "Advertising stopped");
     return true;
-}
-
-bool ble_manager_start_scan(uint32_t duration_ms)
-{
-    // 不支持扫描功能
-    (void)duration_ms;
-    ESP_LOGW(TAG, "Scan not supported in server mode");
-    return false;
-}
-
-bool ble_manager_stop_scan(void)
-{
-    // 不支持扫描功能
-    return false;
-}
-
-bool ble_manager_connect(const uint8_t *addr)
-{
-    // 不支持主动连接（作为服务器）
-    (void)addr;
-    ESP_LOGW(TAG, "Connect not supported in server mode");
-    return false;
-}
-
-void ble_manager_set_target_service_uuid128_le(const uint8_t uuid_le[16])
-{
-    // 不支持
-    (void)uuid_le;
 }
 
 bool ble_manager_disconnect(void)

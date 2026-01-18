@@ -12,26 +12,6 @@
 #include <stdbool.h>
 
 /**
- * @brief 蓝牙设备信息
- */
-typedef struct {
-    uint8_t addr[6];            // MAC地址
-    int8_t rssi;                // 信号强度
-    char name[32];              // 设备名称
-    uint16_t name_len;          // 名称长度
-
-    // If present in advertisement (AD type 0x06/0x07), first 128-bit service UUID (little-endian).
-    bool has_service_uuid128;
-    uint8_t service_uuid128_le[16];
-} ble_device_info_t;
-
-/**
- * @brief 蓝牙设备回调函数
- * 当发现新设备时调用
- */
-typedef void (*ble_on_device_found_cb)(const ble_device_info_t *device);
-
-/**
  * @brief 蓝牙连接状态回调函数
  */
 typedef void (*ble_on_connect_cb)(bool connected);
@@ -51,12 +31,6 @@ bool ble_manager_init(void);
  * @brief 反初始化蓝牙管理器
  */
 void ble_manager_deinit(void);
-
-/**
- * @brief 注册设备发现回调
- * @param cb 回调函数指针
- */
-void ble_manager_register_device_found_cb(ble_on_device_found_cb cb);
 
 /**
  * @brief 注册连接状态回调
@@ -81,32 +55,6 @@ bool ble_manager_start_advertising(void);
  * @return true 成功或已停止，false 失败
  */
 bool ble_manager_stop_advertising(void);
-
-/**
- * @brief 启动蓝牙扫描
- * @param duration_ms 扫描持续时间（毫秒），0 表示无限扫描
- * @return true 成功，false 失败
- */
-bool ble_manager_start_scan(uint32_t duration_ms);
-
-/**
- * @brief 停止蓝牙扫描
- * @return true 成功，false 失败
- */
-bool ble_manager_stop_scan(void);
-
-/**
- * @brief 连接到指定的蓝牙设备
- * @param addr 设备蓝牙地址（6字节）
- * @return true 成功，false 失败
- */
-bool ble_manager_connect(const uint8_t *addr);
-
-/**
- * @brief Set target 128-bit service UUID (little-endian) discovered from advertisement.
- * Must be called before ble_manager_connect() for dynamic UUID exchange.
- */
-void ble_manager_set_target_service_uuid128_le(const uint8_t uuid_le[16]);
 
 /**
  * @brief 断开蓝牙连接

@@ -22,7 +22,6 @@ typedef enum {
     BLE_PKT_TYPE_REQUEST = 0x01,    // 客户端请求数据
     BLE_PKT_TYPE_DATA = 0x02,        // 服务端响应数据
     BLE_PKT_TYPE_END = 0x03,         // 传输结束/无更多数据
-    BLE_PKT_TYPE_ACK = 0x04,         // 确认包
     BLE_PKT_TYPE_ERROR = 0xFF,       // 错误包
 } ble_pkt_type_t;
 
@@ -76,35 +75,6 @@ typedef struct BLE_PACKED {
 } ble_data_pkt_chunk_t;
 
 #define BLE_DATA_CHUNK_SIZE (sizeof(ble_data_pkt_chunk_t))
-
-/**
- * @brief 结束包（无更多数据）
- */
-typedef struct BLE_PACKED {
-    uint8_t type;           // BLE_PKT_TYPE_END
-    uint16_t book_id;       // 书籍ID
-    uint16_t last_page;     // 最后一页页码
-} ble_end_pkt_t;
-
-/**
- * @brief 缓存中的页面信息
- */
-typedef struct {
-    uint16_t book_id;       // 书籍ID
-    uint16_t page_num;      // 页码
-    char filename[64];      // LittleFS 中的文件名
-    bool valid;             // 数据是否有效
-    uint32_t timestamp;     // 缓存时间戳
-} ble_cached_page_t;
-
-/**
- * @brief 缓存管理参数
- */
-#define BLE_CACHE_DIR "/littlefs/ble_cache"
-#define BLE_CACHE_MAX_PAGES 10       // 最多缓存10页在内存
-#define BLE_CACHE_DISK_MAX_PAGES 50  // LittleFS最多缓存50页
-#define BLE_PRELOAD_THRESHOLD 2      // 当剩余页少于2页时预加载
-#define BLE_PRELOAD_COUNT 5          // 每次预加载5页
 
 /**
  * @brief 初始化蓝牙协议处理
