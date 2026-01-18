@@ -42,9 +42,6 @@
 
 static const char *TAG = "BLE_READER";
 
-// 全局变量：跟踪是否是新的文件传输（用于决定创建新文件还是追加）
-bool g_ble_new_transfer = true;
-
 #define BLE_TEXT_MAX_BYTES 4096  // 减小缓冲区以节省内存 (原8192太大导致内存碎片)
  
 
@@ -86,11 +83,6 @@ static ble_vfs_page_entry_t s_vfs_pages[BLE_VFS_PAGE_COUNT];
 #define X4IM_CMD_LIST_CHAPTERS     0x99    // ESP32→Client 请求章节列表
 #define X4IM_CMD_CHAPTER_INFO      0x9A    // Client→ESP32 章节信息（JSON）
 #define X4IM_CMD_SELECT_CHAPTER    0x9B    // ESP32→Client 选择章节
-#define X4IM_CMD_CHAPTER_NAVIGATE  0x9C    // ESP32→Client 请求切换到相邻章节（next/prev）
-
-// 章节导航方向
-#define CHAPTER_NAV_PREVIOUS       0x00    // 请求上一章
-#define CHAPTER_NAV_NEXT           0x01    // 请求下一章
 
 // 蓝牙读书屏幕实例（导出以供屏幕管理器注册）
 screen_t g_ble_reader_screen = {0};
@@ -178,15 +170,6 @@ static ble_reader_state_internal_t s_ble_state = {
     .chapter_list_selection = 0,
     .book_title = {0},
 };
-
-// 章节信息接收状态（支持分包JSON）
-typedef struct {
-    bool receiving;
-    size_t expected;
-    size_t received;
-    char *buf;
-} chapter_info_rx_t;
-static chapter_info_rx_t s_chinfo_rx = {0};
 
 // 屏幕上下文
 static screen_context_t *s_context = NULL;
@@ -426,7 +409,7 @@ static int utf8_char_len(unsigned char c)
 /**
  * @brief 计算 UTF-8 字符串的显示字符数（含换行符，每个 \n 计 1 字符）
  */
-static size_t __attribute__((unused)) count_utf8_chars(const char *str)
+static size_t count_utf8_chars(const char *str)
 {
     if (!str) return 0;
     size_t count = 0;
@@ -454,28 +437,26 @@ static void get_text_layout_params(sFONT **font, int *line_height)
  * @return 消耗的字符数（含换行符）
  */
 /**
- * @brief 通用文本处理：绘制或测量消耗字节数
- * 算法：计算行列布局，逐字填充行缓冲，屏幕满或文件尾则返回消耗的字节数
- * 
- * 关键规则：
- * - 遇到换行符后，该行剩余空间不消耗字符，直接换行
- * - 返回值是消耗的字节数（用于 seek），不是字符数
- * 
- * @param text 要处理的文本（已经是从文件当前位置读取的内容）
- * @param do_draw true=绘制到屏幕，false=只计算消耗
- * @return 消耗的字节数
+ * @brief 通用文本处理：绘制或测量消耗字符数
+ * 算法：计算行列布局，逐字填充行缓冲，屏幕满或文件尾则返回绝对 seek 位置
+ * @return 绝对位置（就是 seek 到的位置，char_offset + 填充字符数）
  */
 static size_t process_wrapped_text(int x, int y, int max_width, int max_height,
                                    const char *text, size_t char_offset, bool do_draw)
 {
-    (void)char_offset;  // 不再使用 char_offset 参数，保留接口兼容性
-    
     if (!text || !*text) return 0;
 
     sFONT *font;
     int line_height;
     get_text_layout_params(&font, &line_height);
     if (!font) return 0;
+
+    // 跳过 char_offset 个字符到达起始位置（游标就像文件 seek）
+    const char *p = text;
+    for (size_t i = 0; i < char_offset && *p; i++) {
+        int clen = (*p == '\n') ? 1 : utf8_char_len((unsigned char)*p);
+        p += (clen > 0) ? clen : 1;
+    }
 
     // 计算布局：能显示多少行
     int lines_can_show = max_height / line_height;
@@ -485,13 +466,11 @@ static size_t process_wrapped_text(int x, int y, int max_width, int max_height,
     int line_len = 0;
     int lines_filled = 0;
     int cur_y = y;
-    
-    const char *p = text;           // 当前处理位置
-    const char *start = text;       // 起始位置，用于计算消耗字节数
+    size_t consumed = 0;
 
     // 逐字填充，直到屏幕满或文件结束
     while (*p && lines_filled < lines_can_show) {
-        // 换行符：直接换行，消耗这个换行符
+        // 换行符：直接换行
         if (*p == '\n') {
             if (do_draw && line_len > 0) {
                 line[line_len] = '\0';
@@ -500,7 +479,8 @@ static size_t process_wrapped_text(int x, int y, int max_width, int max_height,
             line_len = 0;
             cur_y += line_height;
             lines_filled++;
-            p++;  // 消耗换行符（1字节）
+            consumed++;  // 换行符计为 1 个字符
+            p++;
             continue;
         }
 
@@ -517,7 +497,6 @@ static size_t process_wrapped_text(int x, int y, int max_width, int max_height,
             cur_y += line_height;
             lines_filled++;
             if (lines_filled >= lines_can_show) break;
-            // 不移动 p，下次循环重新处理这个字符
             continue;
         }
 
@@ -543,6 +522,7 @@ static size_t process_wrapped_text(int x, int y, int max_width, int max_height,
         }
 
         // 字符成功添加，游标往后走
+        consumed++;
         p += clen;
     }
 
@@ -552,8 +532,7 @@ static size_t process_wrapped_text(int x, int y, int max_width, int max_height,
         display_draw_text_font(x, cur_y, line, font, COLOR_BLACK, COLOR_WHITE);
     }
 
-    // 返回消耗的字节数
-    return (size_t)(p - start);
+    return char_offset + consumed;
 }
 
 
@@ -665,7 +644,7 @@ static void deinit_x4im_mutex(void)
  * @brief 递归扫描目录，统计文件和目录数量
  * @note 限制递归深度避免栈溢出，使用堆分配路径缓冲避免占用栈空间
  */
-static void __attribute__((unused)) scan_directory_recursive(const char *path, int *file_count, int *dir_count, uint64_t *used_size)
+static void scan_directory_recursive(const char *path, int *file_count, int *dir_count, uint64_t *used_size)
 {
     // 限制递归深度，避免栈溢出（最大10层）
     static int depth = 0;
@@ -715,9 +694,6 @@ static void handle_page_data(const uint8_t *data, size_t length);
 /**
  * @brief 蓝牙数据接收回调 - 支持 VFS 章节协议（TXT文本数据）
  */
-/**
- * @brief 蓝牙数据接收回调 - 支持 VFS 章节协议（TXT文本数据）
- */
 static void ble_data_received_callback(const uint8_t *data, uint16_t length)
 {
     if (data == NULL || length == 0) {
@@ -742,221 +718,579 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
     bool is_command = (length >= 3 && data[0] == 0xA5 && data[1] == 0x5A);
     
     if (is_command) {
-        uint8_t cmd = data[2];
-        // 处理章节信息JSON（Client→ESP32）
-        if (cmd == X4IM_CMD_CHAPTER_INFO) {
-            // 头格式: [A5,5A,9A,total_chapters,len_low,len_high][JSON...]
-            if (length >= 6) {
-                uint8_t total_ch = data[3];
-                size_t json_len = (size_t)(data[4] | (data[5] << 8));
-                size_t header_json_bytes = (length > 6) ? (size_t)(length - 6) : 0;
-                ESP_LOGI(TAG, "Received CHAPTER_INFO header: total=%u, json_len=%zu, first_chunk=%zu", total_ch, json_len, header_json_bytes);
+        // 处理遗留的X4IM命令（兼容性）
+        ESP_LOGW(TAG, "Received legacy X4IM command, ignoring for VFS chapter protocol");
+        free((void *)data);
+        return;
+    }
+    
+    // VFS章节协议：直接接收TXT文本数据
+    // 写入当前章节的缓存文件
+    if (s_ble_state.vfs_book != NULL) {
+        // 获取当前章节索引和书籍哈希
+        int current_chapter = vfs_get_current_chapter(s_ble_state.vfs_book);
+        uint32_t book_hash = 0x12345678; // 默认值，应该从VFS上下文获取
+        
+        // 构造章节文件路径
+        char chapter_path[128];
+        snprintf(chapter_path, sizeof(chapter_path), "/littlefs/ble_vfs/0x%08lX_ch%d.txt", 
+                 (unsigned long)book_hash, current_chapter);
+        
+        // 以追加模式写入数据
+        FILE *fp = fopen(chapter_path, "ab");
+        if (fp != NULL) {
+            size_t written = fwrite(data, 1, length, fp);
+            fclose(fp);
+            
+            if (written == length) {
+                ESP_LOGI(TAG, "Wrote %zu bytes to chapter %d file: %s", 
+                         written, current_chapter, chapter_path);
+            } else {
+                ESP_LOGE(TAG, "Write failed: expected %u, written %zu", length, written);
+            }
+        } else {
+            ESP_LOGE(TAG, "Failed to open chapter file for writing: %s", chapter_path);
+        }
+    } else {
+        ESP_LOGW(TAG, "No VFS book available, discarding %u bytes of TXT data", length);
+    }
 
-                // 初始化接收缓冲
-                if (json_len == 0) {
-                    // 空列表
-                    s_ble_state.chapter_list_count = 0;
-                    s_ble_state.book_title[0] = '\0';
-                    // 刷新显示
-                    if (s_ble_state.chapter_browser_active) {
-                        draw_chapter_browser_screen();
-                        display_refresh(REFRESH_MODE_FULL);
+// VFS章节协议不需要复杂的命令处理
+    // 如果是旧的X4IM命令包，直接忽略
+    ESP_LOGD(TAG, "Ignoring legacy X4IM command for VFS chapter protocol");
+    free((void *)data);
+        return;
+    }
+    
+    // GET_MODE 命令：[0xA5, 0x5A, 0x8D] 共3字节
+    if (cmd_length == 1 && cmd == X4IM_CMD_GET_MODE) {
+        ESP_LOGI(TAG, "Received GET_MODE query");
+        
+        // 发送当前模式 [0x8D, mode]
+        uint8_t response[2] = {X4IM_CMD_GET_MODE, s_ble_state.work_mode};
+        ble_manager_send_data(response, 2);
+        ESP_LOGI(TAG, "Sent current mode: %s",
+                 s_ble_state.work_mode == BLE_MODE_READING ? "READING" : "TRANSFER");
+        
+        free((void *)data);
+        return;
+    }
+
+    // ========== 设置书籍/章节哈希 ==========
+    // SET_BOOK_CHAPTER: [0xA5, 0x5A, 0x98, bookHash(4B,LE), chapterHash(4B,LE)] 共11字节
+    if (cmd_length == 9 && cmd == X4IM_CMD_SET_BOOK_CHAPTER) {
+        uint32_t book_hash = (uint32_t)cmd_data[1] | ((uint32_t)cmd_data[2] << 8) |
+                             ((uint32_t)cmd_data[3] << 16) | ((uint32_t)cmd_data[4] << 24);
+        uint32_t chapter_hash = (uint32_t)cmd_data[5] | ((uint32_t)cmd_data[6] << 8) |
+                                ((uint32_t)cmd_data[7] << 16) | ((uint32_t)cmd_data[8] << 24);
+
+        bool changed = (book_hash != s_ble_state.current_book_hash) ||
+                       (chapter_hash != s_ble_state.current_chapter_hash);
+
+        s_ble_state.current_book_hash = book_hash;
+        s_ble_state.current_chapter_hash = chapter_hash;
+        s_ble_state.current_book_id = (uint16_t)(book_hash & 0xFFFF); // 兼容旧字段
+        s_ble_state.current_page = 0;
+        s_ble_state.char_position = 0;
+
+        if (changed) {
+            ESP_LOGI(TAG, "Set book/chapter hash: book=0x%08" PRIx32 ", chapter=0x%08" PRIx32,
+                     book_hash, chapter_hash);
+            // 重建 VFS 页面文件，避免旧书数据污染
+            vfs_page_init();
+            vfs_prepare_window(0);
+            // 发送一次章节快照给 Client，帮助其预加载
+            send_position_snapshot();
+        }
+
+        free((void *)data);
+        return;
+    }
+
+    // ========== SD 卡文件管理命令 ==========
+    // LIST_FILES 命令：扫描 /sdcard/ 根目录
+    // 格式: [0xA5, 0x5A, 0x8E, 路径长度, 路径...] - 可选路径，默认 /sdcard/
+    if (cmd_length >= 1 && cmd == X4IM_CMD_LIST_FILES) {
+        const char *scan_path = "/sdcard";
+        char path_buf[256] = {0};
+
+        if (cmd_length > 1) {
+            // 有路径参数： [0xA5, 0x5A, 0x8E, 路径长度, 路径...]
+            int path_len = cmd_data[1];
+            if (path_len > cmd_length - 2) path_len = cmd_length - 2;
+            if (path_len > sizeof(path_buf) - 1) path_len = sizeof(path_buf) - 1;
+            memcpy(path_buf, &cmd_data[2], path_len);
+            path_buf[path_len] = '\0';
+            if (path_len > 0) {
+                scan_path = path_buf;
+            }
+        }
+
+        ESP_LOGI(TAG, "Scanning directory: %s", scan_path);
+
+        // 使用共享的 fs_list_dir 进行目录扫描
+        fs_file_info_t *files = NULL;
+        int count = 0;
+
+        if (!fs_list_dir(scan_path, &files, &count)) {
+            ESP_LOGW(TAG, "Failed to list directory: %s", scan_path);
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x00};  // 0=empty
+            ble_manager_send_data(response, 2);
+            free((void *)data);
+            return;
+        }
+
+        // 发送目录列表：每条消息 [0x8B, 标志(1), 大小(4字节), 文件名...]
+        // 标志: bit0=1 表示目录, bit0=0 表示文件
+        int file_count = 0;
+        int dir_count = 0;
+
+        for (int i = 0; i < count; i++) {
+            uint8_t response[300];
+            response[0] = X4IM_CMD_FILE_NOTIFY;
+
+            if (files[i].is_directory) {
+                // 目录
+                response[1] = 0x01;  // 目录标志
+                // 大小字段设为0
+                response[2] = 0; response[3] = 0; response[4] = 0; response[5] = 0;
+                dir_count++;
+            } else {
+                // 文件
+                response[1] = 0x00;  // 文件标志
+                uint32_t size = (uint32_t)files[i].size;
+                response[2] = (size >> 0) & 0xFF;
+                response[3] = (size >> 8) & 0xFF;
+                response[4] = (size >> 16) & 0xFF;
+                response[5] = (size >> 24) & 0xFF;
+                file_count++;
+            }
+
+            // 文件名
+            int name_len = strlen(files[i].name);
+            if (name_len > 255 - 6) name_len = 255 - 6;
+            memcpy(&response[6], files[i].name, name_len);
+
+            ble_manager_send_data(response, 6 + name_len);
+            ESP_LOGI(TAG, "  %s: %s", files[i].is_directory ? "Dir" : "File", files[i].name);
+        }
+
+        // 释放文件列表
+        fs_free_file_list(files);
+
+        // 发送文件列表结束标记 [0x8B, 0xFF]
+        uint8_t end_marker[2] = {X4IM_CMD_FILE_NOTIFY, 0xFF};
+        ble_manager_send_data(end_marker, 2);
+        ESP_LOGI(TAG, "List complete: %d files, %d directories", file_count, dir_count);
+
+        free((void *)data);
+        return;
+    }
+
+    // DELETE_FILE 命令：[0xA5, 0x5A, 0x8F, 路径...]
+    // 客户端已发送完整路径（包含/sdcard/）
+    if (cmd_length > 1 && cmd == X4IM_CMD_DELETE_FILE) {
+        char *filepath = heap_caps_malloc(512, MALLOC_CAP_8BIT);
+        if (!filepath) {
+            ESP_LOGE(TAG, "Failed to allocate filepath buffer for DELETE_FILE");
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};
+            ble_manager_send_data(response, 2);
+            free((void *)data);
+            return;
+        }
+        int name_len = cmd_length - 1;
+        if (name_len > 511) name_len = 511;
+        memcpy(filepath, &cmd_data[1], name_len);
+        filepath[name_len] = '\0';
+
+        ESP_LOGI(TAG, "Deleting: %s", filepath);
+
+        struct stat st;
+        if (stat(filepath, &st) == 0) {
+            int result;
+            if (S_ISDIR(st.st_mode)) {
+                // 目录：先检查是否为空
+                DIR *dir = opendir(filepath);
+                int count = 0;
+                if (dir) {
+                    struct dirent *e;
+                    while ((e = readdir(dir)) != NULL) {
+                        if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0) {
+                            count++;
+                        }
                     }
+                    closedir(dir);
+                }
+                if (count > 0) {
+                    ESP_LOGW(TAG, "Directory not empty: %s (%d items)", filepath, count);
+                    uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x03};  // 3=directory not empty
+                    ble_manager_send_data(response, 2);
                 } else {
-                    // 分配缓冲并复制头包中携带的JSON数据
-                    if (s_chinfo_rx.buf) { free(s_chinfo_rx.buf); s_chinfo_rx.buf = NULL; }
-                    s_chinfo_rx.buf = (char *)malloc(json_len + 1);
-                    if (!s_chinfo_rx.buf) {
-                        ESP_LOGE(TAG, "Failed to alloc chapter JSON buffer (%zu)", json_len);
-                        free((void *)data);
-                        return;
+                    result = rmdir(filepath);
+                    if (result == 0) {
+                        ESP_LOGI(TAG, "Deleted directory: %s", filepath);
+                        uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
+                        ble_manager_send_data(response, 2);
+                    } else {
+                        ESP_LOGW(TAG, "Failed to delete directory: %s (errno=%d)", filepath, errno);
+                        uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};  // 2=failed
+                        ble_manager_send_data(response, 2);
                     }
-                    s_chinfo_rx.expected = json_len;
-                    s_chinfo_rx.received = 0;
-                    s_chinfo_rx.receiving = true;
-                    if (header_json_bytes > 0) {
-                        memcpy(s_chinfo_rx.buf, data + 6, header_json_bytes);
-                        s_chinfo_rx.received = header_json_bytes;
-                    }
+                }
+            } else {
+                // 文件
+                result = unlink(filepath);
+                if (result == 0) {
+                    ESP_LOGI(TAG, "Deleted file: %s", filepath);
+                    uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
+                    ble_manager_send_data(response, 2);
+                } else {
+                    ESP_LOGW(TAG, "Failed to delete file: %s (errno=%d)", filepath, errno);
+                    uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};  // 2=failed
+                    ble_manager_send_data(response, 2);
+                }
+            }
+        } else {
+            ESP_LOGW(TAG, "File not found: %s", filepath);
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x04};  // 4=not found
+            ble_manager_send_data(response, 2);
+        }
 
-                    // 如果已全部收到，直接解析
-                    if (s_chinfo_rx.received >= s_chinfo_rx.expected) {
-                        s_chinfo_rx.buf[s_chinfo_rx.expected] = '\0';
-                        parse_chapter_info_json(s_chinfo_rx.buf, s_chinfo_rx.expected);
-                        s_chinfo_rx.receiving = false;
-                        free(s_chinfo_rx.buf); s_chinfo_rx.buf = NULL;
-                        if (s_ble_state.chapter_browser_active) {
-                            draw_chapter_browser_screen();
-                            display_refresh(REFRESH_MODE_FULL);
+        free(filepath);
+        free((void *)data);
+        return;
+    }
+
+    // CLEAR_BOOKS 命令：[0xA5, 0x5A, 0x91] - 清空 /sdcard/books 目录
+    if (cmd_length == 1 && cmd == X4IM_CMD_CLEAR_BOOKS) {
+        ESP_LOGW(TAG, "Received CLEAR_BOOKS command - deleting all files in /sdcard/books");
+
+        // 使用 fs_list_dir 获取文件列表
+        fs_file_info_t *files = NULL;
+        int count = 0;
+
+        if (!fs_list_dir("/sdcard/books", &files, &count)) {
+            ESP_LOGW(TAG, "Failed to list /sdcard/books directory");
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};  // 2=failed
+            ble_manager_send_data(response, 2);
+            free((void *)data);
+            return;
+        }
+
+        int deleted = 0;
+        char *filepath = heap_caps_malloc(512, MALLOC_CAP_8BIT);
+        if (filepath) {
+            for (int i = 0; i < count; i++) {
+                if (!files[i].is_directory) {
+                    if (fs_build_child_path(filepath, 512, "/sdcard/books", files[i].name)) {
+                        if (unlink(filepath) == 0) {
+                            deleted++;
+                            ESP_LOGI(TAG, "Deleted: %s", filepath);
                         }
                     }
                 }
             }
-            free((void *)data);
-            return;
+            free(filepath);
         }
-        // 其它命令保持原兼容行为：忽略
-        ESP_LOGW(TAG, "Received command 0x%02X, ignored by VFS TXT flow", cmd);
+        fs_free_file_list(files);
+        
+        ESP_LOGI(TAG, "Deleted %d files from /sdcard/books", deleted);
+        uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
+        ble_manager_send_data(response, 2);
+
         free((void *)data);
         return;
     }
-    
-    // 如果正在接收章节JSON的后续分块，则累积并处理
-    if (s_chinfo_rx.receiving) {
-        if (length > 0 && s_chinfo_rx.buf && s_chinfo_rx.received < s_chinfo_rx.expected) {
-            size_t copy_len = length;
-            if (s_chinfo_rx.received + copy_len > s_chinfo_rx.expected) {
-                copy_len = s_chinfo_rx.expected - s_chinfo_rx.received;
+
+    // CREATE_DIR 命令：[0xA5, 0x5A, 0x92, 路径...]
+    // 客户端已发送完整路径，直接创建即可
+    if (cmd_length > 1 && cmd == X4IM_CMD_CREATE_DIR) {
+        char *dirpath = heap_caps_malloc(512, MALLOC_CAP_8BIT);
+        if (!dirpath) {
+            ESP_LOGE(TAG, "Failed to allocate dirpath buffer for CREATE_DIR");
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};
+            ble_manager_send_data(response, 2);
+            free((void *)data);
+            return;
+        }
+        int name_len = cmd_length - 1;
+        if (name_len > 511) name_len = 511;
+        memcpy(dirpath, &cmd_data[1], name_len);
+        dirpath[name_len] = '\0';
+
+        ESP_LOGI(TAG, "Creating directory: %s", dirpath);
+
+        if (mkdir(dirpath, 0755) == 0 || errno == EEXIST) {
+            ESP_LOGI(TAG, "Directory created/exists: %s", dirpath);
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
+            ble_manager_send_data(response, 2);
+        } else {
+            ESP_LOGW(TAG, "Failed to create directory: %s (errno=%d)", dirpath, errno);
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};  // 2=failed
+            ble_manager_send_data(response, 2);
+        }
+
+        free(dirpath);
+        free((void *)data);
+        return;
+    }
+
+    // RENAME_FILE 命令：[0xA5, 0x5A, 0x90, 旧名长度, 旧名..., 新名长度, 新名...]
+    // 客户端已发送完整路径（包含/sdcard/）
+    if (cmd_length > 2 && cmd == X4IM_CMD_RENAME_FILE) {
+        int offset = 1;
+        int old_len = cmd_data[offset++];
+        if (old_len > cmd_length - offset - 1) old_len = cmd_length - offset - 1;
+        if (old_len > 490) old_len = 490;
+
+        char oldpath[512];
+        memcpy(oldpath, &cmd_data[offset], old_len);
+        oldpath[old_len] = '\0';
+        offset += old_len;
+
+        int new_len = cmd_data[offset++];
+        if (new_len > cmd_length - offset) new_len = cmd_length - offset;
+        if (new_len > 490) new_len = 490;
+
+        char newpath[512];
+        memcpy(newpath, &cmd_data[offset], new_len);
+        newpath[new_len] = '\0';
+
+        ESP_LOGI(TAG, "Renaming: %s -> %s", oldpath, newpath);
+
+        if (rename(oldpath, newpath) == 0) {
+            ESP_LOGI(TAG, "Rename successful");
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
+            ble_manager_send_data(response, 2);
+        } else {
+            ESP_LOGW(TAG, "Rename failed: %s -> %s (errno=%d)", oldpath, newpath, errno);
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};  // 2=failed
+            ble_manager_send_data(response, 2);
+        }
+
+        free((void *)data);
+        return;
+    }
+
+    // GET_STORAGE_INFO 命令：[0xA5, 0x5A, 0x93]
+    if (cmd_length == 1 && cmd == X4IM_CMD_GET_STORAGE_INFO) {
+        ESP_LOGI(TAG, "Received GET_STORAGE_INFO command - scanning entire SD card");
+
+        // 递归扫描 /sdcard/ 目录
+        uint64_t total_size = 0;
+        uint64_t used_size = 0;
+        int file_count = 0;
+        int dir_count = 0;
+
+        // 使用 statfs 获取实际容量
+        FATFS *fs;
+        DWORD fre_clust, fre_bsec, tot_bsec;
+        if (f_getfree("/sdcard", &fre_clust, &fs) == 0) {
+            tot_bsec = fs->csize * fs->n_fatent;
+            fre_bsec = fre_clust * fs->csize;
+            total_size = (uint64_t)tot_bsec * 512;
+            uint64_t free_size = (uint64_t)fre_bsec * 512;
+            used_size = total_size - free_size;
+        } else {
+            // 估算总容量（假设 4GB SD 卡）
+            total_size = 4LL * 1024 * 1024 * 1024;
+        }
+
+        // 递归统计文件和目录数量
+        scan_directory_recursive("/sdcard", &file_count, &dir_count, &used_size);
+
+        // 发送响应: [0x93, total(4), used(4), files(2), dirs(2)]
+        uint8_t response[13];
+        response[0] = X4IM_CMD_GET_STORAGE_INFO;
+
+        // total_size (小端，限制为 32 位)
+        uint32_t total32 = (total_size > 0xFFFFFFFF) ? 0xFFFFFFFF : (uint32_t)total_size;
+        response[1] = (total32 >> 0) & 0xFF;
+        response[2] = (total32 >> 8) & 0xFF;
+        response[3] = (total32 >> 16) & 0xFF;
+        response[4] = (total32 >> 24) & 0xFF;
+
+        // used_size (小端，限制为 32 位)
+        uint32_t used32 = (used_size > 0xFFFFFFFF) ? 0xFFFFFFFF : (uint32_t)used_size;
+        response[5] = (used32 >> 0) & 0xFF;
+        response[6] = (used32 >> 8) & 0xFF;
+        response[7] = (used32 >> 16) & 0xFF;
+        response[8] = (used32 >> 24) & 0xFF;
+
+        // file_count (小端)
+        response[9] = (file_count >> 0) & 0xFF;
+        response[10] = (file_count >> 8) & 0xFF;
+
+        // dir_count (小端)
+        response[11] = (dir_count >> 0) & 0xFF;
+        response[12] = (dir_count >> 8) & 0xFF;
+
+        ble_manager_send_data(response, 13);
+        ESP_LOGI(TAG, "Storage info: total=%llu, used=%llu, files=%d, dirs=%d",
+                 (unsigned long long)total_size, (unsigned long long)used_size, file_count, dir_count);
+
+        free((void *)data);
+        return;
+    }
+
+    // READ_FILE 命令：[0xA5, 0x5A, 0x94, 偏移(4字节), 大小(4字节), 路径...]
+    // 读取文件的指定范围并发送给客户端
+    if (cmd_length > 9 && cmd == X4IM_CMD_READ_FILE) {
+        uint32_t offset = cmd_data[1] | (cmd_data[2] << 8) | (cmd_data[3] << 16) | (cmd_data[4] << 24);
+        uint32_t read_size = cmd_data[5] | (cmd_data[6] << 8) | (cmd_data[7] << 16) | (cmd_data[8] << 24);
+        
+        char filepath[512];
+        int path_len = cmd_length - 9;
+        if (path_len > sizeof(filepath) - 1) path_len = sizeof(filepath) - 1;
+        memcpy(filepath, &cmd_data[9], path_len);
+        filepath[path_len] = '\0';
+
+        ESP_LOGI(TAG, "Reading file: %s (offset=%u, size=%u)", filepath, offset, read_size);
+
+        FILE *file = fopen(filepath, "rb");
+        if (!file) {
+            ESP_LOGW(TAG, "Failed to open file: %s (errno=%d)", filepath, errno);
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x04};  // 4=not found
+            ble_manager_send_data(response, 2);
+            free((void *)data);
+            return;
+        }
+
+        // 获取文件大小
+        fseek(file, 0, SEEK_END);
+        long file_size = ftell(file);
+        fseek(file, 0, SEEK_SET);
+
+        // 检查偏移和大小是否有效
+        if (offset >= file_size) {
+            ESP_LOGW(TAG, "Invalid offset: %u >= %ld", offset, file_size);
+            fclose(file);
+            uint8_t response[2] = {X4IM_CMD_FILE_NOTIFY, 0x02};  // 2=failed
+            ble_manager_send_data(response, 2);
+            free((void *)data);
+            return;
+        }
+
+        // 调整读取大小
+        if (offset + read_size > file_size) {
+            read_size = file_size - offset;
+        }
+
+        // 分块发送文件数据（每块最大11256字节）
+        const uint32_t CHUNK_SIZE = 256;
+        uint8_t *chunk_buffer = heap_caps_malloc(CHUNK_SIZE + 13, MALLOC_CAP_8BIT);  // 13字节头部
+        if (!chunk_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate chunk buffer");
+            fclose(file);
+            free((void *)data);
+            return;
+        }
+
+        fseek(file, offset, SEEK_SET);
+        uint32_t sent = 0;
+
+        while (sent < read_size) {
+            uint32_t chunk_len = (read_size - sent > CHUNK_SIZE) ? CHUNK_SIZE : (read_size - sent);
+            size_t bytes_read = fread(&chunk_buffer[13], 1, chunk_len, file);
+            
+            if (bytes_read == 0) {
+                ESP_LOGW(TAG, "File read error or EOF");
+                break;
             }
-            memcpy(s_chinfo_rx.buf + s_chinfo_rx.received, data, copy_len);
-            s_chinfo_rx.received += copy_len;
-            ESP_LOGI(TAG, "Accumulating CHAPTER_INFO JSON: %zu/%zu", s_chinfo_rx.received, s_chinfo_rx.expected);
-            if (s_chinfo_rx.received >= s_chinfo_rx.expected) {
-                s_chinfo_rx.buf[s_chinfo_rx.expected] = '\0';
-                parse_chapter_info_json(s_chinfo_rx.buf, s_chinfo_rx.expected);
-                s_chinfo_rx.receiving = false;
-                free(s_chinfo_rx.buf); s_chinfo_rx.buf = NULL;
+
+            // 构建数据包: [0x95, 偏移(4), 总大小(4), 当前块大小(4), 数据...]
+            chunk_buffer[0] = X4IM_CMD_FILE_DATA;
+            uint32_t current_offset = offset + sent;
+            chunk_buffer[1] = (current_offset >> 0) & 0xFF;
+            chunk_buffer[2] = (current_offset >> 8) & 0xFF;
+            chunk_buffer[3] = (current_offset >> 16) & 0xFF;
+            chunk_buffer[4] = (current_offset >> 24) & 0xFF;
+            chunk_buffer[5] = (file_size >> 0) & 0xFF;
+            chunk_buffer[6] = (file_size >> 8) & 0xFF;
+            chunk_buffer[7] = (file_size >> 16) & 0xFF;
+            chunk_buffer[8] = (file_size >> 24) & 0xFF;
+            chunk_buffer[9] = (bytes_read >> 0) & 0xFF;
+            chunk_buffer[10] = (bytes_read >> 8) & 0xFF;
+            chunk_buffer[11] = (bytes_read >> 16) & 0xFF;
+            chunk_buffer[12] = (bytes_read >> 24) & 0xFF;
+
+            ble_manager_send_data(chunk_buffer, 13 + bytes_read);
+            sent += bytes_read;
+
+            ESP_LOGI(TAG, "Sent chunk: offset=%u, size=%zu, total=%u/%ld",
+                     current_offset, bytes_read, sent, file_size);
+
+            // 短暂延迟，避免蓝牙缓冲区溢出
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+
+        free(chunk_buffer);
+        fclose(file);
+        
+        ESP_LOGI(TAG, "File transfer complete: %u bytes sent", sent);
+        
+        // 发送传输完成标记
+        uint8_t end_marker[2] = {X4IM_CMD_FILE_NOTIFY, 0x01};  // 1=success
+        ble_manager_send_data(end_marker, 2);
+
+        free((void *)data);
+        return;
+    }
+
+    // ========== 章节信息（CHAPTER_INFO） ==========
+    // CHAPTER_INFO: [0xA5, 0x5A, 0x9A, total_chapters, json_len_low, json_len_high, json_data...]
+    if (cmd_length >= 4 && cmd == X4IM_CMD_CHAPTER_INFO) {
+        uint8_t total_chapters = cmd_data[1];
+        uint16_t json_len = cmd_data[2] | (cmd_data[3] << 8);
+        
+        ESP_LOGI(TAG, "Received CHAPTER_INFO: %d chapters, JSON length=%d", total_chapters, json_len);
+        
+        // 如果这是头部包（只有头部，没有JSON数据）
+        if (cmd_length == 4) {
+            ESP_LOGI(TAG, "CHAPTER_INFO header received, waiting for JSON data...");
+            free((void *)data);
+            return;
+        }
+        
+        // 提取JSON数据
+        if (cmd_length > 4) {
+            size_t json_data_len = cmd_length - 4;
+            if (json_data_len > json_len) {
+                json_data_len = json_len;
+            }
+            
+            // 创建NULL结尾的JSON字符串
+            char *json_str = heap_caps_malloc(json_data_len + 1, MALLOC_CAP_8BIT);
+            if (json_str) {
+                memcpy(json_str, &cmd_data[4], json_data_len);
+                json_str[json_data_len] = '\0';
+                
+                ESP_LOGI(TAG, "Parsing chapter info JSON (%zu bytes)", json_data_len);
+                
+                // 解析JSON
+                parse_chapter_info_json(json_str, json_data_len);
+                
+                free(json_str);
+                
+                // 如果章节浏览器已激活，刷新显示
                 if (s_ble_state.chapter_browser_active) {
                     draw_chapter_browser_screen();
                     display_refresh(REFRESH_MODE_FULL);
                 }
+            } else {
+                ESP_LOGE(TAG, "Failed to allocate memory for JSON parsing");
             }
         }
+        
         free((void *)data);
         return;
     }
 
-    // ========== 检测并解析 X4IM v2 协议头 ==========
-    // X4IM v2 头部: "X4IM" (4B) + version(1B) + type(1B) + flags(2B) + payload_size(4B) + ...
-    const uint8_t *payload_data = data;
-    size_t payload_length = length;
-    bool has_x4im_header = false;
-    
-    if (length >= X4IM_HEADER_SIZE && 
-        data[0] == 'X' && data[1] == '4' && data[2] == 'I' && data[3] == 'M' && data[4] == 0x02) {
-        // 解析 X4IM v2 头部
-        uint8_t type = data[5];
-        uint16_t flags = data[6] | (data[7] << 8);
-        uint32_t declared_payload_size = data[8] | (data[9] << 8) | (data[10] << 16) | (data[11] << 24);
-        
-        ESP_LOGI(TAG, "X4IM v2 header detected: type=0x%02X, flags=0x%04X, payload=%lu bytes",
-                 type, flags, (unsigned long)declared_payload_size);
-        
-        // 跳过32字节头部，只处理payload
-        payload_data = data + X4IM_HEADER_SIZE;
-        payload_length = (length > X4IM_HEADER_SIZE) ? (length - X4IM_HEADER_SIZE) : 0;
-        has_x4im_header = true;
-        
-        ESP_LOGI(TAG, "Extracted payload: %zu bytes (original packet: %u bytes)", 
-                 payload_length, length);
-    }
-
-    // VFS章节协议：接收TXT文本数据（纯文本或X4IM payload）
-    // 检测EOF标记（5字节："\x00EOF\n" 或 4字节："\x00EOF"）
-    // 这表示传输完成，此时才触发显示
-    bool is_eof_marker = false;
-    if (payload_length >= 4) {
-        // 检测 "\x00EOF\n" (5字节) 或 "\x00EOF" (4字节)
-        if ((payload_length == 5 && payload_data[0] == 0x00 && payload_data[1] == 'E' && payload_data[2] == 'O' && payload_data[3] == 'F' && payload_data[4] == '\n') ||
-            (payload_length == 4 && payload_data[0] == 0x00 && payload_data[1] == 'E' && payload_data[2] == 'O' && payload_data[3] == 'F')) {
-            is_eof_marker = true;
-            ESP_LOGI(TAG, "*** Received EOF marker - transfer complete! ***");
-        }
-    }
-    
-    // 写入当前章节的缓存文件
-    if (s_ble_state.vfs_book != NULL && payload_length > 0) {
-        // 获取当前章节索引
-        int current_chapter = vfs_get_current_chapter(s_ble_state.vfs_book);
-        
-        // 构造章节文件路径（简化：使用固定文件名，不依赖book_hash）
-        char chapter_path[128];
-        snprintf(chapter_path, sizeof(chapter_path), "/littlefs/ble_vfs/current_ch%d.txt", 
-                 current_chapter);
-        
-        ESP_LOGI(TAG, "Write path: %s", chapter_path);
-        
-        // 确保目录存在
-        struct stat st;
-        if (stat("/littlefs/ble_vfs", &st) != 0) {
-            mkdir("/littlefs/ble_vfs", 0755);
-        }
-        
-        // EOF标记不写入文件，只触发显示
-        if (is_eof_marker) {
-            ESP_LOGI(TAG, "Transfer complete for chapter %d, triggering display", current_chapter);
-            
-            // 设置状态表示页面已就绪
-            s_ble_state.page_loaded = true;
-            
-            // 初始化 book_id（如果尚未初始化）
-            if (s_ble_state.current_book_id == 0) {
-                s_ble_state.current_book_id = 1;
-                s_ble_state.initialization_complete = true;
-                ESP_LOGI(TAG, "VFS transfer complete, book_id=1, ready to display");
-            }
-            
-            // 重置读取位置到文件开头
-            s_ble_state.char_position = 0;
-            s_ble_state.history_len = 0;
-            
-            // 获取文件大小（字节数）用于翻页边界检测
-            struct stat file_st;
-            if (stat(chapter_path, &file_st) == 0) {
-                s_ble_state.total_chars = (size_t)file_st.st_size;
-                ESP_LOGI(TAG, "File size: %zu bytes", s_ble_state.total_chars);
-            } else {
-                s_ble_state.total_chars = 0;
-            }
-            
-            // 重置 VFS 文件位置到开头（关键！）
-            if (s_ble_state.vfs_book != NULL) {
-                vfs_seek(s_ble_state.vfs_book, 0, SEEK_SET);
-                ESP_LOGI(TAG, "VFS file position reset to 0");
-            }
-            
-            // 标记下次收到数据是新传输
-            extern bool g_ble_new_transfer;
-            g_ble_new_transfer = true;
-            
-            // 触发屏幕刷新显示TXT内容
-            screen_t *screen = screen_manager_get_current();
-            if (screen != NULL && screen == &g_ble_reader_screen) {
-                screen->needs_redraw = true;
-                screen_manager_draw();
-            }
-        } else {
-            // 正常数据：写入文件（不刷新屏幕）
-            // 使用全局变量跟踪：如果是新传输则新建文件，否则追加
-            const char *mode = g_ble_new_transfer ? "wb" : "ab";  // 新传输用wb，否则追加
-            FILE *fp = fopen(chapter_path, mode);
-            if (fp != NULL) {
-                // 写入payload数据（如果有X4IM头则已跳过，否则是原始数据）
-                size_t written = fwrite(payload_data, 1, payload_length, fp);
-                fclose(fp);
-                
-                if (written == payload_length) {
-                    if (g_ble_new_transfer) {
-                        ESP_LOGI(TAG, "New file created, wrote %zu bytes to chapter %d%s", 
-                                 written, current_chapter, has_x4im_header ? " (X4IM)" : "");
-                        g_ble_new_transfer = false;  // 后续数据追加
-                    } else {
-                        ESP_LOGD(TAG, "Appended %zu bytes to chapter %d%s", 
-                                 written, current_chapter, has_x4im_header ? " (X4IM)" : "");
-                    }
-                } else {
-                    ESP_LOGE(TAG, "Write failed: expected %zu, written %zu", payload_length, written);
-                }
-            } else {
-                ESP_LOGE(TAG, "Failed to open chapter file for writing: %s (mode=%s)", chapter_path, mode);
-            }
-        }
-    } else if (payload_length == 0 && !is_eof_marker) {
-        ESP_LOGW(TAG, "Empty payload received (length=%u, has_x4im=%d)", length, has_x4im_header);
-    }
-    
+    // ========== 未识别的命令 ==========
+    ESP_LOGW(TAG, "Unknown command in packet: CMD=0x%02X, length=%zu", cmd, cmd_length);
     free((void *)data);
 }
+
 /**
  * @brief 处理页面数据（非命令数据）
  * @param data 数据指针（会在函数内部释放）
@@ -1308,18 +1642,29 @@ static void __attribute__((unused)) handle_page_data(const uint8_t *data, size_t
                     }
 
                     if (x4im_rx_state.logical_index == (int32_t)s_ble_state.current_page) {
-                        // 获取文件大小（字节数）用于翻页边界检测
+                        // 只在当前页完成时统计字符数（不包含换行符）
                         char filename[64];
                         snprintf(filename, sizeof(filename), "%s", x4im_rx_state.filename);
-                        struct stat st;
-                        if (stat(filename, &st) == 0) {
-                            s_ble_state.total_chars = (size_t)st.st_size;  // 存储文件大小（字节数）
-                            ESP_LOGI(TAG, "Page loaded: file size = %zu bytes", s_ble_state.total_chars);
+                        FILE *f = fopen(filename, "rb");
+                        if (f != NULL) {
+                            char *text_buf = heap_caps_malloc(BLE_TEXT_MAX_BYTES, MALLOC_CAP_8BIT);
+                            if (!text_buf) {
+                                ESP_LOGE(TAG, "Failed to allocate text_buf");
+                                fclose(f);
+                                goto page_load_done;
+                            }
+                            size_t read = fread(text_buf, 1, BLE_TEXT_MAX_BYTES - 1, f);
+                            fclose(f);
+                            text_buf[read] = '\0';
+                            s_ble_state.total_chars = count_utf8_chars(text_buf);
+                            ESP_LOGI(TAG, "Page loaded: %zu display characters (excluding newlines)", s_ble_state.total_chars);
+                            free(text_buf);
                         } else {
                             s_ble_state.total_chars = 0;
-                            ESP_LOGW(TAG, "Failed to get file size");
+                            ESP_LOGW(TAG, "Failed to count characters in page");
                         }
                     }
+page_load_done:
 
                     // 标记页面已加载（仅对当前页）
                     s_ble_state.page_loaded = (x4im_rx_state.logical_index == (int32_t)s_ble_state.current_page);
@@ -1433,34 +1778,6 @@ static void send_position_snapshot(void)
     bool sent = ble_manager_send_data(snapshot, sizeof(snapshot));
     ESP_LOGI(TAG, "[POSITION_SNAPSHOT] book=0x%08" PRIx32 ", chapter=0x%08" PRIx32 " - %s",
              book_hash, chap_hash, sent ? "SENT" : "FAILED");
-}
-
-/**
- * @brief 发送章节导航请求到 Client（请求上一章/下一章）
- * 格式：[Magic(2B), CMD(1B), Direction(1B)]
- * Client 收到后会调用服务器获取新章节 URL，然后发送新章节内容
- * @param direction CHAPTER_NAV_PREVIOUS=上一章, CHAPTER_NAV_NEXT=下一章
- */
-static void send_chapter_navigate_request(uint8_t direction)
-{
-    uint8_t cmd[4] = {
-        0xA5, 0x5A,                    // Magic
-        X4IM_CMD_CHAPTER_NAVIGATE,     // 0x9C
-        direction
-    };
-    
-    bool sent = ble_manager_send_notification(cmd, sizeof(cmd));
-    ESP_LOGI(TAG, "[CHAPTER_NAVIGATE] direction=%s - %s",
-             direction == CHAPTER_NAV_NEXT ? "NEXT" : "PREVIOUS",
-             sent ? "SENT" : "FAILED");
-    
-    // 显示加载提示
-    if (sent) {
-        display_draw_text_menu(20, 100, 
-                               direction == CHAPTER_NAV_NEXT ? "正在加载下一章..." : "正在加载上一章...", 
-                               COLOR_BLACK, COLOR_WHITE);
-        display_refresh(REFRESH_MODE_PARTIAL);
-    }
 }
 
 /**
@@ -1797,11 +2114,8 @@ static void draw_reading_mode_screen(bool clear_content)
         } else {
             // 使用互斥锁防止与 BLE 接收冲突
             if (x4im_rx_mutex != NULL && xSemaphoreTake(x4im_rx_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                // 先seek到当前字符位置，确保从正确位置读取
-                vfs_seek(s_ble_state.vfs_book, s_ble_state.char_position, SEEK_SET);
-                
                 // VFS已处理缓存，直接读取当前位置的数据
-                bytes_read = vfs_read(s_ble_state.vfs_book, page_buffer, BLE_TEXT_MAX_BYTES - 1);
+                bytes_read = vfs_read(s_ble_state.vfs_book, page_buffer, sizeof(page_buffer) - 1);
                 vfs_page_ready = (bytes_read > 0);
             
                 if (vfs_page_ready) {
@@ -1810,10 +2124,9 @@ static void draw_reading_mode_screen(bool clear_content)
                     // 内容区域：使用统一的布局常量
                     int content_width = SCREEN_WIDTH - 2 * BLE_CONTENT_X_MARGIN;
                     int content_height = SCREEN_HEIGHT - BLE_CONTENT_Y_START - BLE_CONTENT_BOTTOM_MARGIN;
-                    // 先计算本页消耗的字节数（用于精确翻页seek）
-                    // 注意：page_buffer 已经是从 char_position 位置读取的，所以 offset 传 0
-                    s_ble_state.last_page_consumed = measure_wrapped_consumed(content_width, content_height, page_buffer, 0);
-                    draw_wrapped_text(BLE_CONTENT_X_MARGIN, BLE_CONTENT_Y_START, content_width, content_height, page_buffer, 0);
+                    // 先计算本页可消耗的显示字符数（用于精确翻页）
+                    s_ble_state.last_page_consumed = measure_wrapped_consumed(content_width, content_height, page_buffer, s_ble_state.char_position);
+                    draw_wrapped_text(BLE_CONTENT_X_MARGIN, BLE_CONTENT_Y_START, content_width, content_height, page_buffer, s_ble_state.char_position);
                 } else {
                     // 文件为空，显示提示
                     display_draw_text_menu(20, 100, "文件为空", COLOR_BLACK, COLOR_WHITE);
@@ -1825,34 +2138,19 @@ static void draw_reading_mode_screen(bool clear_content)
             }
 
             if (!vfs_page_ready) {
-                // 本地文件读取失败，可能是文件为空或还未传输
-                // 检查文件是否存在
-                char chapter_path[128];
-                int current_chapter = vfs_get_current_chapter(s_ble_state.vfs_book);
-                snprintf(chapter_path, sizeof(chapter_path), "/littlefs/ble_vfs/current_ch%d.txt", 
-                         current_chapter >= 0 ? current_chapter : 0);
-                
-                struct stat st;
-                if (stat(chapter_path, &st) == 0 && st.st_size > 0) {
-                    // 文件存在且有内容，但读取位置可能超出文件
-                    display_draw_text_menu(20, 100, "已到达末尾", COLOR_BLACK, COLOR_WHITE);
-                    char info[64];
-                    snprintf(info, sizeof(info), "文件大小: %ld 字节", (long)st.st_size);
-                    display_draw_text_menu(20, 140, info, COLOR_BLACK, COLOR_WHITE);
-                } else if (x4im_rx_state.receiving) {
-                    // 正在接收数据
-                    display_draw_text_menu(20, 100, "正在接收...", COLOR_BLACK, COLOR_WHITE);
-                    if (x4im_rx_state.expected_size > 0) {
-                        char progress[64];
-                        float percent = (float)x4im_rx_state.received_size * 100.0f / x4im_rx_state.expected_size;
-                        snprintf(progress, sizeof(progress), "进度: %.0f%% (%lu/%lu)",
-                                 percent, (unsigned long)x4im_rx_state.received_size, (unsigned long)x4im_rx_state.expected_size);
-                        display_draw_text_menu(20, 140, progress, COLOR_BLACK, COLOR_WHITE);
-                    }
+                // 页面缺失或尚未写完，显示等待提示
+                display_draw_text_menu(20, 100, "等待加载...", COLOR_BLACK, COLOR_WHITE);
+                // 如果正在接收这一页，显示进度
+                if (x4im_rx_state.receiving &&
+                    x4im_rx_state.expected_size > 0 &&
+                    x4im_rx_state.logical_index == (int32_t)s_ble_state.current_page) {
+                    char progress[64];
+                    float percent = (float)x4im_rx_state.received_size * 100.0f / x4im_rx_state.expected_size;
+                    snprintf(progress, sizeof(progress), "接收中: %.0f%% (%lu/%lu 字节)",
+                             percent, (unsigned long)x4im_rx_state.received_size, (unsigned long)x4im_rx_state.expected_size);
+                    display_draw_text_menu(20, 140, progress, COLOR_BLACK, COLOR_WHITE);
                 } else {
-                    // 文件不存在或为空，等待传输
-                    display_draw_text_menu(20, 100, "等待传输...", COLOR_BLACK, COLOR_WHITE);
-                    display_draw_text_menu(20, 140, "请从手机发送内容", COLOR_BLACK, COLOR_WHITE);
+                    display_draw_text_menu(20, 140, "正在从手机请求...", COLOR_BLACK, COLOR_WHITE);
                 }
             }
             
@@ -1953,15 +2251,9 @@ static inline void page_previous(void) {
             s_ble_state.char_position = 0;
         }
         ESP_LOGI(TAG, "Page previous: %u (seek=%zu)", s_ble_state.current_page, s_ble_state.char_position);
-        
-        // 重置VFS文件位置到char_position，以便重新读取
-        if (s_ble_state.vfs_book != NULL) {
-            vfs_seek(s_ble_state.vfs_book, s_ble_state.char_position, SEEK_SET);
-        }
-        
         update_cached_window(s_ble_state.current_page);
         send_position_snapshot();
-        // 本地翻页不需要向手机请求，直接重绘即可
+        send_page_sync_notification(s_ble_state.current_page);
     }
 }
 
@@ -1977,51 +2269,23 @@ static inline void page_next(void) {
         s_ble_state.char_position += s_ble_state.last_page_consumed;
         s_ble_state.current_page++;
         ESP_LOGI(TAG, "Page next: %u (seek=%zu)", s_ble_state.current_page, s_ble_state.char_position);
-        
-        // 重置VFS文件位置到char_position，以便重新读取
-        if (s_ble_state.vfs_book != NULL) {
-            vfs_seek(s_ble_state.vfs_book, s_ble_state.char_position, SEEK_SET);
-        }
-        
         update_cached_window(s_ble_state.current_page);
         send_position_snapshot();
-        // 本地翻页不需要向手机请求，直接重绘即可
+        send_page_sync_notification(s_ble_state.current_page);
     }
 }
 
-/** @brief 滚动上一屏：从历史恢复或回到开头，到达开头时请求上一章 */
+/** @brief 滚动上一屏：从历史恢复或回到开头 */
 static inline void scroll_up(void) {
     if (s_ble_state.history_len > 0) {
-        // 有历史记录，恢复到上一个位置
         s_ble_state.char_position = s_ble_state.history_char_pos[--s_ble_state.history_len];
-        ESP_LOGI(TAG, "Scroll UP: restore to seek=%zu", s_ble_state.char_position);
-        
-        // 重置VFS文件位置
-        if (s_ble_state.vfs_book != NULL) {
-            vfs_seek(s_ble_state.vfs_book, s_ble_state.char_position, SEEK_SET);
-        }
-        
-        send_position_snapshot();
-        draw_reading_mode_screen(true);
-        display_refresh(REFRESH_MODE_PARTIAL);
     } else if (s_ble_state.char_position > 0) {
-        // 没有历史但不在开头，回到开头
         s_ble_state.char_position = 0;
-        ESP_LOGI(TAG, "Scroll UP: back to start");
-        
-        // 重置VFS文件位置
-        if (s_ble_state.vfs_book != NULL) {
-            vfs_seek(s_ble_state.vfs_book, 0, SEEK_SET);
-        }
-        
-        send_position_snapshot();
-        draw_reading_mode_screen(true);
-        display_refresh(REFRESH_MODE_PARTIAL);
-    } else {
-        // 已经在开头（char_position == 0 且无历史）→ 请求上一章
-        ESP_LOGI(TAG, "Scroll UP: at beginning, requesting previous chapter");
-        send_chapter_navigate_request(CHAPTER_NAV_PREVIOUS);
     }
+    ESP_LOGI(TAG, "Scroll UP: seek=%zu", s_ble_state.char_position);
+    send_position_snapshot();
+    draw_reading_mode_screen(true);
+    display_refresh(REFRESH_MODE_PARTIAL);
 }
 
 /** @brief 滚动下一屏：步进 seek，使用实际消耗计算 */
@@ -2040,24 +2304,29 @@ static inline void scroll_down(void) {
     
     // 检查是否超过当前页末尾
     if (s_ble_state.total_chars > 0 && new_pos >= s_ble_state.total_chars) {
-        // 已经到达文件末尾 → 请求下一章
-        ESP_LOGI(TAG, "Scroll DOWN: at end (pos=%zu, total=%zu), requesting next chapter", 
-                 new_pos, s_ble_state.total_chars);
-        send_chapter_navigate_request(CHAPTER_NAV_NEXT);
-    } else if (s_ble_state.total_chars == 0 && s_ble_state.last_page_consumed == 0) {
-        // 文件为空或未加载 → 也请求下一章
-        ESP_LOGI(TAG, "Scroll DOWN: empty content, requesting next chapter");
-        send_chapter_navigate_request(CHAPTER_NAV_NEXT);
+        // 已经到或超过页末：需要翻到下一页
+        bool can_next = (s_ble_state.total_pages == 0 || s_ble_state.current_page < s_ble_state.total_pages - 1);
+        if (can_next) {
+            // 保存当前页起始到历史，翻下一页
+            if (s_ble_state.history_len < (uint8_t)(sizeof(s_ble_state.history_char_pos)/sizeof(s_ble_state.history_char_pos[0]))) {
+                s_ble_state.history_char_pos[s_ble_state.history_len++] = s_ble_state.char_position;
+            }
+            s_ble_state.char_position = new_pos;  // seek 继续往前
+            s_ble_state.current_page++;
+            ESP_LOGI(TAG, "Scroll DOWN: auto-load next page %u (seek=%zu, consumed=%zu)", s_ble_state.current_page, s_ble_state.char_position, step);
+            update_cached_window(s_ble_state.current_page);
+            send_position_snapshot();
+            send_page_sync_notification(s_ble_state.current_page);
+            draw_reading_mode_screen(false);
+            display_refresh(REFRESH_MODE_FULL);
+        } else {
+            // 已是最后一页末尾：无法再翻，留在原位
+            ESP_LOGI(TAG, "Scroll DOWN: already at end (seek=%zu)", s_ble_state.char_position);
+        }
     } else {
         // 仍在当前页内：只需更新 seek 并刷屏
         s_ble_state.char_position = new_pos;
         ESP_LOGI(TAG, "Scroll DOWN: seek=%zu (consumed=%zu, in page)", s_ble_state.char_position, step);
-        
-        // 重置VFS文件位置到char_position，以便重新读取
-        if (s_ble_state.vfs_book != NULL) {
-            vfs_seek(s_ble_state.vfs_book, s_ble_state.char_position, SEEK_SET);
-        }
-        
         // 保存当前页起始到历史（用于 VOLUME_UP 返回）
         if (s_ble_state.history_len < (uint8_t)(sizeof(s_ble_state.history_char_pos)/sizeof(s_ble_state.history_char_pos[0]))) {
             s_ble_state.history_char_pos[s_ble_state.history_len++] = s_ble_state.char_position - step;

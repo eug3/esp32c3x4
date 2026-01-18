@@ -189,6 +189,13 @@ int vfs_get_total_chapters(vfs_file_t *file);
  */
 bool vfs_set_total_chapters(vfs_file_t *file, int total_chapters);
 
+/**
+ * @brief 获取BLE文件的书籍哈希
+ * @param file 文件对象
+ * @return 书籍哈希; 非BLE文件返回0
+ */
+uint32_t vfs_get_book_hash(vfs_file_t *file);
+
 #ifdef __cplusplus
 }
 #endif

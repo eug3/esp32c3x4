@@ -95,10 +95,10 @@ idf_component_register(SRCS
                        "ui/vfs/vfs_ble_impl.c"
 
 
-                       # Bluetooth (NimBLE on ESP-IDF 6.1)
-                       "ui/ble/ble_manager.c"
-                       "ui/ble/ble_book_protocol.c"
-                       "ui/ble/ble_cache_manager.c"
+# Bluetooth (NimBLE on ESP-IDF 6.1)
+                        "ui/ble/ble_manager.c"
+                        # "ui/ble/ble_book_protocol.c"  // 已废弃，统一使用VFS章节协议
+                        "ui/ble/ble_cache_manager.c"
 
                        "power_manager.c"
                        ${EPUB_PARSER_SOURCES}

@@ -345,3 +345,9 @@ bool vfs_set_total_chapters(vfs_file_t *file, int total_chapters) {
     }
     return ret;
 }
+
+uint32_t vfs_get_book_hash(vfs_file_t *file) {
+    if (!file) return 0;
+    if (file->source != VFS_SOURCE_BLE) return 0;
+    return file->ctx.ble.book_hash;
+}

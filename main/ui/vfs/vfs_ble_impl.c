@@ -63,12 +63,14 @@ static void request_chapter_from_client(ble_file_cache_t *cache) {
 
 /**
  * @brief 获取当前章节文件路径
+ * 简化方案：使用固定文件名，避免哈希不一致问题
  */
 static void get_chapter_file_path(ble_file_cache_t *cache, char *path, size_t path_len) {
-    snprintf(path, path_len, "%s/0x%08lX_ch%d.txt", 
+    // 简化：直接使用 chapter 索引，不依赖 book_hash
+    snprintf(path, path_len, "%s/current_ch%d.txt", 
              BLE_VFS_CACHE_DIR,
-             (unsigned long)cache->book_hash, 
              cache->current_chapter);
+    ESP_LOGI(TAG, "get_chapter_file_path: %s", path);
 }
 
 // ========== 公共接口 ==========
@@ -131,6 +133,9 @@ int vfs_ble_read(ble_file_cache_t *cache, long position, void *buffer, size_t si
     char path[128];
     get_chapter_file_path(cache, path, sizeof(path));
     
+    ESP_LOGI(TAG, "vfs_ble_read: book_hash=0x%08lX, chapter=%d, path=%s", 
+             (unsigned long)cache->book_hash, cache->current_chapter, path);
+    
     // 打开章节文件
     FILE *fp = fopen(path, "rb");
     if (!fp) {
@@ -153,7 +158,7 @@ int vfs_ble_read(ble_file_cache_t *cache, long position, void *buffer, size_t si
     
     xSemaphoreGive(cache->mutex);
     
-    ESP_LOGD(TAG, "Stream read: pos=%ld size=%zu read=%zu", 
+    ESP_LOGI(TAG, "Stream read: pos=%ld size=%zu read=%zu", 
              position, size, bytes_read);
     
     return (int)bytes_read;
