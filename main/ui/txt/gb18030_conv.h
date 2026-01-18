@@ -28,15 +28,8 @@ extern "C" {
  * Note: This handles ASCII and common Chinese characters.
  * Uncommon characters may be replaced with '?'.
  */
-int gb18030_to_utf8(const uint8_t *gb_text, size_t gb_len, 
+int gb18030_to_utf8(const uint8_t *gb_text, size_t gb_len,
                     char *utf8_text, size_t utf8_size);
-
-/**
- * @brief Get length of next GB18030 character in bytes
- * @param gb_text Pointer to GB18030 text
- * @return 1 for ASCII, 2 for double-byte character, 0 for invalid
- */
-int gb18030_char_bytes(const uint8_t *gb_text);
 
 #ifdef __cplusplus
 }

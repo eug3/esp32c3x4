@@ -143,33 +143,6 @@ static int unicode_to_utf8(uint32_t unicode, char *utf8_out)
     return 0;
 }
 
-int gb18030_char_bytes(const uint8_t *gb_text)
-{
-    if (gb_text == NULL) {
-        return 0;
-    }
-
-    uint8_t c = gb_text[0];
-
-    // ASCII
-    if (c < 0x80) {
-        return 1;
-    }
-
-    // GBK/GB18030 double-byte
-    if (c >= 0x81 && c <= 0xFE) {
-        uint8_t next = gb_text[1];
-        if (next >= 0x40 && next <= 0xFE && next != 0x7F) {
-            return 2;
-        }
-        // Invalid second byte
-        return 1;  // Treat as single byte and skip
-    }
-
-    // Invalid
-    return 1;
-}
-
 int gb18030_to_utf8(const uint8_t *gb_text, size_t gb_len,
                     char *utf8_text, size_t utf8_size)
 {

@@ -64,25 +64,6 @@ bool txt_reader_open(txt_reader_t *reader, const char *file_path, txt_encoding_t
 void txt_reader_close(txt_reader_t *reader);
 
 /**
- * @brief 读取下一页文本
- * @param reader 阅读器实例指针
- * @param text_buffer 输出文本缓冲区
- * @param buffer_size 缓冲区大小（字节）
- * @param chars_per_page 每页字符数（估算）
- * @return 实际读取的字符数
- */
-int txt_reader_read_page(txt_reader_t *reader, char *text_buffer, size_t buffer_size, int chars_per_page);
-
-/**
- * @brief 跳转到指定页码
- * @param reader 阅读器实例指针
- * @param page_number 目标页码
- * @param chars_per_page 每页字符数（必须与渲染/缓存使用的值一致，否则会导致分页边界不一致）
- * @return true 成功，false 失败
- */
-bool txt_reader_goto_page(txt_reader_t *reader, int page_number, int chars_per_page);
-
-/**
  * @brief 跳转到文件位置
  * @param reader 阅读器实例指针
  * @param position 文件位置（字节偏移）
@@ -157,11 +138,6 @@ bool txt_reader_save_last_read(const char *file_path, int32_t file_position, int
  * @return 上次阅读信息
  */
 last_read_info_t txt_reader_get_last_read(void);
-
-/**
- * @brief 清除上次阅读记录
- */
-void txt_reader_clear_last_read(void);
 
 #ifdef __cplusplus
 }

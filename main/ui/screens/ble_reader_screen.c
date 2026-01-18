@@ -2446,26 +2446,6 @@ screen_t* __attribute__((unused)) ble_reader_screen_get_instance(void)
     return &g_ble_reader_screen;
 }
 
-ble_reader_state_t __attribute__((unused)) ble_reader_screen_get_state(void)
-{
-    return s_ble_state.state;
-}
-
-bool __attribute__((unused)) ble_reader_screen_connect_device(const uint8_t *addr)
-{
-    if (addr == NULL) {
-        return false;
-    }
-
-    ESP_LOGI(TAG, "Connecting to device: %02x:%02x:%02x:%02x:%02x:%02x",
-             addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
-
-    memcpy(s_ble_state.connected_device, addr, 6);
-    s_ble_state.state = BLE_READER_STATE_CONNECTING;
-
-    return ble_manager_connect(addr);
-}
-
 void __attribute__((unused)) ble_reader_screen_disconnect(void)
 {
     ESP_LOGI(TAG, "Disconnecting from device");
@@ -2474,72 +2454,6 @@ void __attribute__((unused)) ble_reader_screen_disconnect(void)
         s_ble_state.device_connected = false;
         s_ble_state.state = BLE_READER_STATE_IDLE;
         ble_manager_disconnect();
-    }
-}
-
-void __attribute__((unused)) ble_reader_screen_set_current_book(uint16_t book_id)
-{
-    s_ble_state.current_book_id = book_id;
-    s_ble_state.current_page = 0;
-    s_ble_state.state = BLE_READER_STATE_READING;
-
-    update_cached_window(s_ble_state.current_page);
-
-    // 尝试加载第一页
-    load_current_page();
-}
-
-void __attribute__((unused)) ble_reader_screen_goto_page(uint16_t page_num)
-{
-    if (s_ble_state.current_book_id == 0) {
-        ESP_LOGW(TAG, "No book selected");
-        return;
-    }
-
-    s_ble_state.current_page = page_num;
-    update_cached_window(s_ble_state.current_page);
-    load_current_page();
-
-    screen_t *screen = screen_manager_get_current();
-    if (screen != NULL && screen == &g_ble_reader_screen) {
-        screen->needs_redraw = true;
-    }
-}
-
-void __attribute__((unused)) ble_reader_screen_next_page(void)
-{
-    if (s_ble_state.current_book_id == 0) {
-        return;
-    }
-
-    if (s_ble_state.total_pages > 0 && 
-        s_ble_state.current_page >= s_ble_state.total_pages - 1) {
-        return;  // 已经在最后一页
-    }
-
-    s_ble_state.current_page++;
-    update_cached_window(s_ble_state.current_page);
-    load_current_page();
-
-    screen_t *screen = screen_manager_get_current();
-    if (screen != NULL && screen == &g_ble_reader_screen) {
-        screen->needs_redraw = true;
-    }
-}
-
-void __attribute__((unused)) ble_reader_screen_prev_page(void)
-{
-    if (s_ble_state.current_book_id == 0 || s_ble_state.current_page == 0) {
-        return;
-    }
-
-    s_ble_state.current_page--;
-    update_cached_window(s_ble_state.current_page);
-    load_current_page();
-
-    screen_t *screen = screen_manager_get_current();
-    if (screen != NULL && screen == &g_ble_reader_screen) {
-        screen->needs_redraw = true;
     }
 }
 
@@ -2578,10 +2492,3 @@ void __attribute__((unused)) ble_reader_set_mode(ble_work_mode_t mode)
     g_ble_reader_screen.needs_redraw = true;
 }
 
-/**
- * @brief 获取当前 BLE 工作模式
- */
-ble_work_mode_t __attribute__((unused)) ble_reader_get_mode(void)
-{
-    return s_ble_state.work_mode;
-}
