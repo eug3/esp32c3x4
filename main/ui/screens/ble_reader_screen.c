@@ -42,7 +42,7 @@
 static const char *TAG = "BLE_READER";
 
 #define BLE_TEXT_MAX_BYTES 4096  // 减小缓冲区以节省内存 (原8192太大导致内存碎片)
-// 每屏显示的字符数通过 calculate_chars_per_screen() 动态计算，基于实际屏幕尺寸和字体参数
+ 
 
 // 内容区域布局常量（显示、翻页、消耗计算统一使用）
 #define BLE_CONTENT_Y_START 30      // 内容区域起始 Y（页码信息下方）
@@ -418,6 +418,11 @@ static void get_text_layout_params(sFONT **font, int *line_height)
  * @brief 通用文本处理：绘制或测量消耗字符数
  * @return 消耗的字符数（含换行符）
  */
+/**
+ * @brief 通用文本处理：绘制或测量消耗字符数
+ * 算法：计算行列布局，逐字填充行缓冲，屏幕满或文件尾则返回绝对 seek 位置
+ * @return 绝对位置（就是 seek 到的位置，char_offset + 填充字符数）
+ */
 static size_t process_wrapped_text(int x, int y, int max_width, int max_height,
                                    const char *text, size_t char_offset, bool do_draw)
 {
@@ -428,21 +433,26 @@ static size_t process_wrapped_text(int x, int y, int max_width, int max_height,
     get_text_layout_params(&font, &line_height);
     if (!font) return 0;
 
-    // 跳过 char_offset 个字符到达起始位置
+    // 跳过 char_offset 个字符到达起始位置（游标就像文件 seek）
     const char *p = text;
     for (size_t i = 0; i < char_offset && *p; i++) {
         int clen = (*p == '\n') ? 1 : utf8_char_len((unsigned char)*p);
         p += (clen > 0) ? clen : 1;
     }
 
+    // 计算布局：能显示多少行
+    int lines_can_show = max_height / line_height;
+    if (lines_can_show <= 0) lines_can_show = 1;
+
     char line[256];
     int line_len = 0;
-    int cur_y = do_draw ? y : 0;
-    int y_limit = do_draw ? (y + max_height) : max_height;
+    int lines_filled = 0;
+    int cur_y = y;
     size_t consumed = 0;
 
-    while (*p && cur_y + line_height <= y_limit) {
-        // 换行符处理
+    // 逐字填充，直到屏幕满或文件结束
+    while (*p && lines_filled < lines_can_show) {
+        // 换行符：直接换行
         if (*p == '\n') {
             if (do_draw && line_len > 0) {
                 line[line_len] = '\0';
@@ -450,7 +460,8 @@ static size_t process_wrapped_text(int x, int y, int max_width, int max_height,
             }
             line_len = 0;
             cur_y += line_height;
-            consumed++;
+            lines_filled++;
+            consumed++;  // 换行符计为 1 个字符
             p++;
             continue;
         }
@@ -458,15 +469,16 @@ static size_t process_wrapped_text(int x, int y, int max_width, int max_height,
         int clen = utf8_char_len((unsigned char)*p);
         if (clen <= 0) clen = 1;
 
-        // 行缓冲溢出保护
+        // 行缓冲溢出：当前字符放不下，先输出已有的行
         if (line_len + clen >= (int)sizeof(line) - 1) {
-            if (do_draw) {
+            if (do_draw && line_len > 0) {
                 line[line_len] = '\0';
                 display_draw_text_font(x, cur_y, line, font, COLOR_BLACK, COLOR_WHITE);
             }
             line_len = 0;
             cur_y += line_height;
-            if (cur_y + line_height > y_limit) break;
+            lines_filled++;
+            if (lines_filled >= lines_can_show) break;
             continue;
         }
 
@@ -475,34 +487,36 @@ static size_t process_wrapped_text(int x, int y, int max_width, int max_height,
         line_len += clen;
         line[line_len] = '\0';
 
-        // 检测超宽
+        // 检测超宽：当前字符导致行超出宽度限制
         if (display_get_text_width_font(line, font) > max_width && line_len > clen) {
             // 回退当前字符，输出当前行
             line_len -= clen;
             line[line_len] = '\0';
-            if (do_draw) {
+            if (do_draw && line_len > 0) {
                 display_draw_text_font(x, cur_y, line, font, COLOR_BLACK, COLOR_WHITE);
             }
             line_len = 0;
             cur_y += line_height;
-            if (cur_y + line_height > y_limit) break;
+            lines_filled++;
+            if (lines_filled >= lines_can_show) break;
             // 不移动 p，下次循环重新处理这个字符
             continue;
         }
 
-        // 成功添加字符
+        // 字符成功添加，游标往后走
         consumed++;
         p += clen;
     }
 
-    // 输出最后一行
-    if (do_draw && line_len > 0 && cur_y + line_height <= y_limit) {
+    // 输出最后一行（如果还有空间且有内容）
+    if (do_draw && line_len > 0 && lines_filled < lines_can_show) {
         line[line_len] = '\0';
         display_draw_text_font(x, cur_y, line, font, COLOR_BLACK, COLOR_WHITE);
     }
 
-    return consumed;
+    return char_offset + consumed;
 }
+
 
 static void draw_wrapped_text(int x, int y, int max_width, int max_height,
                               const char *text, size_t char_offset)
@@ -2151,6 +2165,109 @@ static void handle_transfer_mode_button(screen_t *screen, button_t btn)
     }
 }
 
+// ========== 按键处理辅助函数 ==========
+
+/** @brief 检查是否允许翻页（需要初始化完成或无书籍） */
+static inline bool can_control_paging(void) {
+    return s_ble_state.current_book_id == 0 || s_ble_state.initialization_complete;
+}
+
+/** @brief 翻到上一页：使用 seek，恢复历史或回到开头 */
+static inline void page_previous(void) {
+    if (s_ble_state.current_page > 0) {
+        s_ble_state.current_page--;
+        if (s_ble_state.history_len > 0) {
+            s_ble_state.char_position = s_ble_state.history_char_pos[--s_ble_state.history_len];
+        } else {
+            s_ble_state.char_position = 0;
+        }
+        ESP_LOGI(TAG, "Page previous: %u (seek=%zu)", s_ble_state.current_page, s_ble_state.char_position);
+        update_cached_window(s_ble_state.current_page);
+        send_position_snapshot();
+        send_page_sync_notification(s_ble_state.current_page);
+    }
+}
+
+/** @brief 翻到下一页：保存当前页到历史，计算新的 seek 位置 */
+static inline void page_next(void) {
+    bool can_next = (s_ble_state.total_pages == 0 || s_ble_state.current_page < s_ble_state.total_pages - 1);
+    if (can_next) {
+        // 保存当前页起始到历史栈
+        if (s_ble_state.history_len < (uint8_t)(sizeof(s_ble_state.history_char_pos)/sizeof(s_ble_state.history_char_pos[0]))) {
+            s_ble_state.history_char_pos[s_ble_state.history_len++] = s_ble_state.char_position;
+        }
+        // seek：下一页起始 = 当前起始 + 当前消耗
+        s_ble_state.char_position += s_ble_state.last_page_consumed;
+        s_ble_state.current_page++;
+        ESP_LOGI(TAG, "Page next: %u (seek=%zu)", s_ble_state.current_page, s_ble_state.char_position);
+        update_cached_window(s_ble_state.current_page);
+        send_position_snapshot();
+        send_page_sync_notification(s_ble_state.current_page);
+    }
+}
+
+/** @brief 滚动上一屏：从历史恢复或回到开头 */
+static inline void scroll_up(void) {
+    if (s_ble_state.history_len > 0) {
+        s_ble_state.char_position = s_ble_state.history_char_pos[--s_ble_state.history_len];
+    } else if (s_ble_state.char_position > 0) {
+        s_ble_state.char_position = 0;
+    }
+    ESP_LOGI(TAG, "Scroll UP: seek=%zu", s_ble_state.char_position);
+    send_position_snapshot();
+    draw_reading_mode_screen(true);
+    display_refresh(REFRESH_MODE_PARTIAL);
+}
+
+/** @brief 滚动下一屏：步进 seek，使用实际消耗计算 */
+static inline void scroll_down(void) {
+    // 步进大小 = 当前页实际消耗的字符数（包括换行符）
+    // 这是真实的、已填充到屏幕上的字符数，不需要用估算值调整
+    size_t step = s_ble_state.last_page_consumed;
+    if (step == 0) {
+        // 如果没有有效消耗，用估算值作为最小步进
+        int chars_per_screen_est = calculate_chars_per_screen();
+        step = (size_t)((chars_per_screen_est > 0) ? chars_per_screen_est : 1);
+    }
+    
+    // 尝试步进
+    size_t new_pos = s_ble_state.char_position + step;
+    
+    // 检查是否超过当前页末尾
+    if (s_ble_state.total_chars > 0 && new_pos >= s_ble_state.total_chars) {
+        // 已经到或超过页末：需要翻到下一页
+        bool can_next = (s_ble_state.total_pages == 0 || s_ble_state.current_page < s_ble_state.total_pages - 1);
+        if (can_next) {
+            // 保存当前页起始到历史，翻下一页
+            if (s_ble_state.history_len < (uint8_t)(sizeof(s_ble_state.history_char_pos)/sizeof(s_ble_state.history_char_pos[0]))) {
+                s_ble_state.history_char_pos[s_ble_state.history_len++] = s_ble_state.char_position;
+            }
+            s_ble_state.char_position = new_pos;  // seek 继续往前
+            s_ble_state.current_page++;
+            ESP_LOGI(TAG, "Scroll DOWN: auto-load next page %u (seek=%zu, consumed=%zu)", s_ble_state.current_page, s_ble_state.char_position, step);
+            update_cached_window(s_ble_state.current_page);
+            send_position_snapshot();
+            send_page_sync_notification(s_ble_state.current_page);
+            draw_reading_mode_screen(false);
+            display_refresh(REFRESH_MODE_FULL);
+        } else {
+            // 已是最后一页末尾：无法再翻，留在原位
+            ESP_LOGI(TAG, "Scroll DOWN: already at end (seek=%zu)", s_ble_state.char_position);
+        }
+    } else {
+        // 仍在当前页内：只需更新 seek 并刷屏
+        s_ble_state.char_position = new_pos;
+        ESP_LOGI(TAG, "Scroll DOWN: seek=%zu (consumed=%zu, in page)", s_ble_state.char_position, step);
+        // 保存当前页起始到历史（用于 VOLUME_UP 返回）
+        if (s_ble_state.history_len < (uint8_t)(sizeof(s_ble_state.history_char_pos)/sizeof(s_ble_state.history_char_pos[0]))) {
+            s_ble_state.history_char_pos[s_ble_state.history_len++] = s_ble_state.char_position - step;
+        }
+        send_position_snapshot();
+        draw_reading_mode_screen(true);
+        display_refresh(REFRESH_MODE_PARTIAL);
+    }
+}
+
 /**
  * @brief 阅读模式按键处理
  */
@@ -2158,137 +2275,26 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
 {
     switch (btn) {
         case BTN_LEFT:
-            // 请求上一个 TXT 文本
-            if (s_ble_state.current_book_id != 0 && !s_ble_state.initialization_complete) {
-                break; // 在确认前不响应翻页
-            }
-            if (s_ble_state.current_page > 0) {
-                // 立即翻到上一页
-                s_ble_state.current_page--;
-                s_ble_state.char_position = 0;  // 重置字符位置
-
-                ESP_LOGI(TAG, "Requesting previous page: %u", s_ble_state.current_page);
-
-                // 更新缓存窗口（预加载前后页）
-                update_cached_window(s_ble_state.current_page);
-
-                // 发送位置快照（以 ESP32 为准）
-                send_position_snapshot();
-                
-                // 请求手机发送缓存窗口内的页面（前、当前、后）
-                send_page_sync_notification(s_ble_state.current_page);
+            if (can_control_paging()) {
+                page_previous();
             }
             break;
 
         case BTN_RIGHT:
-            // 请求下一个 TXT 文本
-            if (s_ble_state.current_book_id != 0 && !s_ble_state.initialization_complete) {
-                break; // 在确认前不响应翻页
-            }
-            if (s_ble_state.total_pages == 0 ||
-                s_ble_state.current_page < s_ble_state.total_pages - 1) {
-                // 立即翻到下一页
-                s_ble_state.current_page++;
-                s_ble_state.char_position = 0;  // 重置字符位置
-
-                ESP_LOGI(TAG, "Requesting next page: %u", s_ble_state.current_page);
-
-                // 更新缓存窗口（预加载前后页）
-                update_cached_window(s_ble_state.current_page);
-
-                // 发送位置快照（以 ESP32 为准）
-                send_position_snapshot();
-                
-                // 请求手机发送缓存窗口内的页面（前、当前、后）
-                send_page_sync_notification(s_ble_state.current_page);
+            if (can_control_paging()) {
+                page_next();
             }
             break;
 
         case BTN_VOLUME_UP:
-            // 视觉上一页（向上滚动）- 使用局刷
-            if (s_ble_state.current_book_id != 0 && !s_ble_state.initialization_complete) {
-                break; // 在确认前不响应
+            if (can_control_paging()) {
+                scroll_up();
             }
-            // 精确上一页：从历史栈恢复上一页起始游标
-            if (s_ble_state.history_len > 0) {
-                s_ble_state.char_position = s_ble_state.history_char_pos[--s_ble_state.history_len];
-            } else if (s_ble_state.char_position > 0) {
-                s_ble_state.char_position = 0;
-            }
-            ESP_LOGI(TAG, "Visual scroll UP: char_position=%zu", s_ble_state.char_position);
-            
-            // 发送位置快照（以 ESP32 为准）
-            send_position_snapshot();
-            
-            // 使用局刷刷新内容区域，清除旧内容
-            draw_reading_mode_screen(true);
-            display_refresh(REFRESH_MODE_PARTIAL);
             break;
 
         case BTN_VOLUME_DOWN:
-            // 视觉下一页（向下滚动）- 使用局刷
-            if (s_ble_state.current_book_id != 0 && !s_ble_state.initialization_complete) {
-                break; // 在确认前不响应
-            }
-            // 精确下一页：记录当前页起点到历史，然后按实际消耗推进游标
-            if (s_ble_state.history_len < (uint8_t)(sizeof(s_ble_state.history_char_pos)/sizeof(s_ble_state.history_char_pos[0]))) {
-                s_ble_state.history_char_pos[s_ble_state.history_len++] = s_ble_state.char_position;
-            }
-            size_t step = s_ble_state.last_page_consumed;
-            int chars_per_screen_est = calculate_chars_per_screen();
-            // 确保至少翻一整屏：取实际测量与估算中的较大值
-            if (step < (size_t)((chars_per_screen_est > 0) ? chars_per_screen_est : 1)) {
-                step = (size_t)((chars_per_screen_est > 0) ? chars_per_screen_est : 1);
-            }
-            s_ble_state.char_position += step;
-
-            // 检测是否超过当前页面的字符数，如果超过则加载下一页
-            if (s_ble_state.total_chars > 0 && s_ble_state.char_position >= s_ble_state.total_chars) {
-                // 需要加载下一页
-                if (s_ble_state.total_pages == 0 || s_ble_state.current_page < s_ble_state.total_pages - 1) {
-                    s_ble_state.current_page++;
-                    s_ble_state.char_position = 0;  // 重置到下一页的开始
-
-                    ESP_LOGI(TAG, "Auto-loading next page: %u", s_ble_state.current_page);
-
-                    // 更新缓存窗口
-                    update_cached_window(s_ble_state.current_page);
-
-                    // 发送位置快照（以 ESP32 为准）
-                    send_position_snapshot();
-                    
-                    // 请求手机发送新页面
-                    send_page_sync_notification(s_ble_state.current_page);
-
-                    // 使用全刷新，因为是新页面
-                    draw_reading_mode_screen(false);
-                    display_refresh(REFRESH_MODE_FULL);
-                } else {
-                    // 已经是最后一页：限制在最后一页的末尾，使用 step 作为估算宽度
-                    // 最后一页时同样取“实际消耗/估算”的较大值，避免只滚动一行
-                    size_t tail_est = (s_ble_state.last_page_consumed > step) ? s_ble_state.last_page_consumed : step;
-                    if (s_ble_state.total_chars > tail_est) {
-                        s_ble_state.char_position = s_ble_state.total_chars - tail_est;
-                    } else {
-                        s_ble_state.char_position = 0;
-                    }
-                    ESP_LOGI(TAG, "Visual scroll DOWN: char_position=%zu (last page)", s_ble_state.char_position);
-                    
-                    // 发送位置快照（以 ESP32 为准）
-                    send_position_snapshot();
-                    
-                    draw_reading_mode_screen(true);
-                    display_refresh(REFRESH_MODE_PARTIAL);
-                }
-            } else {
-                // 仍在当前页面内，使用局刷
-                ESP_LOGI(TAG, "Visual scroll DOWN: char_position=%zu", s_ble_state.char_position);
-                
-                // 发送位置快照（以 ESP32 为准）
-                send_position_snapshot();
-                
-                draw_reading_mode_screen(true);
-                display_refresh(REFRESH_MODE_PARTIAL);
+            if (can_control_paging()) {
+                scroll_down();
             }
             break;
 
