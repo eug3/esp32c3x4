@@ -715,20 +715,17 @@ static void handle_page_data(const uint8_t *data, size_t length);
 /**
  * @brief 蓝牙数据接收回调 - 支持 VFS 章节协议（TXT文本数据）
  */
-/**
- * @brief 蓝牙数据接收回调 - 支持 VFS 章节协议（TXT文本数据）
- */
 static void ble_data_received_callback(const uint8_t *data, uint16_t length)
 {
     if (data == NULL || length == 0) {
         ESP_LOGW(TAG, "Received NULL or empty data");
         if (data != NULL) {
-            free((void *)data);  // 释放空数据包内存
+            free((void *)data);
         }
         return;
     }
 
-    // 检查屏幕是否仍然激活（防止在清理过程中处理数据）
+    // 检查屏幕是否仍然激活
     screen_t *current_screen = screen_manager_get_current();
     if (current_screen == NULL || current_screen != &g_ble_reader_screen) {
         ESP_LOGW(TAG, "BLE data received but screen is not active, discarding %u bytes", length);
@@ -839,24 +836,18 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         uint16_t flags = data[6] | (data[7] << 8);
         uint32_t declared_payload_size = data[8] | (data[9] << 8) | (data[10] << 16) | (data[11] << 24);
         
-        ESP_LOGI(TAG, "X4IM v2 header detected: type=0x%02X, flags=0x%04X, payload=%lu bytes",
-                 type, flags, (unsigned long)declared_payload_size);
+        ESP_LOGI(TAG, "X4IM v2 header detected: flags=0x%04X, payload=%lu bytes",
+                 flags, (unsigned long)declared_payload_size);
         
         // 跳过32字节头部，只处理payload
         payload_data = data + X4IM_HEADER_SIZE;
         payload_length = (length > X4IM_HEADER_SIZE) ? (length - X4IM_HEADER_SIZE) : 0;
         has_x4im_header = true;
-        
-        ESP_LOGI(TAG, "Extracted payload: %zu bytes (original packet: %u bytes)", 
-                 payload_length, length);
     }
 
-    // VFS章节协议：接收TXT文本数据（纯文本或X4IM payload）
-    // 检测EOF标记（5字节："\x00EOF\n" 或 4字节："\x00EOF"）
-    // 这表示传输完成，此时才触发显示
+    // 检测EOF标记
     bool is_eof_marker = false;
     if (payload_length >= 4) {
-        // 检测 "\x00EOF\n" (5字节) 或 "\x00EOF" (4字节)
         if ((payload_length == 5 && payload_data[0] == 0x00 && payload_data[1] == 'E' && payload_data[2] == 'O' && payload_data[3] == 'F' && payload_data[4] == '\n') ||
             (payload_length == 4 && payload_data[0] == 0x00 && payload_data[1] == 'E' && payload_data[2] == 'O' && payload_data[3] == 'F')) {
             is_eof_marker = true;
@@ -866,90 +857,107 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
     
     // 写入当前章节的缓存文件
     if (s_ble_state.vfs_book != NULL && payload_length > 0) {
-        // 获取当前章节索引
         int current_chapter = vfs_get_current_chapter(s_ble_state.vfs_book);
         
-        // 构造章节文件路径（简化：使用固定文件名，不依赖book_hash）
         char chapter_path[128];
         snprintf(chapter_path, sizeof(chapter_path), "/littlefs/ble_vfs/current_ch%d.txt", 
                  current_chapter);
         
         ESP_LOGI(TAG, "Write path: %s", chapter_path);
         
-        // 确保目录存在
         struct stat st;
         if (stat("/littlefs/ble_vfs", &st) != 0) {
             mkdir("/littlefs/ble_vfs", 0755);
         }
         
-        // EOF标记不写入文件，只触发显示
+        // ========== EOF标记处理：触发显示 ==========
         if (is_eof_marker) {
-            ESP_LOGI(TAG, "Transfer complete for chapter %d, triggering display", current_chapter);
+            ESP_LOGI(TAG, "=== Transfer complete for chapter %d ===", current_chapter);
             
-            // 设置状态表示页面已就绪
+            // 1. 设置状态
             s_ble_state.page_loaded = true;
+            s_ble_state.state = BLE_READER_STATE_READING;
             
-            // 初始化 book_id（如果尚未初始化）
+            // 2. 初始化 book_id（如果尚未初始化）
             if (s_ble_state.current_book_id == 0) {
                 s_ble_state.current_book_id = 1;
-                s_ble_state.initialization_complete = true;
-                ESP_LOGI(TAG, "VFS transfer complete, book_id=1, ready to display");
+                ESP_LOGI(TAG, "Book ID initialized to 1");
             }
             
-            // 重置读取位置到文件开头
-            s_ble_state.char_position = 0;
-            s_ble_state.history_len = 0;
+            // 3. 标记初始化完成（跳过确认提示，直接显示内容）
+            if (!s_ble_state.initialization_complete) {
+                s_ble_state.initialization_complete = true;
+                s_ble_state.showing_confirm_prompt = false;
+                ESP_LOGI(TAG, "Auto-confirmed: initialization_complete = true");
+            }
             
-            // 获取文件大小（字节数）用于翻页边界检测
+            // 4. 重置读取位置到文件开头
+            s_ble_state.char_position = 0;
+            s_ble_state.current_page = 0;
+            s_ble_state.history_len = 0;
+            s_ble_state.last_page_consumed = 0;
+            
+            // 5. 获取文件大小
             struct stat file_st;
             if (stat(chapter_path, &file_st) == 0) {
                 s_ble_state.total_chars = (size_t)file_st.st_size;
-                ESP_LOGI(TAG, "File size: %zu bytes", s_ble_state.total_chars);
+                ESP_LOGI(TAG, "File ready: %s (%zu bytes)", chapter_path, s_ble_state.total_chars);
             } else {
                 s_ble_state.total_chars = 0;
+                ESP_LOGW(TAG, "Cannot stat file: %s", chapter_path);
             }
             
-            // 重置 VFS 文件位置到开头（关键！）
+            // 6. 重置 VFS 文件位置到开头
             if (s_ble_state.vfs_book != NULL) {
                 vfs_seek(s_ble_state.vfs_book, 0, SEEK_SET);
-                ESP_LOGI(TAG, "VFS file position reset to 0");
+                ESP_LOGI(TAG, "VFS seek to position 0");
             }
             
-            // 标记下次收到数据是新传输
-            extern bool g_ble_new_transfer;
+            // 7. 标记下次收到数据是新传输
             g_ble_new_transfer = true;
             
-            // 触发屏幕刷新显示TXT内容
-            screen_t *screen = screen_manager_get_current();
-            if (screen != NULL && screen == &g_ble_reader_screen) {
-                screen->needs_redraw = true;
-                screen_manager_draw();
-            }
-        } else {
-            // 正常数据：写入文件（不刷新屏幕）
-            // 使用全局变量跟踪：如果是新传输则新建文件，否则追加
-            const char *mode = g_ble_new_transfer ? "wb" : "ab";  // 新传输用wb，否则追加
-            FILE *fp = fopen(chapter_path, mode);
-            if (fp != NULL) {
-                // 写入payload数据（如果有X4IM头则已跳过，否则是原始数据）
-                size_t written = fwrite(payload_data, 1, payload_length, fp);
-                fclose(fp);
-                
-                if (written == payload_length) {
-                    if (g_ble_new_transfer) {
-                        ESP_LOGI(TAG, "New file created, wrote %zu bytes to chapter %d%s", 
-                                 written, current_chapter, has_x4im_header ? " (X4IM)" : "");
-                        g_ble_new_transfer = false;  // 后续数据追加
-                    } else {
-                        ESP_LOGD(TAG, "Appended %zu bytes to chapter %d%s", 
-                                 written, current_chapter, has_x4im_header ? " (X4IM)" : "");
-                    }
+            // 8. ========== 关键：先全屏清空，再绘制和刷新 ==========
+            ESP_LOGI(TAG, ">>> Clearing screen and rendering content <<<");
+            display_clear(COLOR_WHITE);  // 全屏清空（白色背景）
+            
+            // 延迟一下确保清屏完成
+            vTaskDelay(pdMS_TO_TICKS(50));
+            
+            // 绘制新内容
+            draw_reading_mode_screen(false);
+            
+            // 全屏刷新
+            display_refresh(REFRESH_MODE_FULL);
+            
+            ESP_LOGI(TAG, "Screen refreshed successfully");
+            
+            free((void *)data);
+            return;
+        }
+        
+        // 正常数据：写入文件（不刷新屏幕）
+        // 使用全局变量跟踪：如果是新传输则新建文件，否则追加
+        const char *mode = g_ble_new_transfer ? "wb" : "ab";  // 新传输用wb，否则追加
+        FILE *fp = fopen(chapter_path, mode);
+        if (fp != NULL) {
+            // 写入payload数据（如果有X4IM头则已跳过，否则是原始数据）
+            size_t written = fwrite(payload_data, 1, payload_length, fp);
+            fclose(fp);
+            
+            if (written == payload_length) {
+                if (g_ble_new_transfer) {
+                    ESP_LOGI(TAG, "New file created, wrote %zu bytes to chapter %d%s", 
+                             written, current_chapter, has_x4im_header ? " (X4IM)" : "");
+                    g_ble_new_transfer = false;  // 后续数据追加
                 } else {
-                    ESP_LOGE(TAG, "Write failed: expected %zu, written %zu", payload_length, written);
+                    ESP_LOGD(TAG, "Appended %zu bytes to chapter %d%s", 
+                             written, current_chapter, has_x4im_header ? " (X4IM)" : "");
                 }
             } else {
-                ESP_LOGE(TAG, "Failed to open chapter file for writing: %s (mode=%s)", chapter_path, mode);
+                ESP_LOGE(TAG, "Write failed: expected %zu, written %zu", payload_length, written);
             }
+        } else {
+            ESP_LOGE(TAG, "Failed to open chapter file for writing: %s (mode=%s)", chapter_path, mode);
         }
     } else if (payload_length == 0 && !is_eof_marker) {
         ESP_LOGW(TAG, "Empty payload received (length=%u, has_x4im=%d)", length, has_x4im_header);
@@ -1329,7 +1337,6 @@ static void __attribute__((unused)) handle_page_data(const uint8_t *data, size_t
                 screen_t *screen = screen_manager_get_current();
                 if (screen != NULL && screen == &g_ble_reader_screen) {
                     screen->needs_redraw = true;
-                    screen_manager_draw();
                 }
                 
                 // 完成接收，释放内存并返回
@@ -1925,6 +1932,8 @@ static void handle_transfer_mode_button(screen_t *screen, button_t btn)
                 s_ble_state.state = BLE_READER_STATE_WAITING;
                 s_ble_state.transfer_bytes_received = 0;
                 s_ble_state.transfer_bytes_total = 0;
+                s_ble_state.transfer_file_count = 0;
+                memset(s_ble_state.transfer_filename, 0, sizeof(s_ble_state.transfer_filename));
                 ESP_LOGI(TAG, "Ready for next transfer");
             }
             break;
