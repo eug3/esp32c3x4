@@ -411,11 +411,13 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
                     break;
                 case MENU_ITEM_BLE_READER:
                     // 蓝牙读书（阅读模式）
+                    display_clear(COLOR_WHITE);
                     ble_reader_set_mode(BLE_MODE_READING);
                     screen_manager_show_ble_reader();
                     break;
                 case MENU_ITEM_BLE_TRANSFER:
                     // 蓝牙传书（传输模式）
+                    display_clear(COLOR_WHITE);
                     ble_reader_set_mode(BLE_MODE_TRANSFER);
                     screen_manager_show_ble_reader();
                     break;

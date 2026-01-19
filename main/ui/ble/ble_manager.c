@@ -578,6 +578,12 @@ void ble_manager_deinit(void)
     s_ble.connect_cb = NULL;
     s_ble.data_received_cb = NULL;
 
+    // 停止 NimBLE 主机线程（必须在 deinit 前调用）
+    nimble_port_stop();
+    
+    // 等待主机线程退出
+    vTaskDelay(pdMS_TO_TICKS(200));
+
     nimble_port_deinit();
 
     ESP_LOGI(TAG, "BLE manager deinitialized");
