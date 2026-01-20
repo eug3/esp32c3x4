@@ -1843,7 +1843,10 @@ static void on_draw(screen_t *screen)
  */
 static void on_event(screen_t *screen, button_t btn, button_event_t event)
 {
-    (void)event;
+    // 只响应按下事件，忽略释放、长按、重复等事件，避免重复触发翻页
+    if (event != BTN_EVENT_PRESSED) {
+        return;
+    }
 
     if (s_ble_state.chapter_browser_active) {
         handle_chapter_browser_button(screen, btn);
