@@ -2453,34 +2453,18 @@ int __attribute__((unused)) ble_reader_get_total_chapters(void)
  */
 void __attribute__((unused)) ble_reader_set_mode(ble_work_mode_t mode)
 {
-    if (s_ble_state.work_mode == mode) {
-        return; // 模式相同，无需切换
+    // 传输模式已废弃，统一回落到阅读模式
+    if (mode != BLE_MODE_READING) {
+        ESP_LOGW(TAG, "Transfer mode removed; forcing READING mode");
+        mode = BLE_MODE_READING;
     }
 
-    ESP_LOGI(TAG, "Switching BLE mode: %s -> %s",
-             s_ble_state.work_mode == BLE_MODE_READING ? "READING" : "TRANSFER",
-             mode == BLE_MODE_READING ? "READING" : "TRANSFER");
-
-    s_ble_state.work_mode = mode;
-
-    if (mode == BLE_MODE_TRANSFER) {
-        // 进入传输模式
-        s_ble_state.state = BLE_READER_STATE_WAITING;
-        s_ble_state.transfer_bytes_received = 0;
-        s_ble_state.transfer_bytes_total = 0;
-        s_ble_state.transfer_file_count = 0;
-        memset(s_ble_state.transfer_filename, 0, sizeof(s_ble_state.transfer_filename));
-        
-        ESP_LOGI(TAG, "Entered TRANSFER mode");
-    } else {
-        // 进入阅读模式
+    if (s_ble_state.work_mode != mode) {
+        ESP_LOGI(TAG, "Switching BLE mode to READING (transfer removed)");
+        s_ble_state.work_mode = BLE_MODE_READING;
         s_ble_state.state = BLE_READER_STATE_IDLE;
-        
-        ESP_LOGI(TAG, "Entered READING mode");
+        g_ble_reader_screen.needs_redraw = true;
     }
-
-    // 触发重绘
-    g_ble_reader_screen.needs_redraw = true;
 }
 
 // ============================================================================

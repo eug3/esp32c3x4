@@ -3,7 +3,7 @@
  * @brief 蓝牙读书屏幕 - 用于通过蓝牙接收和显示书籍位图内容
  * 
  * 采用分页位图显示，支持滑动窗口缓存和预加载
- * 支持双模式：阅读模式 + 传输模式
+ * 已移除独立的传书模式，统一走阅读入口
  */
 
 #ifndef BLE_READER_SCREEN_H
@@ -18,7 +18,7 @@
  */
 typedef enum {
     BLE_MODE_READING = 0,    // 阅读模式（默认）- 允许 littlefs，拒绝 SD 卡写入
-    BLE_MODE_TRANSFER = 1,   // 传输模式 - 允许 SD 卡和 littlefs 写入
+    BLE_MODE_TRANSFER = 1,   // 已废弃：原传输模式占位，保持枚举兼容性
 } ble_work_mode_t;
 
 /**
@@ -35,8 +35,8 @@ typedef enum {
 } ble_reader_state_t;
 
 /**
- * @brief 设置 BLE 工作模式
- * @param mode 工作模式 (BLE_MODE_READING 或 BLE_MODE_TRANSFER)
+ * @brief 设置 BLE 工作模式（传输模式已废弃，强制使用阅读模式）
+ * @param mode 工作模式 (BLE_MODE_READING；传输模式将被忽略)
  */
 void ble_reader_set_mode(ble_work_mode_t mode);
 
