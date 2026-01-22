@@ -138,7 +138,7 @@ bool bmp_helper_render(const uint8_t *bmp_data, size_t bmp_data_size,
     // 获取像素数据偏移
     uint32_t pixel_data_offset = file_header->bfOffBits;
 
-    // 跳过调色板（bfOffBits 可能指向调色板起始位置而非像素数据）
+    // 跳过调色板（bfOffBits 非像素数据）
     if (bit_count == 1) {
         pixel_data_offset += 8;    // 2 色 × 4 字节
     } else if (bit_count == 8) {
