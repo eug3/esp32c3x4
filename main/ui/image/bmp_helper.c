@@ -61,8 +61,8 @@ bool bmp_helper_get_size(const uint8_t *bmp_data, size_t bmp_data_size,
 
     BMPInfoHeader *info_header = (BMPInfoHeader *)(bmp_data + sizeof(BMPFileHeader));
 
-    // 只支持 24 位和 8 位 BMP
-    if (info_header->biBitCount != 24 && info_header->biBitCount != 8) {
+    // 支持 1 位、8 位和 24 位 BMP
+    if (info_header->biBitCount != 1 && info_header->biBitCount != 8 && info_header->biBitCount != 24) {
         ESP_LOGE(TAG, "Unsupported bit count: %d", info_header->biBitCount);
         return false;
     }
@@ -140,7 +140,45 @@ bool bmp_helper_render(const uint8_t *bmp_data, size_t bmp_data_size,
     const uint8_t *pixel_data = bmp_data + pixel_data_offset;
 
     // 解码并绘制
-    if (bit_count == 24) {
+    if (bit_count == 1) {
+        // 1 位 BMP (单色位图)
+        ESP_LOGI(TAG, "1-bit BMP (monochrome)");
+
+        for (int src_y = 0; src_y < src_height; src_y++) {
+            int dest_y = offset_y + (int)(src_y * scale);
+            int bmp_y = top_down ? src_y : (src_height - 1 - src_y);
+            const uint8_t *row_data = pixel_data + bmp_y * row_size;
+
+            for (int src_x = 0; src_x < src_width; src_x++) {
+                int dest_x = offset_x + (int)(src_x * scale);
+
+                // 读取 1 位像素（每字节包含8个像素，MSB first）
+                int byte_index = src_x / 8;
+                int bit_index = 7 - (src_x % 8);
+                uint8_t pixel_bit = (row_data[byte_index] >> bit_index) & 1;
+
+                // 1 = 白色(0xFF), 0 = 黑色(0x00)
+                uint8_t gray = pixel_bit ? 0xFF : 0x00;
+
+                // 绘制像素 (考虑缩放)
+                if (scale >= 1.0f) {
+                    int scale_int = (int)scale;
+                    for (int sy = 0; sy < scale_int && (dest_y + sy) < (y + height); sy++) {
+                        for (int sx = 0; sx < scale_int && (dest_x + sx) < (x + width); sx++) {
+                            display_draw_pixel(dest_x + sx, dest_y + sy, gray);
+                        }
+                    }
+                } else {
+                    display_draw_pixel(dest_x, dest_y, gray);
+                }
+            }
+
+            // 每隔一定行数喂狗（减少延迟）
+            if (src_y % 50 == 0) {
+                taskYIELD();  // 使用 yield 而不是 delay，更快
+            }
+        }
+    } else if (bit_count == 24) {
         // 24 位 BMP (RGB888)
         for (int src_y = 0; src_y < src_height; src_y++) {
             // 计算目标 Y 坐标
