@@ -139,10 +139,39 @@ bool bmp_helper_render(const uint8_t *bmp_data, size_t bmp_data_size,
     uint32_t pixel_data_offset = file_header->bfOffBits;
     const uint8_t *pixel_data = bmp_data + pixel_data_offset;
 
+    ESP_LOGI(TAG, "BMP parsing: row_size=%d, pixel_data_offset=%lu, src_width=%d, bit_count=%u", 
+             row_size, (unsigned long)pixel_data_offset, src_width, bit_count);
+
+    // 对于调色板模式（1位、8位），获取调色板
+    const uint8_t *palette = NULL;
+    if (bit_count == 1 || bit_count == 8) {
+        // 调色板位置在信息头之后
+        palette = bmp_data + sizeof(BMPFileHeader) + info_header->biSize;
+        
+        // 打印调色板信息（前两个颜色用于1位BMP）
+        if (bit_count == 1 && palette < bmp_data + bmp_data_size) {
+            uint32_t color0 = *(uint32_t*)palette;
+            uint32_t color1 = *(uint32_t*)(palette + 4);
+            ESP_LOGI(TAG, "1-bit BMP palette: color0=0x%08X, color1=0x%08X", color0, color1);
+        }
+    }
+
     // 解码并绘制
     if (bit_count == 1) {
         // 1 位 BMP (单色位图)
         ESP_LOGI(TAG, "1-bit BMP (monochrome)");
+
+        // 获取 framebuffer 直接访问
+        extern uint8_t* display_get_framebuffer(void);
+        uint8_t *fb = display_get_framebuffer();
+
+        // 调试：打印前几行的数据
+        ESP_LOGI(TAG, "BMP data sample: first row bytes (from file): %02X %02X %02X %02X %02X %02X %02X %02X",
+                 pixel_data[0], pixel_data[1], pixel_data[2], pixel_data[3],
+                 pixel_data[4], pixel_data[5], pixel_data[6], pixel_data[7]);
+
+        int pixel_count_written = 0;  // 统计写入的非白色像素
+        int black_pixel_count = 0;    // 黑色像素计数
 
         for (int src_y = 0; src_y < src_height; src_y++) {
             int dest_y = offset_y + (int)(src_y * scale);
@@ -155,21 +184,65 @@ bool bmp_helper_render(const uint8_t *bmp_data, size_t bmp_data_size,
                 // 读取 1 位像素（每字节包含8个像素，MSB first）
                 int byte_index = src_x / 8;
                 int bit_index = 7 - (src_x % 8);
-                uint8_t pixel_bit = (row_data[byte_index] >> bit_index) & 1;
+                uint8_t pixel_index = (row_data[byte_index] >> bit_index) & 1;
 
-                // 1 = 白色(0xFF), 0 = 黑色(0x00)
-                uint8_t gray = pixel_bit ? 0xFF : 0x00;
+                // 从调色板获取实际颜色，取 B 分量（BMP存储为BGRA）
+                uint8_t bw = 1;  // 默认白色
+                if (palette) {
+                    const uint8_t *color_entry = palette + pixel_index * 4;  // 每个调色板项 4 字节 (BGRA)
+                    uint8_t blue = color_entry[0];
+                    // 简单判断：如果蓝色分量 < 128，则为黑色
+                    bw = (blue < 128) ? 0 : 1;
+                } else {
+                    // 如果没有调色板，默认：0=白色，1=黑色
+                    bw = pixel_index ? 0 : 1;
+                }
+                
+                if (bw == 0) black_pixel_count++;
 
-                // 绘制像素 (考虑缩放)
+                // 考虑缩放
                 if (scale >= 1.0f) {
                     int scale_int = (int)scale;
                     for (int sy = 0; sy < scale_int && (dest_y + sy) < (y + height); sy++) {
                         for (int sx = 0; sx < scale_int && (dest_x + sx) < (x + width); sx++) {
-                            display_draw_pixel(dest_x + sx, dest_y + sy, gray);
+                            int logic_x = dest_x + sx;
+                            int logic_y = dest_y + sy;
+
+                            // 边界检查（480x800逻辑）
+                            if (logic_x >= 0 && logic_x < 480 && logic_y >= 0 && logic_y < 800) {
+                                // 转换到800x480物理坐标（ROTATE_270: X_phys=Y_logic, Y_phys=479-X_logic）
+                                int phys_x = logic_y;
+                                int phys_y = 479 - logic_x;
+
+                                // 写入800x480物理帧缓冲
+                                // bw = 0 = 黑色(清除bit), bw = 1 = 白色(设置bit)
+                                uint32_t byte_idx = phys_y * 100 + (phys_x / 8);  // 100 = 800/8
+                                uint8_t bit_mask = 0x80 >> (phys_x % 8);
+
+                                if (bw == 0) {
+                                    fb[byte_idx] &= ~bit_mask;  // 黑色
+                                    if (sx == 0 && sy == 0) pixel_count_written++;
+                                } else {
+                                    fb[byte_idx] |= bit_mask;   // 白色
+                                }
+                            }
                         }
                     }
                 } else {
-                    display_draw_pixel(dest_x, dest_y, gray);
+                    // 无缩放，直接写入
+                    if (dest_x >= 0 && dest_x < 480 && dest_y >= 0 && dest_y < 800) {
+                        int phys_x = dest_y;
+                        int phys_y = 479 - dest_x;
+                        uint32_t byte_idx = phys_y * 100 + (phys_x / 8);
+                        uint8_t bit_mask = 0x80 >> (phys_x % 8);
+
+                        if (bw == 0) {
+                            fb[byte_idx] &= ~bit_mask;
+                            pixel_count_written++;
+                        } else {
+                            fb[byte_idx] |= bit_mask;
+                        }
+                    }
                 }
             }
 
@@ -178,6 +251,9 @@ bool bmp_helper_render(const uint8_t *bmp_data, size_t bmp_data_size,
                 taskYIELD();  // 使用 yield 而不是 delay，更快
             }
         }
+
+        ESP_LOGI(TAG, "BMP 1-bit rendering complete: %d pixels written, %d black pixels in source", pixel_count_written, black_pixel_count);
+
     } else if (bit_count == 24) {
         // 24 位 BMP (RGB888)
         for (int src_y = 0; src_y < src_height; src_y++) {
