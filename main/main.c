@@ -159,8 +159,9 @@ button_t get_pressed_button(void) {
 }
 
 // 初始化按钮和ADC - ESP-IDF 6.1
+// 注意：GPIO1, GPIO2, GPIO3 的中断配置由 input_handler_init() 处理
 static void buttons_adc_init(void) {
-    ESP_LOGI("BTN", "Initializing buttons and ADC...");
+    ESP_LOGI("BTN", "Initializing ADC for buttons...");
 
     // 配置 ADC Oneshot 模式
     adc_oneshot_unit_init_cfg_t init_config1 = {
@@ -193,13 +194,14 @@ static void buttons_adc_init(void) {
         }
     }
 
-    // 配置按钮引脚
+    // 注意：BTN_GPIO3 的中断配置由 input_handler_init() 完成
+    // 这里只做基本的输入配置，不配置中断
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << BTN_GPIO3),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
+        .intr_type = GPIO_INTR_DISABLE  // 中断由 input_handler 配置
     };
     gpio_config(&io_conf);
 
@@ -209,7 +211,7 @@ static void buttons_adc_init(void) {
     // 配置USB检测引脚
     gpio_set_direction(UART0_RXD, GPIO_MODE_INPUT);
 
-    ESP_LOGI("BTN", "Buttons and ADC initialized");
+    ESP_LOGI("BTN", "ADC and basic GPIO initialized (interrupts configured by input_handler)");
 }
 
 // 检查是否正在充电 (USB连接检测)
@@ -412,12 +414,32 @@ static void ui_button_event_cb(button_t btn, button_event_t event, void *user_da
     screen_manager_handle_event(btn, event);
 }
 
+/**
+ * @brief 输入处理任务 - GPIO 中断驱动
+ * 使用 GPIO 中断触发，但仍需要定期调用以支持长按/重复检测
+ * 由于长按检测需要时间轴，所以不能完全依赖中断
+ * 
+ * 功耗优化：根据按键活动状态动态调整轮询频率
+ * - 有按键按下时：20ms 快速轮询（支持长按/重复）
+ * - 无按键活动时：100ms 慢速轮询（降低功耗）
+ */
 static void input_poll_task(void *arg)
 {
     (void)arg;
+    const TickType_t fast_poll_ms = 20;   // 按键活动时的快速轮询间隔
+    const TickType_t slow_poll_ms = 100;  // 无按键时的慢速轮询间隔
+    
     while (1) {
         input_handler_poll();
-        vTaskDelay(pdMS_TO_TICKS(20));
+        
+        // 根据按键活动状态动态调整轮询间隔
+        if (input_handler_is_active()) {
+            // 有按键按下，需要快速轮询以支持长按/重复检测
+            vTaskDelay(pdMS_TO_TICKS(fast_poll_ms));
+        } else {
+            // 无按键活动，降低轮询频率以节省 CPU
+            vTaskDelay(pdMS_TO_TICKS(slow_poll_ms));
+        }
     }
 }
 

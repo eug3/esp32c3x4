@@ -1,6 +1,8 @@
 /**
  * @file input_handler.h
- * @brief 按键输入处理模块
+ * @brief 按键输入处理模块 - GPIO 中断版本
+ *
+ * 使用 GPIO 中断替代轮询，提高响应速度和降低功耗
  *
  * 按键映射（Xteink X4）：
  * - BTN_RIGHT: 右键（下一页/向下）
@@ -136,7 +138,8 @@ const char* input_handler_get_event_name(button_event_t event);
 
 /**
  * @brief 轮询输入处理（在主循环中调用）
- * @note 此函数会检测按键状态并触发回调
+ * @note 此函数会检查中断事件队列并处理按键状态
+ *       仍需定期调用以支持长按和重复检测
  */
 void input_handler_poll(void);
 
@@ -148,9 +151,23 @@ void input_handler_poll(void);
 bool input_handler_wait_for_button(button_t *btn);
 
 /**
+ * @brief 等待按键事件（带超时）
+ * @param btn 输出按键
+ * @param timeout_ms 超时时间（0 表示无限等待）
+ * @return true 有按键按下，false 超时
+ */
+bool input_handler_wait_for_event_timeout(button_t *btn, int timeout_ms);
+
+/**
  * @brief 读取原始按键状态（供 main.c 使用）
  * @return 当前按下的按键
  */
 button_t read_raw_button(void);
+
+/**
+ * @brief 检查是否有按键活动（用于动态功耗管理）
+ * @return true 有按键按下，false 无按键活动
+ */
+bool input_handler_is_active(void);
 
 #endif // INPUT_HANDLER_H

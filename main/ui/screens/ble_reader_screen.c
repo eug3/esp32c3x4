@@ -453,6 +453,12 @@ static struct {
 #define X4IM_HEADER_SIZE        32      // v2 帧头长度
 #define X4IM_HEADER_SIZE_V1     12      // v1 帧头长度（兼容）
 #define X4IM_FLAGS_STORAGE_SD   0x0100  // Bit 8: 存储到SD卡
+#define X4IM_FLAGS_TYPE_BMP     0x0020  // Bit 5: BMP 位图类型
+#define X4IM_FLAGS_TYPE_PNG     0x0008  // Bit 3: PNG 图片类型
+#define X4IM_FLAGS_TYPE_TXT     0x0004  // Bit 2: TXT 文本类型
+
+// X4IM 命令常量
+#define X4IM_CMD_SHOW_PAGE      0x80    // 显示指定页面
 
 // 线程安全保护互斥锁
 static SemaphoreHandle_t x4im_rx_mutex = NULL;
@@ -578,6 +584,68 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
 
     ESP_LOGI(TAG, "===== BLE TXT DATA RECEIVED: %u bytes =====", length);
     
+    // ========== 处理 SHOW_PAGE 命令（单字节或双字节）==========
+    if ((length == 1 && data[0] == X4IM_CMD_SHOW_PAGE) || 
+        (length == 2 && data[0] == X4IM_CMD_SHOW_PAGE)) {
+        uint8_t page_index = (length == 2) ? data[1] : 0;
+        ESP_LOGI(TAG, "Received SHOW_PAGE command, page_index=%u", page_index);
+        
+        // 加载并显示 BMP 文件
+        char bmp_path[128];
+        snprintf(bmp_path, sizeof(bmp_path), "/littlefs/page_%u.bmp", page_index);
+        
+        // 检查文件是否存在
+        struct stat st;
+        if (stat(bmp_path, &st) != 0) {
+            ESP_LOGW(TAG, "BMP file not found: %s", bmp_path);
+            free((void *)data);
+            return;
+        }
+        
+        ESP_LOGI(TAG, "Loading BMP: %s (%ld bytes)", bmp_path, (long)st.st_size);
+        
+        // 清空屏幕
+        display_clear();
+        
+        // 使用 GUI_Paint 加载 BMP 并显示
+        // 这里简化处理，实际应该解析 BMP 文件头
+        FILE *fp = fopen(bmp_path, "rb");
+        if (fp != NULL) {
+            // 读取 BMP 数据到显示缓冲
+            // 注意：这里假设 BMP 是 800x480 的 1-bit 单色位图
+            // 实际使用时需要正确解析 BMP 文件头
+            
+            // BMP 文件头通常是 54 字节（对于标准格式）
+            fseek(fp, 62, SEEK_SET);  // 跳过 BMP 头部（具体偏移需根据文件格式调整）
+            
+            // 读取位图数据（48000 字节 = 800×480÷8）
+            uint8_t *bmp_data = (uint8_t *)malloc(48000);
+            if (bmp_data != NULL) {
+                size_t read_bytes = fread(bmp_data, 1, 48000, fp);
+                if (read_bytes == 48000) {
+                    // 将数据写入显示缓冲
+                    // 注意：BMP 是从下到上存储的，可能需要翻转
+                    memcpy(Paint_GetImage(), bmp_data, 48000);
+                    
+                    // 刷新屏幕
+                    display_refresh(REFRESH_MODE_FULL);
+                    ESP_LOGI(TAG, "BMP displayed successfully");
+                } else {
+                    ESP_LOGW(TAG, "BMP read incomplete: %zu/48000 bytes", read_bytes);
+                }
+                free(bmp_data);
+            } else {
+                ESP_LOGE(TAG, "Failed to allocate memory for BMP data");
+            }
+            fclose(fp);
+        } else {
+            ESP_LOGE(TAG, "Failed to open BMP file: %s", bmp_path);
+        }
+        
+        free((void *)data);
+        return;
+    }
+    
     // 检查是否为命令包（保留兼容性，但VFS协议主要处理文本数据）
     bool is_command = (length >= 3 && data[0] == 0xA5 && data[1] == 0x5A);
     
@@ -667,25 +735,68 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
     }
 
     // ========== 检测并解析 X4IM v2 协议头 ==========
-    // X4IM v2 头部: "X4IM" (4B) + version(1B) + type(1B) + flags(2B) + payload_size(4B) + ...
+    // X4IM v2 头部: "X4IM" (4B) + version(2B) + flags(2B) + payload_size(4B) + sd(4B) + name(16B)
     const uint8_t *payload_data = data;
     size_t payload_length = length;
     bool has_x4im_header = false;
+    uint16_t x4im_flags = 0;
+    char x4im_filename[16] = {0};
     
     if (length >= X4IM_HEADER_SIZE && 
         data[0] == 'X' && data[1] == '4' && data[2] == 'I' && data[3] == 'M' && data[4] == 0x02) {
         // 解析 X4IM v2 头部
         uint8_t type = data[5];
-        uint16_t flags = data[6] | (data[7] << 8);
+        x4im_flags = data[6] | (data[7] << 8);
         uint32_t declared_payload_size = data[8] | (data[9] << 8) | (data[10] << 16) | (data[11] << 24);
         
-        ESP_LOGI(TAG, "X4IM v2 header detected: type=0x%02X, flags=0x%04X, payload=%lu bytes",
-             type, flags, (unsigned long)declared_payload_size);
+        // 提取文件名
+        memcpy(x4im_filename, &data[16], 15);
+        x4im_filename[15] = '\0';
+        
+        ESP_LOGI(TAG, "X4IM v2 header: type=0x%02X, flags=0x%04X, payload=%lu, name='%s'",
+             type, x4im_flags, (unsigned long)declared_payload_size, x4im_filename);
         
         // 跳过32字节头部，只处理payload
         payload_data = data + X4IM_HEADER_SIZE;
         payload_length = (length > X4IM_HEADER_SIZE) ? (length - X4IM_HEADER_SIZE) : 0;
         has_x4im_header = true;
+        
+        // ========== BMP 位图类型处理 ==========
+        if (x4im_flags & X4IM_FLAGS_TYPE_BMP) {
+            ESP_LOGI(TAG, "Receiving BMP bitmap data");
+            
+            // 构造 BMP 文件路径
+            char bmp_path[128];
+            if (x4im_filename[0] != '\0') {
+                snprintf(bmp_path, sizeof(bmp_path), "/littlefs/%s", x4im_filename);
+            } else {
+                snprintf(bmp_path, sizeof(bmp_path), "/littlefs/page_0.bmp");
+            }
+            
+            // 流式写入 BMP 数据（新传输则创建，否则追加）
+            const char *mode = g_ble_new_transfer ? "wb" : "ab";
+            FILE *fp = fopen(bmp_path, mode);
+            if (fp != NULL) {
+                size_t written = fwrite(payload_data, 1, payload_length, fp);
+                fclose(fp);
+                
+                if (written == payload_length) {
+                    if (g_ble_new_transfer) {
+                        ESP_LOGI(TAG, "BMP: New file created, wrote %zu bytes to %s", written, bmp_path);
+                        g_ble_new_transfer = false;
+                    } else {
+                        ESP_LOGD(TAG, "BMP: Appended %zu bytes to %s", written, bmp_path);
+                    }
+                } else {
+                    ESP_LOGE(TAG, "BMP: Write failed, expected %zu, written %zu", payload_length, written);
+                }
+            } else {
+                ESP_LOGE(TAG, "BMP: Failed to open file: %s", bmp_path);
+            }
+            
+            free((void *)data);
+            return;
+        }
     }
 
     // 检测EOF标记
