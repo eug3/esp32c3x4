@@ -128,6 +128,8 @@ typedef struct {
     uint16_t transfer_file_count;       // 已传输文件数
     bool receiving_bmp;                 // 是否正在接收BMP文件
     char bmp_receiving_path[128];       // 正在接收的BMP文件路径
+    bool receiving_jpg;                 // 是否正在接收JPG文件
+    char jpg_receiving_path[128];       // 正在接收的JPG文件路径
     
     // ========== VFS集成 ==========
     vfs_file_t *vfs_book;              // VFS虚拟文件对象
@@ -168,6 +170,8 @@ static ble_reader_state_internal_t s_ble_state = {
     .transfer_file_count = 0,
     .receiving_bmp = false,
     .bmp_receiving_path = {0},
+    .receiving_jpg = false,
+    .jpg_receiving_path = {0},
     .chapter_browser_active = false,
     .chapter_list_count = 0,
     .chapter_list_selection = 0,
@@ -462,6 +466,7 @@ static struct {
 #define X4IM_HEADER_SIZE        32      // v2 帧头长度
 #define X4IM_HEADER_SIZE_V1     12      // v1 帧头长度（兼容）
 #define X4IM_FLAGS_STORAGE_SD   0x0100  // Bit 8: 存储到SD卡
+#define X4IM_FLAGS_TYPE_JPG     0x0040  // Bit 6: JPG 图片类型
 #define X4IM_FLAGS_TYPE_BMP     0x0020  // Bit 5: BMP 位图类型
 #define X4IM_FLAGS_TYPE_PNG     0x0008  // Bit 3: PNG 图片类型
 #define X4IM_FLAGS_TYPE_TXT     0x0004  // Bit 2: TXT 文本类型
@@ -599,35 +604,46 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         uint8_t page_index = (length == 2) ? data[1] : 0;
         ESP_LOGI(TAG, "Received SHOW_PAGE command, page_index=%u", page_index);
         
-        // 加载并显示 BMP 文件
-        char bmp_path[128];
-        snprintf(bmp_path, sizeof(bmp_path), "/littlefs/ble_vfs/page_%u.bmp", page_index);
-        
-        // 检查文件是否存在
+        // 尝试加载并显示图片（支持 BMP 和 JPG）
+        char image_path[128];
         struct stat st;
-        if (stat(bmp_path, &st) != 0) {
-            ESP_LOGW(TAG, "BMP file not found: %s", bmp_path);
+        bool image_found = false;
+        
+        // 优先尝试 JPG 格式
+        snprintf(image_path, sizeof(image_path), "/littlefs/ble_vfs/page_%u.jpg", page_index);
+        if (stat(image_path, &st) == 0) {
+            image_found = true;
+            ESP_LOGI(TAG, "Found JPG image: %s (%ld bytes)", image_path, (long)st.st_size);
+        } else {
+            // 尝试 BMP 格式
+            snprintf(image_path, sizeof(image_path), "/littlefs/ble_vfs/page_%u.bmp", page_index);
+            if (stat(image_path, &st) == 0) {
+                image_found = true;
+                ESP_LOGI(TAG, "Found BMP image: %s (%ld bytes)", image_path, (long)st.st_size);
+            }
+        }
+        
+        if (!image_found) {
+            ESP_LOGW(TAG, "Image file not found (JPG or BMP) for page_%u", page_index);
             free((void *)data);
             return;
         }
-        
-        ESP_LOGI(TAG, "Loading BMP: %s (%ld bytes)", bmp_path, (long)st.st_size);
         
         // 使用统一的图片渲染API（wallpaper_manager）
         // 先清空屏幕
         display_clear(COLOR_WHITE);
         
-        // 使用 wallpaper_render_image_to_display 显示 BMP
-        bool success = wallpaper_render_image_to_display(bmp_path);
+        // 使用 wallpaper_render_image_to_display 显示图片（支持JPG/BMP/PNG）
+        bool success = wallpaper_render_image_to_display(image_path);
         if (success) {
-            ESP_LOGI(TAG, "BMP displayed successfully via wallpaper_manager");
+            ESP_LOGI(TAG, "Image displayed successfully via wallpaper_manager");
             // 刷新屏幕显示
             display_refresh(REFRESH_MODE_FULL);
             ESP_LOGI(TAG, "Display refreshed");
         } else {
-            ESP_LOGE(TAG, "Failed to render BMP via wallpaper_manager");
+            ESP_LOGE(TAG, "Failed to render image via wallpaper_manager");
             // 显示错误信息
-            display_draw_text_menu(40, SCREEN_HEIGHT/2, "BMP render failed", COLOR_BLACK, COLOR_WHITE);
+            display_draw_text_menu(40, SCREEN_HEIGHT/2, "Image render failed", COLOR_BLACK, COLOR_WHITE);
             display_refresh(REFRESH_MODE_FULL);
         }
         
@@ -810,6 +826,67 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
             free((void *)data);
             return;
         }
+        
+        // ========== JPG 图片类型处理 ==========
+        if (x4im_flags & X4IM_FLAGS_TYPE_JPG) {
+            ESP_LOGI(TAG, "Receiving JPG image data");
+            
+            // 确保 ble_vfs 目录存在
+            struct stat st;
+            if (stat("/littlefs/ble_vfs", &st) != 0) {
+                mkdir("/littlefs/ble_vfs", 0755);
+            }
+            
+            // 构造 JPG 文件路径
+            char jpg_path[128];
+            if (x4im_filename[0] != '\0') {
+                // 如果文件名已包含路径，直接使用；否则添加 ble_vfs 前缀
+                if (x4im_filename[0] == '/') {
+                    snprintf(jpg_path, sizeof(jpg_path), "%s", x4im_filename);
+                } else {
+                    snprintf(jpg_path, sizeof(jpg_path), "/littlefs/ble_vfs/%s", x4im_filename);
+                }
+            } else {
+                snprintf(jpg_path, sizeof(jpg_path), "/littlefs/ble_vfs/page_0.jpg");
+            }
+            
+            // 流式写入 JPG 数据（新传输则创建，否则追加）
+            const char *mode = g_ble_new_transfer ? "wb" : "ab";
+            FILE *fp = fopen(jpg_path, mode);
+            if (fp != NULL) {
+                size_t written = fwrite(payload_data, 1, payload_length, fp);
+                fclose(fp);
+                
+                if (written == payload_length) {
+                    if (g_ble_new_transfer) {
+                        ESP_LOGI(TAG, "JPG: New file created, wrote %zu bytes to %s", written, jpg_path);
+                        g_ble_new_transfer = false;
+                        // 记录正在接收JPG
+                        s_ble_state.receiving_jpg = true;
+                        snprintf(s_ble_state.jpg_receiving_path, sizeof(s_ble_state.jpg_receiving_path), "%s", jpg_path);
+                        s_ble_state.transfer_bytes_received = written;
+                        s_ble_state.transfer_bytes_total = declared_payload_size;
+                    } else {
+                        ESP_LOGD(TAG, "JPG: Appended %zu bytes to %s", written, jpg_path);
+                        s_ble_state.transfer_bytes_received += written;
+                    }
+                    
+                    // 检查是否接收完成
+                    if (s_ble_state.transfer_bytes_received >= s_ble_state.transfer_bytes_total) {
+                        ESP_LOGI(TAG, "JPG: Transfer complete! Total: %lu bytes", (unsigned long)s_ble_state.transfer_bytes_received);
+                        s_ble_state.receiving_jpg = false;
+                        g_ble_new_transfer = true;  // 准备接收下一个文件
+                    }
+                } else {
+                    ESP_LOGE(TAG, "JPG: Write failed, expected %zu, written %zu", payload_length, written);
+                }
+            } else {
+                ESP_LOGE(TAG, "JPG: Failed to open file: %s", jpg_path);
+            }
+            
+            free((void *)data);
+            return;
+        }
     }
 
     // ========== 处理BMP后续数据包（无header的纯数据）==========
@@ -838,6 +915,38 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
             }
         } else {
             ESP_LOGE(TAG, "BMP: Failed to open file for append: %s", s_ble_state.bmp_receiving_path);
+        }
+        
+        free((void *)data);
+        return;
+    }
+    
+    // ========== 处理JPG后续数据包（无header的纯数据）==========
+    if (s_ble_state.receiving_jpg && !has_x4im_header && payload_length > 0) {
+        // 追加到正在接收的JPG文件
+        FILE *fp = fopen(s_ble_state.jpg_receiving_path, "ab");
+        if (fp != NULL) {
+            size_t written = fwrite(payload_data, 1, payload_length, fp);
+            fclose(fp);
+            
+            if (written == payload_length) {
+                s_ble_state.transfer_bytes_received += written;
+                ESP_LOGD(TAG, "JPG: Appended %zu bytes, total: %lu/%lu", 
+                         written, (unsigned long)s_ble_state.transfer_bytes_received,
+                         (unsigned long)s_ble_state.transfer_bytes_total);
+                
+                // 检查是否接收完成
+                if (s_ble_state.transfer_bytes_received >= s_ble_state.transfer_bytes_total) {
+                    ESP_LOGI(TAG, "JPG: Transfer complete! Total: %lu bytes", 
+                             (unsigned long)s_ble_state.transfer_bytes_received);
+                    s_ble_state.receiving_jpg = false;
+                    g_ble_new_transfer = true;  // 准备接收下一个文件
+                }
+            } else {
+                ESP_LOGE(TAG, "JPG: Append failed, expected %zu, written %zu", payload_length, written);
+            }
+        } else {
+            ESP_LOGE(TAG, "JPG: Failed to open file for append: %s", s_ble_state.jpg_receiving_path);
         }
         
         free((void *)data);
