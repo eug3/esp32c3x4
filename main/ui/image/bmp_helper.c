@@ -137,6 +137,14 @@ bool bmp_helper_render(const uint8_t *bmp_data, size_t bmp_data_size,
 
     // 获取像素数据偏移
     uint32_t pixel_data_offset = file_header->bfOffBits;
+
+    // 跳过调色板（bfOffBits 可能指向调色板起始位置而非像素数据）
+    if (bit_count == 1) {
+        pixel_data_offset += 8;    // 2 色 × 4 字节
+    } else if (bit_count == 8) {
+        pixel_data_offset += 1024; // 256 色 × 4 字节
+    }
+
     const uint8_t *pixel_data = bmp_data + pixel_data_offset;
 
     ESP_LOGI(TAG, "BMP parsing: row_size=%d, pixel_data_offset=%lu, src_width=%d, bit_count=%u", 
@@ -210,7 +218,7 @@ bool bmp_helper_render(const uint8_t *bmp_data, size_t bmp_data_size,
 
                             // 边界检查（480x800逻辑）
                             if (logic_x >= 0 && logic_x < 480 && logic_y >= 0 && logic_y < 800) {
-                                // 转换到800x480物理坐标（ROTATE_270: X_phys=Y_logic, Y_phys=479-X_logic）
+                                
                                 int phys_x = logic_y;
                                 int phys_y = 479 - logic_x;
 
