@@ -31,6 +31,8 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/semphr.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 #include "ff.h"           // FATFS for SD card operations
 #include <limits.h>
 #include <inttypes.h>
@@ -40,6 +42,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <dirent.h>
+#include <time.h>
 
 static const char *TAG = "BLE_READER";
 
@@ -53,6 +56,23 @@ bool g_ble_new_transfer = true;
 #define BLE_CONTENT_Y_START 30      // 内容区域起始 Y（页码信息下方）
 #define BLE_CONTENT_BOTTOM_MARGIN 10 // 底部留白
 #define BLE_CONTENT_X_MARGIN 10      // 左右边距
+
+// ========== NVS 保存配置 ==========
+#define BLE_NVS_NAMESPACE    "ble_reader"   // NVS 命名空间
+#define BLE_NVS_KEY_STATE    "state"        // 状态键
+
+// NVS 保存的蓝牙阅读状态
+typedef struct {
+    uint32_t book_hash;              // 书籍哈希
+    uint32_t chapter_hash;           // 章节哈希
+    char book_title[128];            // 书名
+    size_t char_position;            // 阅读位置（字符偏移）
+    size_t total_chars;              // 总字符数
+    uint16_t current_page;           // 当前页码
+    uint16_t total_pages;            // 总页数
+    uint32_t last_read_time;         // 最后阅读时间
+    bool is_valid;                   // 记录是否有效
+} ble_nvs_state_t;
 
 
 
@@ -201,6 +221,10 @@ static void on_hide(screen_t *screen);
 static void on_draw(screen_t *screen);
 static void on_event(screen_t *screen, button_t btn, button_event_t event);
 
+// NVS 保存/加载函数
+static esp_err_t ble_nvs_save_state(void);
+static esp_err_t ble_nvs_load_state(void);
+
 
 static bool load_current_page(void);
 
@@ -240,6 +264,121 @@ static bool can_control_paging(void);
 /**********************
  *  STATIC FUNCTIONS
  **********************/
+
+/**
+ * @brief 保存蓝牙阅读状态到 NVS
+ */
+static esp_err_t ble_nvs_save_state(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err;
+
+    ESP_LOGI(TAG, "Saving BLE reading state to NVS...");
+
+    // 打开 NVS
+    err = nvs_open(BLE_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // 准备保存的数据
+    ble_nvs_state_t state = {
+        .book_hash = s_ble_state.current_book_hash,
+        .chapter_hash = s_ble_state.current_chapter_hash,
+        .char_position = s_ble_state.char_position,
+        .total_chars = s_ble_state.total_chars,
+        .current_page = s_ble_state.current_page,
+        .total_pages = s_ble_state.total_pages,
+        .last_read_time = (uint32_t)time(NULL),
+        .is_valid = true
+    };
+
+    // 复制书名
+    strncpy(state.book_title, s_ble_state.book_title, sizeof(state.book_title) - 1);
+    state.book_title[sizeof(state.book_title) - 1] = '\0';
+
+    // 保存到 NVS
+    err = nvs_set_blob(handle, BLE_NVS_KEY_STATE, &state, sizeof(ble_nvs_state_t));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save state: %s", esp_err_to_name(err));
+        nvs_close(handle);
+        return err;
+    }
+
+    // 提交
+    err = nvs_commit(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to commit NVS: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "BLE reading state saved: book=%08x chapter=%08x pos=%zu/%zu",
+                 state.book_hash, state.chapter_hash, state.char_position, state.total_chars);
+    }
+
+    nvs_close(handle);
+    return err;
+}
+
+/**
+ * @brief 从 NVS 加载蓝牙阅读状态
+ */
+static esp_err_t ble_nvs_load_state(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err;
+
+    ESP_LOGI(TAG, "Loading BLE reading state from NVS...");
+
+    // 打开 NVS
+    err = nvs_open(BLE_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "No saved BLE state found: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // 加载数据
+    ble_nvs_state_t state;
+    size_t required_size = sizeof(ble_nvs_state_t);
+    err = nvs_get_blob(handle, BLE_NVS_KEY_STATE, &state, &required_size);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to load state: %s", esp_err_to_name(err));
+        nvs_close(handle);
+        return err;
+    }
+
+    nvs_close(handle);
+
+    // 检查数据有效性
+    if (!state.is_valid) {
+        ESP_LOGW(TAG, "Saved state is marked as invalid");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 恢复状态
+    s_ble_state.current_book_hash = state.book_hash;
+    s_ble_state.current_chapter_hash = state.chapter_hash;
+    s_ble_state.char_position = state.char_position;
+    s_ble_state.total_chars = state.total_chars;
+    s_ble_state.current_page = state.current_page;
+    s_ble_state.total_pages = state.total_pages;
+
+    // 复制书名
+    strncpy(s_ble_state.book_title, state.book_title, sizeof(s_ble_state.book_title) - 1);
+    s_ble_state.book_title[sizeof(s_ble_state.book_title) - 1] = '\0';
+
+    // 如果位置在文件末尾，重置到开头
+    if (s_ble_state.total_chars > 0 && s_ble_state.char_position >= s_ble_state.total_chars) {
+        ESP_LOGI(TAG, "Position at end of file, resetting to start");
+        s_ble_state.char_position = 0;
+        s_ble_state.current_page = 0;
+    }
+
+    ESP_LOGI(TAG, "BLE reading state loaded: book=%s (hash=%08x) chapter=%08x pos=%zu/%zu",
+             s_ble_state.book_title, s_ble_state.current_book_hash,
+             s_ble_state.current_chapter_hash, s_ble_state.char_position, s_ble_state.total_chars);
+
+    return ESP_OK;
+}
 
 
 
@@ -1035,12 +1174,15 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
             if (screen != NULL && screen == &g_ble_reader_screen) {
                 // 全屏清空后绘制（clear_content=true 会调用 display_clear）
                 draw_reading_mode_screen(true);
-                
+
                 // 刷新显示
                 display_refresh(REFRESH_MODE_FULL);
-                
+
                 ESP_LOGI(TAG, "EOF: Screen cleared and content drawn");
             }
+
+            // 9. 保存状态到 NVS
+            ble_nvs_save_state();
             
             free((void *)data);
             return;
@@ -1687,8 +1829,16 @@ static void draw_reading_mode_screen(bool clear_content)
                     int content_height = SCREEN_HEIGHT - BLE_CONTENT_Y_START - BLE_CONTENT_BOTTOM_MARGIN;
                     s_ble_state.last_page_consumed = measure_wrapped_consumed(content_width, content_height, page_buffer, 0);
                     draw_wrapped_text(BLE_CONTENT_X_MARGIN, BLE_CONTENT_Y_START, content_width, content_height, page_buffer, 0);
+                    
+                    // 调试日志：显示当前页读取情况
+                    ESP_LOGI(TAG, "Page rendered: pos=%zu, read=%d, consumed=%zu, total=%zu",
+                             s_ble_state.char_position, bytes_read, s_ble_state.last_page_consumed, s_ble_state.total_chars);
                 } else {
-                    display_draw_text_menu(20, 100, "文件为空", COLOR_BLACK, COLOR_WHITE);
+                    // 读取返回0字节，说明已到文件末尾
+                    s_ble_state.last_page_consumed = 0;  // 标记消耗为0，触发末尾检测
+                    display_draw_text_menu(20, 100, "已到章节末尾", COLOR_BLACK, COLOR_WHITE);
+                    ESP_LOGI(TAG, "End of chapter reached: pos=%zu, total=%zu", 
+                             s_ble_state.char_position, s_ble_state.total_chars);
                 }
                 xSemaphoreGive(x4im_rx_mutex);
             } else {
@@ -1885,17 +2035,28 @@ static inline void page_previous(void) {
 static inline void page_next(void) {
     // 检查是否可以继续翻页
     bool at_content_end = false;
+    
+    // 方法1: 如果已知文件大小（字节数），检查是否已到达末尾
     if (s_ble_state.total_chars > 0) {
-        // 如果已知总字符数，检查是否已到达末尾
         size_t next_pos = s_ble_state.char_position + s_ble_state.last_page_consumed;
         at_content_end = (next_pos >= s_ble_state.total_chars);
+    }
+    
+    // 方法2: 如果当前页消耗为0（没有更多内容可显示），也视为到达末尾
+    if (s_ble_state.last_page_consumed == 0 && s_ble_state.char_position > 0) {
+        at_content_end = true;
+    }
+    
+    // 方法3: 如果当前位置已经超过文件大小，也视为到达末尾
+    if (s_ble_state.total_chars > 0 && s_ble_state.char_position >= s_ble_state.total_chars) {
+        at_content_end = true;
     }
     
     bool can_next = (s_ble_state.total_pages == 0 || s_ble_state.current_page < s_ble_state.total_pages - 1);
     
     // 详细调试日志
     ESP_LOGI(TAG, "📖 [page_next] 按下RIGHT键:");
-    ESP_LOGI(TAG, "   current_pos=%zu, consumed=%zu, total_chars=%zu", 
+    ESP_LOGI(TAG, "   current_pos=%zu, consumed=%zu, total_bytes=%zu", 
              s_ble_state.char_position, s_ble_state.last_page_consumed, s_ble_state.total_chars);
     ESP_LOGI(TAG, "   can_next=%d, at_content_end=%d", can_next, at_content_end);
     
@@ -2312,13 +2473,22 @@ static void on_show(screen_t *screen)
     char vfs_uri[256];
     snprintf(vfs_uri, sizeof(vfs_uri), "ble://weread_novel");
     s_ble_state.vfs_book = vfs_open(vfs_uri);
-    
+
     if (s_ble_state.vfs_book != NULL) {
         vfs_set_total_chapters(s_ble_state.vfs_book, 1);
         vfs_set_prefetch_window(s_ble_state.vfs_book, 5);
         ESP_LOGI(TAG, "VFS book opened successfully");
     } else {
         ESP_LOGW(TAG, "Failed to open VFS book");
+    }
+
+    // 尝试加载上次保存的阅读状态
+    ble_nvs_load_state();
+
+    // 如果有保存的阅读位置且有效，恢复位置
+    if (s_ble_state.total_chars > 0 && s_ble_state.vfs_book != NULL) {
+        vfs_seek(s_ble_state.vfs_book, s_ble_state.char_position, SEEK_SET);
+        ESP_LOGI(TAG, "Restored reading position: %zu/%zu", s_ble_state.char_position, s_ble_state.total_chars);
     }
 
     // 注册蓝牙回调
@@ -2351,6 +2521,9 @@ static void on_hide(screen_t *screen)
     // 在断开连接完成后再销毁 BLE 协议栈
     ble_manager_deinit();
     // 位图协议已废弃，无需清理
+
+    // 保存当前阅读状态到 NVS
+    ble_nvs_save_state();
 
     // 关闭VFS虚拟文件
     if (s_ble_state.vfs_book != NULL) {
