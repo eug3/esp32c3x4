@@ -972,7 +972,8 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                     if (s_ble_state.transfer_bytes_received >= s_ble_state.transfer_bytes_total) {
                         ESP_LOGI(TAG, "BMP: Transfer complete! Total: %lu bytes", (unsigned long)s_ble_state.transfer_bytes_received);
                         s_ble_state.receiving_bmp = false;
-                        g_ble_new_transfer = true;  // 准备接收下一个文件
+                        // 注意：不要在这里设置 g_ble_new_transfer = true
+                        // 因为可能紧接着会收到文本数据，它们是独立的传输
                     }
                 } else {
                     ESP_LOGE(TAG, "BMP: Write failed, expected %zu, written %zu", payload_length, written);
@@ -1033,7 +1034,8 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                     if (s_ble_state.transfer_bytes_received >= s_ble_state.transfer_bytes_total) {
                         ESP_LOGI(TAG, "JPG: Transfer complete! Total: %lu bytes", (unsigned long)s_ble_state.transfer_bytes_received);
                         s_ble_state.receiving_jpg = false;
-                        g_ble_new_transfer = true;  // 准备接收下一个文件
+                        // 注意：不要在这里设置 g_ble_new_transfer = true
+                        // 因为可能紧接着会收到文本数据，它们是独立的传输
                     }
                 } else {
                     ESP_LOGE(TAG, "JPG: Write failed, expected %zu, written %zu", payload_length, written);
@@ -1066,7 +1068,8 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                     ESP_LOGI(TAG, "BMP: Transfer complete! Total: %lu bytes", 
                              (unsigned long)s_ble_state.transfer_bytes_received);
                     s_ble_state.receiving_bmp = false;
-                    g_ble_new_transfer = true;  // 准备接收下一个文件
+                    // 注意：不要在这里设置 g_ble_new_transfer = true
+                    // 因为可能紧接着会收到文本数据，它们是独立的传输
                 }
             } else {
                 ESP_LOGE(TAG, "BMP: Append failed, expected %zu, written %zu", payload_length, written);
@@ -1098,7 +1101,8 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
                     ESP_LOGI(TAG, "JPG: Transfer complete! Total: %lu bytes", 
                              (unsigned long)s_ble_state.transfer_bytes_received);
                     s_ble_state.receiving_jpg = false;
-                    g_ble_new_transfer = true;  // 准备接收下一个文件
+                    // 注意：不要在这里设置 g_ble_new_transfer = true
+                    // 因为可能紧接着会收到文本数据，它们是独立的传输
                 }
             } else {
                 ESP_LOGE(TAG, "JPG: Append failed, expected %zu, written %zu", payload_length, written);
@@ -1202,8 +1206,11 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
         }
         
         // 正常数据：写入文件（不刷新屏幕）
-        // 使用全局变量跟踪：如果是新传输则新建文件，否则追加
-        const char *mode = g_ble_new_transfer ? "wb" : "ab";  // 新传输用wb，否则追加
+        // 判断是否是新传输：
+        // 1. has_x4im_header 表示这是一个新的X4IM数据包（新传输的开始）
+        // 2. g_ble_new_transfer 是全局标记
+        bool is_new_transfer = has_x4im_header || g_ble_new_transfer;
+        const char *mode = is_new_transfer ? "wb" : "ab";  // 新传输用wb，否则追加
         FILE *fp = fopen(chapter_path, mode);
         if (fp != NULL) {
             // 写入payload数据（如果有X4IM头则已跳过，否则是原始数据）
@@ -1211,12 +1218,12 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
             fclose(fp);
             
             if (written == payload_length) {
-                if (g_ble_new_transfer) {
+                if (is_new_transfer) {
                     ESP_LOGI(TAG, "New file created, wrote %zu bytes to chapter %d%s", 
                              written, current_chapter, has_x4im_header ? " (X4IM)" : "");
                     g_ble_new_transfer = false;  // 后续数据追加
                 } else {
-                    ESP_LOGD(TAG, "Appended %zu bytes to chapter %d%s", 
+                    ESP_LOGI(TAG, "Appended %zu bytes to chapter %d%s", 
                              written, current_chapter, has_x4im_header ? " (X4IM)" : "");
                 }
             } else {
