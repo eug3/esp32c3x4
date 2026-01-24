@@ -1624,6 +1624,8 @@ static void draw_reading_mode_screen(bool clear_content)
         }
     }
 
+    // 先清除状态栏区域，避免状态切换时旧文字残留
+    display_clear_region(0, top_y, SCREEN_WIDTH, BLE_CONTENT_Y_START - top_y, COLOR_WHITE);
     display_draw_text_menu(0, top_y, status_line, COLOR_BLACK, COLOR_WHITE);
 
     // 显示初始化确认提示
