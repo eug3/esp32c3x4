@@ -438,9 +438,15 @@ static void ble_connect_callback(bool connected)
     }
 
     if (current_screen != NULL && current_screen == &g_ble_reader_screen) {
+        // 先清除状态栏区域，避免状态切换时旧文字残留
+        display_clear_region(0, 0, SCREEN_WIDTH, 30, COLOR_WHITE);
+
         current_screen->needs_redraw = true;
         // 立即触发屏幕重绘
         screen_manager_draw();
+
+        // 先清除脏区标志，避免脏区累积
+        display_clear_dirty();
 
         // 局刷更新状态栏（只刷新顶部状态行区域）
         display_mark_dirty(0, 0, SCREEN_WIDTH, 30);
