@@ -1851,8 +1851,8 @@ static inline void page_previous(void) {
         }
         
         update_cached_window(s_ble_state.current_page);
-        // 发送翻页请求给 Client
-        send_page_request(false);  // 向后翻
+        // 本地翻页：仅发送位置报告同步进度，不触发章节切换
+        send_position_report();
         
         // 刷新屏幕显示
         draw_reading_mode_screen(false);
@@ -1884,10 +1884,17 @@ static inline void page_next(void) {
     }
     
     bool can_next = (s_ble_state.total_pages == 0 || s_ble_state.current_page < s_ble_state.total_pages - 1);
-    ESP_LOGI(TAG, "page_next called: current_page=%u, total_pages=%u, can_next=%d, at_content_end=%d", 
-             s_ble_state.current_page, s_ble_state.total_pages, can_next, at_content_end);
+    
+    // 详细调试日志
+    ESP_LOGI(TAG, "📖 [page_next] 按下RIGHT键:");
+    ESP_LOGI(TAG, "   current_pos=%zu, consumed=%zu, total_chars=%zu", 
+             s_ble_state.char_position, s_ble_state.last_page_consumed, s_ble_state.total_chars);
+    ESP_LOGI(TAG, "   can_next=%d, at_content_end=%d", can_next, at_content_end);
     
     if (can_next && !at_content_end) {
+        // ✅ 本地翻页：当前页不是最后一页
+        ESP_LOGI(TAG, "   ➜ 🔵 本地翻页到下一页 (不发送 0x81)");
+        
         // 保存当前页起始到历史栈
         if (s_ble_state.history_len < (uint8_t)(sizeof(s_ble_state.history_char_pos)/sizeof(s_ble_state.history_char_pos[0]))) {
             s_ble_state.history_char_pos[s_ble_state.history_len++] = s_ble_state.char_position;
@@ -1895,7 +1902,7 @@ static inline void page_next(void) {
         // seek：下一页起始 = 当前起始 + 当前消耗
         s_ble_state.char_position += s_ble_state.last_page_consumed;
         s_ble_state.current_page++;
-        ESP_LOGI(TAG, "Page next: %u (seek=%zu)", s_ble_state.current_page, s_ble_state.char_position);
+        ESP_LOGI(TAG, "   新位置: page=%u, seek=%zu", s_ble_state.current_page, s_ble_state.char_position);
         
         // 重置VFS文件位置到char_position，以便重新读取
         if (s_ble_state.vfs_book != NULL) {
@@ -1903,17 +1910,17 @@ static inline void page_next(void) {
         }
         
         update_cached_window(s_ble_state.current_page);
-        // 发送翻页请求给 Client
-        send_page_request(true);  // 向前翻
+        // 本地翻页：仅发送位置报告同步进度，不触发章节切换
+        send_position_report();
         
         // 刷新屏幕显示
         draw_reading_mode_screen(false);
         display_refresh(REFRESH_MODE_PARTIAL);
     } else {
-        // 已经到达最后一页或内容末尾
+        // ✅ 请求下一章：当前页已是最后一页
+        ESP_LOGI(TAG, "   ➜ 🔴 已到文本末尾，发送 0x81 请求下一章");
         if (s_ble_state.device_connected) {
             // 蓝牙已连接 → 请求下一章
-            ESP_LOGI(TAG, "Page next: at last page, requesting next chapter");
             send_page_request(true);  // 向前翻（下一章）
             
             // 显示加载提示
@@ -1927,7 +1934,7 @@ static inline void page_next(void) {
             g_ble_new_transfer = true;  // 标记下次为新文件
         } else {
             // 蓝牙未连接 → 显示提示
-            ESP_LOGW(TAG, "Page next: at last page, but BLE disconnected");
+            ESP_LOGW(TAG, "   ⚠️  已到末尾但蓝牙未连接");
             display_draw_text_menu(20, SCREEN_HEIGHT / 2, "已到章节末尾", COLOR_BLACK, COLOR_WHITE);
             display_draw_text_menu(20, SCREEN_HEIGHT / 2 + 30, "请连接蓝牙加载下一章", COLOR_BLACK, COLOR_WHITE);
             display_refresh(REFRESH_MODE_PARTIAL);
