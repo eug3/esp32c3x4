@@ -10,11 +10,11 @@
 #define VERSION_MAJOR       0
 #define VERSION_MINOR       9
 #define VERSION_PATCH       0
-#define VERSION_BUILD       141
-#define VERSION_STRING      "v0.9.0.141-dirty"
-#define VERSION_FULL        "v0.9.0.141-dirty - monster-c3x4 (284d288)"
-#define BUILD_TIME          "2026-01-24 21:12:45"
-#define GIT_COMMIT_HASH     "284d288"
+#define VERSION_BUILD       142
+#define VERSION_STRING      "v0.9.0.142-dirty"
+#define VERSION_FULL        "v0.9.0.142-dirty - monster-c3x4 (92d3952)"
+#define BUILD_TIME          "2026-01-24 23:28:15"
+#define GIT_COMMIT_HASH     "92d3952"
 #define GIT_DIRTY           1
 
 #endif // VERSION_H

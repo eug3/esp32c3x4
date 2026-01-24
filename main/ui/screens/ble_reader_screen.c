@@ -31,6 +31,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/semphr.h"
+#include "freertos/timers.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "ff.h"           // FATFS for SD card operations
@@ -150,6 +151,10 @@ typedef struct {
     char bmp_receiving_path[128];       // 正在接收的BMP文件路径
     bool receiving_jpg;                 // 是否正在接收JPG文件
     char jpg_receiving_path[128];       // 正在接收的JPG文件路径
+    bool chapter_loading_active;         // 是否处于章节加载进度展示
+    uint8_t chapter_loading_fake_percent;// 虚拟进度（未收到真实数据时）
+    uint8_t chapter_loading_last_shown;  // 已展示的最后进度
+    char chapter_loading_prompt[64];     // 当前加载提示文案
     
     // ========== VFS集成 ==========
     vfs_file_t *vfs_book;              // VFS虚拟文件对象
@@ -219,6 +224,9 @@ static screen_context_t *s_context = NULL;
 // 蓝牙阅读屏保状态
 static bool s_ble_screensaver_active = false;
 
+// 章节加载进度定时器
+static TimerHandle_t s_chapter_loading_timer = NULL;
+
 // 页面缓冲区已移除 - VFS文本显示不需要位图缓存
 
 /**********************
@@ -258,6 +266,11 @@ static void request_chapter_list(void);
 static void parse_chapter_info_json(const char *json_data, size_t json_len);
 static void enter_chapter_browser(void);
 static void exit_chapter_browser(void);
+static void start_chapter_loading_progress(const char *prompt_text);
+static void stop_chapter_loading_progress(bool finalize_draw);
+static void chapter_loading_timer_cb(TimerHandle_t xTimer);
+static void draw_loading_prompt_with_progress(uint8_t percent);
+static void show_loading_aborted_marker(void);
 static void draw_chapter_browser_screen(void);
 static void handle_chapter_browser_button(screen_t *screen, button_t btn);
 static void select_and_load_chapter(int chapter_index);
@@ -587,6 +600,12 @@ static void ble_connect_callback(bool connected)
         ESP_LOGI(TAG, "BLE device disconnected");
         s_ble_state.state = BLE_READER_STATE_IDLE;
         s_ble_state.device_connected = false;
+
+        // 断开时停止章节加载进度并打X提示
+        if (s_ble_state.chapter_loading_active) {
+            stop_chapter_loading_progress(false);
+            show_loading_aborted_marker();
+        }
     }
 
     if (current_screen != NULL && current_screen == &g_ble_reader_screen) {
@@ -654,6 +673,136 @@ static bool init_x4im_mutex(void)
 static inline bool is_dma_low(void)
 {
     return heap_caps_get_largest_free_block(MALLOC_CAP_DMA) < 2048;
+}
+
+static void draw_loading_prompt_with_progress(uint8_t percent)
+{
+    if (percent > 100) {
+        percent = 100;
+    }
+
+    // 保持加载提示区域整洁
+    display_clear_region(0, 90, SCREEN_WIDTH, 70, COLOR_WHITE);
+
+    const char *prompt = (s_ble_state.chapter_loading_prompt[0] != '\0') ?
+                         s_ble_state.chapter_loading_prompt :
+                         "正在加载章节...";
+    display_draw_text_menu(20, 100, prompt, COLOR_BLACK, COLOR_WHITE);
+
+    char buf[48];
+    snprintf(buf, sizeof(buf), "加载进度: %u%%", percent);
+    display_draw_text_menu(20, 130, buf, COLOR_BLACK, COLOR_WHITE);
+
+    display_refresh(REFRESH_MODE_PARTIAL);
+}
+
+static void show_loading_aborted_marker(void)
+{
+    // 清理同一区域，避免残影
+    display_clear_region(0, 90, SCREEN_WIDTH, 70, COLOR_WHITE);
+    display_draw_text_menu(20, 100, "加载已中断", COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_menu(20, 130, "X", COLOR_BLACK, COLOR_WHITE);
+    display_refresh(REFRESH_MODE_PARTIAL);
+}
+
+static void chapter_loading_timer_cb(TimerHandle_t xTimer)
+{
+    (void)xTimer;
+
+    if (!s_ble_state.chapter_loading_active) {
+        return;
+    }
+
+    uint8_t percent = s_ble_state.chapter_loading_fake_percent;
+    bool has_real = false;
+    uint32_t expected = 0;
+    uint32_t received = 0;
+
+    if (x4im_rx_mutex != NULL && xSemaphoreTake(x4im_rx_mutex, 0) == pdTRUE) {
+        if (x4im_rx_state.receiving && !x4im_rx_state.use_sd_card && x4im_rx_state.expected_size > 0) {
+            expected = x4im_rx_state.expected_size;
+            received = x4im_rx_state.received_size;
+            has_real = true;
+        }
+        xSemaphoreGive(x4im_rx_mutex);
+    }
+
+    if (has_real && expected > 0) {
+        uint8_t real = (uint8_t)((received * 100u) / expected);
+        if (real > 100) {
+            real = 100;
+        }
+        if (real < s_ble_state.chapter_loading_fake_percent) {
+            real = s_ble_state.chapter_loading_fake_percent;
+        }
+        percent = real;
+    } else {
+        if (s_ble_state.chapter_loading_fake_percent < 99) {
+            s_ble_state.chapter_loading_fake_percent++;
+        }
+        percent = s_ble_state.chapter_loading_fake_percent;
+    }
+
+    if (percent == s_ble_state.chapter_loading_last_shown) {
+        return;
+    }
+
+    s_ble_state.chapter_loading_last_shown = percent;
+    draw_loading_prompt_with_progress(percent);
+
+    if (percent >= 100) {
+        stop_chapter_loading_progress(false);
+    }
+}
+
+static void start_chapter_loading_progress(const char *prompt_text)
+{
+    s_ble_state.chapter_loading_active = true;
+    s_ble_state.chapter_loading_fake_percent = 1;
+    s_ble_state.chapter_loading_last_shown = 0;
+
+    if (prompt_text && *prompt_text) {
+        strncpy(s_ble_state.chapter_loading_prompt, prompt_text, sizeof(s_ble_state.chapter_loading_prompt) - 1);
+        s_ble_state.chapter_loading_prompt[sizeof(s_ble_state.chapter_loading_prompt) - 1] = '\0';
+    } else {
+        s_ble_state.chapter_loading_prompt[0] = '\0';
+    }
+
+    if (s_chapter_loading_timer == NULL) {
+        s_chapter_loading_timer = xTimerCreate("ch_load", pdMS_TO_TICKS(3000), pdTRUE, NULL, chapter_loading_timer_cb);
+        if (s_chapter_loading_timer == NULL) {
+            ESP_LOGE(TAG, "Failed to create chapter loading timer");
+            draw_loading_prompt_with_progress(s_ble_state.chapter_loading_fake_percent);
+            s_ble_state.chapter_loading_last_shown = s_ble_state.chapter_loading_fake_percent;
+            return;
+        }
+    } else {
+        xTimerStop(s_chapter_loading_timer, 0);
+    }
+
+    // 立即展示一次初始进度
+    draw_loading_prompt_with_progress(s_ble_state.chapter_loading_fake_percent);
+    s_ble_state.chapter_loading_last_shown = s_ble_state.chapter_loading_fake_percent;
+
+    if (xTimerStart(s_chapter_loading_timer, 0) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start chapter loading timer");
+    }
+}
+
+static void stop_chapter_loading_progress(bool finalize_draw)
+{
+    if (s_chapter_loading_timer != NULL) {
+        xTimerStop(s_chapter_loading_timer, 0);
+    }
+
+    if (s_ble_state.chapter_loading_active && finalize_draw) {
+        draw_loading_prompt_with_progress(100);
+    }
+
+    s_ble_state.chapter_loading_active = false;
+    s_ble_state.chapter_loading_fake_percent = 0;
+    s_ble_state.chapter_loading_last_shown = 0;
+    s_ble_state.chapter_loading_prompt[0] = '\0';
 }
 
 /**
@@ -1166,6 +1315,9 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length)
             s_ble_state.current_page = 0;
             s_ble_state.history_len = 0;
             s_ble_state.last_page_consumed = 0;
+
+            // 停止章节加载进度展示，显示完成
+            stop_chapter_loading_progress(true);
             
             // 5. 获取文件大小
             struct stat file_st;
@@ -1442,6 +1594,9 @@ static void __attribute__((unused)) handle_page_data(const uint8_t *data, size_t
 
                     // 标记页面已加载
                     s_ble_state.page_loaded = true;
+
+                    // 章节加载完成，收尾进度展示
+                    stop_chapter_loading_progress(true);
                 }
 
                 // 触发重绘
@@ -1583,6 +1738,9 @@ static void __attribute__((unused)) handle_page_data(const uint8_t *data, size_t
 
                     // 标记页面已加载（仅对当前页）
                     s_ble_state.page_loaded = (x4im_rx_state.logical_index == (int32_t)s_ble_state.current_page);
+
+                    // 章节加载完成，结束进度刷新
+                    stop_chapter_loading_progress(true);
                 }
 
                 // 触发重绘
@@ -1998,12 +2156,10 @@ static void __attribute__((unused)) send_chapter_navigate_request(uint8_t direct
     bool is_forward = (direction == CHAPTER_NAV_NEXT);
     
     send_page_request(is_forward);
-    
-    // 显示加载提示
-    display_draw_text_menu(20, 100, 
-                           direction == CHAPTER_NAV_NEXT ? "正在加载下一章..." : "正在加载上一章...", 
-                           COLOR_BLACK, COLOR_WHITE);
-    display_refresh(REFRESH_MODE_PARTIAL);
+
+    // 显示加载提示并启动进度更新
+    const char *prompt = direction == CHAPTER_NAV_NEXT ? "正在加载下一章..." : "正在加载上一章...";
+    start_chapter_loading_progress(prompt);
 }
 
 // ...existing code...
@@ -2694,6 +2850,9 @@ static void on_hide(screen_t *screen)
 
     // 重置屏保状态
     s_ble_screensaver_active = false;
+
+    // 停止章节加载进度定时器
+    stop_chapter_loading_progress(false);
 
     // 先注销回调函数，防止在清理过程中回调被触发
     ble_manager_register_connect_cb(NULL);
