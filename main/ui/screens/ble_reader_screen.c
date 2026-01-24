@@ -165,6 +165,10 @@ typedef struct {
         int page_count;                // 页数
         bool available;                // 是否可读（已下载）
     } chapter_list[64];                // 最多64章
+    
+    // ========== 本地续读 ==========
+    bool pending_local_resume;         // 是否等待用户确认续读
+    char resume_path[128];             // 续读文件路径
 } ble_reader_state_internal_t;
 
 static ble_reader_state_internal_t s_ble_state = {
@@ -196,6 +200,8 @@ static ble_reader_state_internal_t s_ble_state = {
     .chapter_list_count = 0,
     .chapter_list_selection = 0,
     .book_title = {0},
+    .pending_local_resume = false,
+    .resume_path = {0},
 };
 
 // 章节信息接收状态（支持分包JSON）
@@ -209,6 +215,9 @@ static chapter_info_rx_t s_chinfo_rx = {0};
 
 // 屏幕上下文
 static screen_context_t *s_context = NULL;
+
+// 蓝牙阅读屏保状态
+static bool s_ble_screensaver_active = false;
 
 // 页面缓冲区已移除 - VFS文本显示不需要位图缓存
 
@@ -239,6 +248,10 @@ static void __attribute__((unused)) on_preload_needed(uint16_t book_id, uint16_t
 // 双模式界面绘制
 static void draw_transfer_mode_screen(void);
 static void draw_reading_mode_screen(bool clear_content);
+
+// 屏保管理
+static void enter_ble_screensaver(void);
+static void exit_ble_screensaver(void);
 
 // 章节浏览
 static void request_chapter_list(void);
@@ -1729,6 +1742,8 @@ static void draw_transfer_mode_screen(void)
  */
 static void draw_reading_mode_screen(bool clear_content)
 {
+   
+
     // 左上角状态区域
     int top_y = 5;
 
@@ -1788,8 +1803,22 @@ static void draw_reading_mode_screen(bool clear_content)
                                "确认: 开始",
                                COLOR_BLACK, COLOR_WHITE);
     } else if (s_ble_state.current_book_id == 0) {
-        display_draw_text_menu(20, 100, "未选择书籍", COLOR_BLACK, COLOR_WHITE);
-        display_draw_text_menu(20, 140, "等待手机发送内容...", COLOR_BLACK, COLOR_WHITE);
+        // 检查是否有保存的阅读状态
+        if (s_ble_state.char_position > 0 || s_ble_state.total_chars > 0) {
+            // 有保存的阅读位置
+            display_draw_text_menu(20, 100, "已保存的阅读内容：", COLOR_BLACK, COLOR_WHITE);
+            if (s_ble_state.book_title[0] != '\0') {
+                display_draw_text_menu(20, 130, s_ble_state.book_title, COLOR_BLACK, COLOR_WHITE);
+            }
+            display_draw_text_menu(20, 160, "按确认键继续读书，或", COLOR_BLACK, COLOR_WHITE);
+            display_draw_text_menu(20, 190, "等待手机发送新内容...", COLOR_BLACK, COLOR_WHITE);
+            s_ble_state.pending_local_resume = true;
+        } else {
+            // 无保存的内容
+            display_draw_text_menu(20, 100, "未选择书籍", COLOR_BLACK, COLOR_WHITE);
+            display_draw_text_menu(20, 140, "等待手机发送内容...", COLOR_BLACK, COLOR_WHITE);
+            s_ble_state.pending_local_resume = false;
+        }
         s_ble_state.showing_confirm_prompt = false;
     } else {
         s_ble_state.showing_confirm_prompt = false;
@@ -2304,6 +2333,67 @@ static inline void chapter_next(void) {
 }
 
 /**
+ * @brief 进入蓝牙阅读屏保（显示壁纸并关闭蓝牙）
+ */
+static void enter_ble_screensaver(void)
+{
+    if (s_ble_screensaver_active) {
+        return;  // 已经在屏保状态
+    }
+
+    ESP_LOGI(TAG, "Entering BLE screensaver (stop BLE + show wallpaper)...");
+    
+    // 保存当前阅读状态
+    ble_nvs_save_state();
+    
+    // 停止蓝牙广播（保持连接状态，只是停止接收数据）
+    if (s_ble_state.device_connected) {
+        ESP_LOGI(TAG, "BLE device connected, stopping advertising");
+        ble_manager_stop_advertising();
+    }
+    
+    // 标记屏保激活
+    s_ble_screensaver_active = true;
+    
+    // 显示壁纸
+    wallpaper_show();
+    
+    // 全刷显示
+    display_refresh(REFRESH_MODE_FULL);
+    
+    ESP_LOGI(TAG, "BLE screensaver activated");
+}
+
+/**
+ * @brief 退出蓝牙阅读屏保（恢复阅读界面并启动蓝牙）
+ */
+static void exit_ble_screensaver(void)
+{
+    if (!s_ble_screensaver_active) {
+        return;  // 不在屏保状态
+    }
+
+    ESP_LOGI(TAG, "Exiting BLE screensaver (restart BLE + restore reading)...");
+    
+    // 标记屏保关闭
+    s_ble_screensaver_active = false;
+    
+    // 重新启动蓝牙广播
+    if (!s_ble_state.device_connected) {
+        ESP_LOGI(TAG, "Restarting BLE advertising");
+        ble_manager_start_advertising();
+    }
+    
+    // 恢复阅读界面
+    draw_reading_mode_screen(false);
+    
+    // 全刷显示
+    display_refresh(REFRESH_MODE_FULL);
+    
+    ESP_LOGI(TAG, "BLE screensaver deactivated, reading restored");
+}
+
+/**
  * @brief 阅读模式按键处理
  */
 static void handle_reading_mode_button(screen_t *screen, button_t btn)
@@ -2311,6 +2401,17 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
     (void)screen;
 
     switch (btn) {
+        case BTN_POWER:
+            // 电源键切换屏保状态
+            if (s_ble_screensaver_active) {
+                // 当前在屏保状态，按电源键：关闭屏保 + 启动蓝牙
+                exit_ble_screensaver();
+            } else {
+                // 当前在阅读状态，按电源键：关闭蓝牙 + 显示屏保
+                enter_ble_screensaver();
+            }
+            break;
+
         case BTN_LEFT:
             if (can_control_paging()) {
                 page_previous();
@@ -2341,6 +2442,59 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn)
 
         case BTN_CONFIRM:
             // 确认键
+            if (s_ble_state.pending_local_resume) {
+                // 本地续读：打开本地文件并跳转到NVS保存位置
+                if (s_ble_state.vfs_book != NULL) {
+                    vfs_close(s_ble_state.vfs_book);
+                    s_ble_state.vfs_book = NULL;
+                }
+
+                vfs_file_t *localf = vfs_open(s_ble_state.resume_path);
+                if (localf == NULL) {
+                    ESP_LOGE(TAG, "Failed to open resume file: %s", s_ble_state.resume_path);
+                    display_draw_text_menu(20, 100, "未找到本地缓存文件", COLOR_BLACK, COLOR_WHITE);
+                    display_refresh(REFRESH_MODE_PARTIAL);
+                    s_ble_state.pending_local_resume = false; // 避免重复提示
+                    break;
+                }
+
+                s_ble_state.vfs_book = localf;
+                s_ble_state.state = BLE_READER_STATE_READING;
+                s_ble_state.page_loaded = true;
+                s_ble_state.initialization_complete = true;
+                s_ble_state.showing_confirm_prompt = false;
+                s_ble_state.current_page = 0;
+                s_ble_state.total_pages = 0; // 未知
+
+                // 重新获取本地文件大小
+                struct stat st;
+                if (stat(s_ble_state.resume_path, &st) == 0) {
+                    s_ble_state.total_chars = (size_t)st.st_size;
+                    ESP_LOGI(TAG, "Loaded local file size: %zu bytes", s_ble_state.total_chars);
+                } else {
+                    ESP_LOGW(TAG, "Failed to stat file: %s", s_ble_state.resume_path);
+                }
+
+                // 定位到保存的字符位置（如果有效的话）
+                if (s_ble_state.char_position > s_ble_state.total_chars) {
+                    s_ble_state.char_position = 0;
+                    ESP_LOGI(TAG, "char_position exceeded total_chars, reset to 0");
+                }
+                vfs_seek(s_ble_state.vfs_book, s_ble_state.char_position, SEEK_SET);
+                ESP_LOGI(TAG, "Resumed reading at position %zu/%zu", 
+                         s_ble_state.char_position, s_ble_state.total_chars);
+
+                // 绘制并全刷
+                draw_reading_mode_screen(true);
+                display_refresh(REFRESH_MODE_FULL);
+
+                // 保存一次状态
+                ble_nvs_save_state();
+
+                // 续读完成，清除标记
+                s_ble_state.pending_local_resume = false;
+                break;
+            }
             if (s_ble_state.current_book_id != 0 && !s_ble_state.initialization_complete) {
                 // 初始化确认：标记为初始化完成，开始发送初始三页给手机
                 s_ble_state.initialization_complete = true;
@@ -2419,6 +2573,14 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event)
         return;
     }
 
+    // 屏保状态下，只响应电源键
+    if (s_ble_screensaver_active) {
+        if (btn == BTN_POWER) {
+            exit_ble_screensaver();
+        }
+        return;  // 屏保状态下忽略其他按键
+    }
+
     if (s_ble_state.chapter_browser_active) {
         handle_chapter_browser_button(screen, btn);
         return;
@@ -2491,6 +2653,25 @@ static void on_show(screen_t *screen)
         ESP_LOGI(TAG, "Restored reading position: %zu/%zu", s_ble_state.char_position, s_ble_state.total_chars);
     }
 
+    // 本地续读：检测本地缓存文件并准备提示
+    do {
+        const char *resume_path = "/littlefs/ble_vfs/current_ch0.txt";
+        struct stat st;
+        if (stat(resume_path, &st) == 0 && st.st_size > 0) {
+            // 有本地缓存，准备续读提示（NVS中char_position可能为0或有效值）
+            s_ble_state.pending_local_resume = true;
+            snprintf(s_ble_state.resume_path, sizeof(s_ble_state.resume_path), "%s", resume_path);
+
+            // 使用本地文件大小覆盖 total_chars
+            s_ble_state.total_chars = (size_t)st.st_size;
+            if (s_ble_state.char_position > s_ble_state.total_chars) {
+                s_ble_state.char_position = 0; // 位置越界则回到开头
+            }
+            ESP_LOGI(TAG, "Local resume available: %s size=%zu pos=%zu",
+                     s_ble_state.resume_path, s_ble_state.total_chars, s_ble_state.char_position);
+        }
+    } while (0);
+
     // 注册蓝牙回调
     ble_manager_register_connect_cb(ble_connect_callback);
     ble_manager_register_data_received_cb(ble_data_received_callback);
@@ -2503,6 +2684,9 @@ static void on_show(screen_t *screen)
 static void on_hide(screen_t *screen)
 {
     ESP_LOGI(TAG, "BLE Reader screen hidden");
+
+    // 重置屏保状态
+    s_ble_screensaver_active = false;
 
     // 先注销回调函数，防止在清理过程中回调被触发
     ble_manager_register_connect_cb(NULL);
