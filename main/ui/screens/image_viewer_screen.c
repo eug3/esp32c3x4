@@ -5,15 +5,15 @@
 
 #include "image_viewer_screen.h"
 #include "display_engine.h"
-#include "screen_manager.h"
-#include "fonts.h"
-#include "wallpaper_manager.h"  // 使用通用图片渲染API
-#include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "fonts.h"
+#include "screen_manager.h"
+#include "wallpaper_manager.h" // 使用通用图片渲染API
+#include <dirent.h>
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
-#include <stdio.h>
-#include <dirent.h>
 #include <sys/stat.h>
 
 static const char *TAG = "IMAGE_VIEWER";
@@ -21,12 +21,12 @@ static screen_t g_image_viewer_screen = {0};
 
 // 图片浏览器状态
 static struct {
-    char current_directory[256];    // 当前目录
-    char target_file[256];          // 用户选择的目标文件名
-    char current_file[256];         // 当前文件
-    char **files;                   // 文件列表
-    int file_count;                 // 文件总数
-    int current_index;              // 当前文件索引
+  char current_directory[256]; // 当前目录
+  char target_file[256];       // 用户选择的目标文件名
+  char current_file[256];      // 当前文件
+  char **files;                // 文件列表
+  int file_count;              // 文件总数
+  int current_index;           // 当前文件索引
 } s_viewer_state = {
     .files = NULL,
     .file_count = 0,
@@ -45,7 +45,7 @@ static void on_event(screen_t *screen, button_t btn, button_event_t event);
 static void free_file_list(void);
 static bool scan_image_files(const char *directory);
 static bool load_and_display_image(int index);
-static const char* get_image_ext(const char *filename);
+static const char *get_image_ext(const char *filename);
 
 /**********************
  *  STATIC FUNCTIONS
@@ -54,321 +54,317 @@ static const char* get_image_ext(const char *filename);
 /**
  * @brief 获取图片文件扩展名
  */
-static const char* get_image_ext(const char *filename)
-{
-    const char *ext = strrchr(filename, '.');
-    if (ext != NULL) {
-        ext++;  // 跳过 '.'
-    }
-    return ext;
+static const char *get_image_ext(const char *filename) {
+  const char *ext = strrchr(filename, '.');
+  if (ext != NULL) {
+    ext++; // 跳过 '.'
+  }
+  return ext;
 }
 
 /**
  * @brief 释放文件列表
  */
-static void free_file_list(void)
-{
-    if (s_viewer_state.files != NULL) {
-        for (int i = 0; i < s_viewer_state.file_count; i++) {
-            if (s_viewer_state.files[i] != NULL) {
-                free(s_viewer_state.files[i]);
-            }
-        }
-        free(s_viewer_state.files);
-        s_viewer_state.files = NULL;
+static void free_file_list(void) {
+  if (s_viewer_state.files != NULL) {
+    for (int i = 0; i < s_viewer_state.file_count; i++) {
+      if (s_viewer_state.files[i] != NULL) {
+        free(s_viewer_state.files[i]);
+      }
     }
-    s_viewer_state.file_count = 0;
+    free(s_viewer_state.files);
+    s_viewer_state.files = NULL;
+  }
+  s_viewer_state.file_count = 0;
 }
 
 /**
  * @brief 扫描目录中的图片文件
  */
-static bool scan_image_files(const char *directory)
-{
-    ESP_LOGI(TAG, "Scanning directory for images: %s", directory);
+static bool scan_image_files(const char *directory) {
+  ESP_LOGI(TAG, "Scanning directory for images: %s", directory);
 
-    // 释放旧的文件列表
-    free_file_list();
+  // 释放旧的文件列表
+  free_file_list();
 
-    // 打开目录
-    DIR *dir = opendir(directory);
-    if (dir == NULL) {
-        ESP_LOGE(TAG, "Failed to open directory: %s", directory);
-        return false;
-    }
+  // 打开目录
+  DIR *dir = opendir(directory);
+  if (dir == NULL) {
+    ESP_LOGE(TAG, "Failed to open directory: %s", directory);
+    return false;
+  }
 
-    // 临时存储文件名
-    const int max_entries = 256;
-    char **file_names = (char **)heap_caps_calloc(max_entries, sizeof(char *), MALLOC_CAP_8BIT);
-    if (file_names == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate temp file name list");
-        closedir(dir);
-        return false;
-    }
-
-    int temp_count = 0;
-    struct dirent *entry;
-
-    while ((entry = readdir(dir)) != NULL && temp_count < max_entries) {
-        // 跳过隐藏文件
-        if (entry->d_name[0] == '.') {
-            continue;
-        }
-
-        // 检查是否是图片文件
-        const char *ext = get_image_ext(entry->d_name);
-        if (ext != NULL &&
-            (strcasecmp(ext, "jpg") == 0 ||
-             strcasecmp(ext, "jpeg") == 0 ||
-             strcasecmp(ext, "bmp") == 0 ||
-             strcasecmp(ext, "png") == 0)) {
-
-            // 分配内存存储文件名
-            file_names[temp_count] = strdup(entry->d_name);
-            if (file_names[temp_count] == NULL) {
-                ESP_LOGE(TAG, "Failed to allocate memory for file name");
-                break;
-            }
-            temp_count++;
-        }
-    }
+  // 临时存储文件名
+  const int max_entries = 256;
+  char **file_names =
+      (char **)heap_caps_calloc(max_entries, sizeof(char *), MALLOC_CAP_8BIT);
+  if (file_names == NULL) {
+    ESP_LOGE(TAG, "Failed to allocate temp file name list");
     closedir(dir);
+    return false;
+  }
 
-    if (temp_count == 0) {
-        ESP_LOGI(TAG, "No image files found in directory");
-        heap_caps_free(file_names);
-        return false;
+  int temp_count = 0;
+  struct dirent *entry;
+
+  while ((entry = readdir(dir)) != NULL && temp_count < max_entries) {
+    // 跳过隐藏文件
+    if (entry->d_name[0] == '.') {
+      continue;
     }
 
-    // 分配文件列表内存
-    s_viewer_state.files = (char **)heap_caps_malloc(temp_count * sizeof(char *), MALLOC_CAP_8BIT);
-    if (s_viewer_state.files == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate memory for file list");
-        for (int i = 0; i < temp_count; i++) {
-            free(file_names[i]);
-        }
-        heap_caps_free(file_names);
-        return false;
-    }
+    // 检查是否是图片文件
+    const char *ext = get_image_ext(entry->d_name);
+    if (ext != NULL &&
+        (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0 ||
+         strcasecmp(ext, "bmp") == 0 || strcasecmp(ext, "png") == 0)) {
 
-    // 复制文件名
-    for (int i = 0; i < temp_count; i++) {
-        s_viewer_state.files[i] = file_names[i];
+      // 分配内存存储文件名
+      file_names[temp_count] = strdup(entry->d_name);
+      if (file_names[temp_count] == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for file name");
+        break;
+      }
+      temp_count++;
     }
+  }
+  closedir(dir);
 
+  if (temp_count == 0) {
+    ESP_LOGI(TAG, "No image files found in directory");
     heap_caps_free(file_names);
-    s_viewer_state.file_count = temp_count;
+    return false;
+  }
 
-    ESP_LOGI(TAG, "Found %d image files", temp_count);
+  // 分配文件列表内存
+  s_viewer_state.files =
+      (char **)heap_caps_malloc(temp_count * sizeof(char *), MALLOC_CAP_8BIT);
+  if (s_viewer_state.files == NULL) {
+    ESP_LOGE(TAG, "Failed to allocate memory for file list");
+    for (int i = 0; i < temp_count; i++) {
+      free(file_names[i]);
+    }
+    heap_caps_free(file_names);
+    return false;
+  }
 
-    return true;
+  // 复制文件名
+  for (int i = 0; i < temp_count; i++) {
+    s_viewer_state.files[i] = file_names[i];
+  }
+
+  heap_caps_free(file_names);
+  s_viewer_state.file_count = temp_count;
+
+  ESP_LOGI(TAG, "Found %d image files", temp_count);
+
+  return true;
 }
 
 /**
  * @brief 加载并显示指定索引的图片
  */
-static bool load_and_display_image(int index)
-{
-    if (index < 0 || index >= s_viewer_state.file_count) {
-        ESP_LOGE(TAG, "Invalid image index: %d (total: %d)", index, s_viewer_state.file_count);
-        return false;
-    }
+static bool load_and_display_image(int index) {
+  if (index < 0 || index >= s_viewer_state.file_count) {
+    ESP_LOGE(TAG, "Invalid image index: %d (total: %d)", index,
+             s_viewer_state.file_count);
+    return false;
+  }
 
-    if (s_viewer_state.files[index] == NULL) {
-        ESP_LOGE(TAG, "File name at index %d is NULL", index);
-        return false;
-    }
+  if (s_viewer_state.files[index] == NULL) {
+    ESP_LOGE(TAG, "File name at index %d is NULL", index);
+    return false;
+  }
 
-    // 构建完整文件路径
-    char full_path[512];
-    snprintf(full_path, sizeof(full_path), "%s/%s",
-             s_viewer_state.current_directory,
-             s_viewer_state.files[index]);
+  // 构建完整文件路径
+  char full_path[512];
+  snprintf(full_path, sizeof(full_path), "%s/%s",
+           s_viewer_state.current_directory, s_viewer_state.files[index]);
 
-    ESP_LOGI(TAG, "Loading image: %s", full_path);
-    strncpy(s_viewer_state.current_file, s_viewer_state.files[index],
-            sizeof(s_viewer_state.current_file) - 1);
-    s_viewer_state.current_file[sizeof(s_viewer_state.current_file) - 1] = '\0';
+  ESP_LOGI(TAG, "Loading image: %s", full_path);
+  strncpy(s_viewer_state.current_file, s_viewer_state.files[index],
+          sizeof(s_viewer_state.current_file) - 1);
+  s_viewer_state.current_file[sizeof(s_viewer_state.current_file) - 1] = '\0';
 
-    // 打开文件
-    FILE *f = fopen(full_path, "rb");
-    if (f == NULL) {
-        ESP_LOGE(TAG, "Failed to open file: %s", full_path);
-        return false;
-    }
+  // 打开文件
+  FILE *f = fopen(full_path, "rb");
+  if (f == NULL) {
+    ESP_LOGE(TAG, "Failed to open file: %s", full_path);
+    return false;
+  }
 
-    fclose(f);
+  fclose(f);
 
-    // 使用统一的图片渲染API（等比缩放、居中、旋转）
-    ESP_LOGI(TAG, "Rendering image with wallpaper_render_image_to_display...");
-    bool success = wallpaper_render_image_to_display(full_path);
+  // 使用统一的图片渲染API（等比缩放、居中、旋转）
+  ESP_LOGI(TAG, "Rendering image with wallpaper_render_image_to_display...");
+  bool success = wallpaper_render_image_to_display(full_path);
 
-    if (!success) {
-        ESP_LOGE(TAG, "Failed to render image");
-        display_clear(COLOR_WHITE);
-        display_draw_text_menu(20, SCREEN_HEIGHT / 2, "图片加载失败",
-                               COLOR_BLACK, COLOR_WHITE);
-        display_refresh(REFRESH_MODE_FULL);
-        return false;
-    }
-
-    // 刷新显示
+  if (!success) {
+    ESP_LOGE(TAG, "Failed to render image");
+    display_clear(COLOR_WHITE);
+    display_draw_text_menu(20, SCREEN_HEIGHT / 2, "图片加载失败", COLOR_BLACK,
+                           COLOR_WHITE);
     display_refresh(REFRESH_MODE_FULL);
-    ESP_LOGI(TAG, "Image displayed successfully");
-    return true;
+    return false;
+  }
+
+  // 刷新显示
+  display_refresh(REFRESH_MODE_FULL);
+  ESP_LOGI(TAG, "Image displayed successfully");
+  return true;
 }
 
 /**********************
  * SCREEN CALLBACKS
  **********************/
 
-static void on_show(screen_t *screen)
-{
-    ESP_LOGI(TAG, "Image viewer shown");
+static void on_show(screen_t *screen) {
+  ESP_LOGI(TAG, "Image viewer shown");
 
-    // 获取完整文件路径
-    const char *file_path = (const char *)screen->user_data;
-    if (file_path == NULL) {
-        ESP_LOGE(TAG, "No file path specified");
-        file_path = "/sdcard/壁纸/地铁猫.jpg";  // 默认文件
+  // 获取完整文件路径
+  const char *file_path = (const char *)screen->user_data;
+  if (file_path == NULL) {
+    ESP_LOGE(TAG, "No file path specified");
+    file_path = "/sdcard/壁纸/地铁猫.jpg"; // 默认文件
+  }
+
+  ESP_LOGI(TAG, "Opening file: %s", file_path);
+
+  // 从完整路径中提取目录和文件名
+  const char *last_slash = strrchr(file_path, '/');
+  if (last_slash == NULL) {
+    ESP_LOGE(TAG, "Invalid file path: %s", file_path);
+    return;
+  }
+
+  // 提取目录路径
+  size_t dir_len = last_slash - file_path;
+  if (dir_len >= sizeof(s_viewer_state.current_directory)) {
+    dir_len = sizeof(s_viewer_state.current_directory) - 1;
+  }
+  strncpy(s_viewer_state.current_directory, file_path, dir_len);
+  s_viewer_state.current_directory[dir_len] = '\0';
+
+  // 提取文件名
+  const char *filename = last_slash + 1;
+  strncpy(s_viewer_state.target_file, filename,
+          sizeof(s_viewer_state.target_file) - 1);
+  s_viewer_state.target_file[sizeof(s_viewer_state.target_file) - 1] = '\0';
+
+  ESP_LOGI(TAG, "Directory: %s, Target file: %s",
+           s_viewer_state.current_directory, s_viewer_state.target_file);
+
+  // 扫描图片文件
+  if (!scan_image_files(s_viewer_state.current_directory)) {
+    ESP_LOGW(TAG, "No images found, showing placeholder");
+
+    // 显示占位符
+    display_clear(COLOR_WHITE);
+    display_draw_text_menu(20, 20, "No Images", COLOR_BLACK, COLOR_WHITE);
+    display_draw_text_menu(20, 100, "No supported image", COLOR_BLACK,
+                           COLOR_WHITE);
+    display_draw_text_menu(20, 150, "files in directory", COLOR_BLACK,
+                           COLOR_WHITE);
+    display_draw_text_menu(20, SCREEN_HEIGHT - 60, "返回: 返回", COLOR_BLACK,
+                           COLOR_WHITE);
+
+    return;
+  }
+
+  // 查找目标文件在列表中的索引
+  int target_index = 0;
+  for (int i = 0; i < s_viewer_state.file_count; i++) {
+    if (strcasecmp(s_viewer_state.files[i], s_viewer_state.target_file) == 0) {
+      target_index = i;
+      ESP_LOGI(TAG, "Found target file at index %d", target_index);
+      break;
     }
+  }
 
-    ESP_LOGI(TAG, "Opening file: %s", file_path);
+  // 显示目标图片
+  s_viewer_state.current_index = target_index;
+  load_and_display_image(target_index);
 
-    // 从完整路径中提取目录和文件名
-    const char *last_slash = strrchr(file_path, '/');
-    if (last_slash == NULL) {
-        ESP_LOGE(TAG, "Invalid file path: %s", file_path);
-        return;
-    }
-
-    // 提取目录路径
-    size_t dir_len = last_slash - file_path;
-    if (dir_len >= sizeof(s_viewer_state.current_directory)) {
-        dir_len = sizeof(s_viewer_state.current_directory) - 1;
-    }
-    strncpy(s_viewer_state.current_directory, file_path, dir_len);
-    s_viewer_state.current_directory[dir_len] = '\0';
-
-    // 提取文件名
-    const char *filename = last_slash + 1;
-    strncpy(s_viewer_state.target_file, filename, sizeof(s_viewer_state.target_file) - 1);
-    s_viewer_state.target_file[sizeof(s_viewer_state.target_file) - 1] = '\0';
-
-    ESP_LOGI(TAG, "Directory: %s, Target file: %s", s_viewer_state.current_directory, s_viewer_state.target_file);
-
-    // 扫描图片文件
-    if (!scan_image_files(s_viewer_state.current_directory)) {
-        ESP_LOGW(TAG, "No images found, showing placeholder");
-
-        // 显示占位符
-        display_clear(COLOR_WHITE);
-        display_draw_text_menu(20, 20, "No Images", COLOR_BLACK, COLOR_WHITE);
-        display_draw_text_menu(20, 100, "No supported image", COLOR_BLACK, COLOR_WHITE);
-        display_draw_text_menu(20, 150, "files in directory", COLOR_BLACK, COLOR_WHITE);
-        display_draw_text_menu(20, SCREEN_HEIGHT - 60, "返回: 返回", COLOR_BLACK, COLOR_WHITE);
-
-        return;
-    }
-
-    // 查找目标文件在列表中的索引
-    int target_index = 0;
-    for (int i = 0; i < s_viewer_state.file_count; i++) {
-        if (strcasecmp(s_viewer_state.files[i], s_viewer_state.target_file) == 0) {
-            target_index = i;
-            ESP_LOGI(TAG, "Found target file at index %d", target_index);
-            break;
-        }
-    }
-
-    // 显示目标图片
-    s_viewer_state.current_index = target_index;
-    load_and_display_image(target_index);
-
-    screen->needs_redraw = true;
+  screen->needs_redraw = true;
 }
 
-static void on_hide(screen_t *screen)
-{
-    ESP_LOGI(TAG, "Image viewer hidden");
+static void on_hide(screen_t *screen) {
+  ESP_LOGI(TAG, "Image viewer hidden");
 
-    // 释放文件列表
-    free_file_list();
+  // 释放文件列表
+  free_file_list();
 }
 
-static void on_draw(screen_t *screen)
-{
-    // 图片显示在 on_show 中完成
-    // 这里只需要显示提示信息
+static void on_draw(screen_t *screen) {
+  // 图片显示在 on_show 中完成
+  // 这里只需要显示提示信息
 }
 
-static void on_event(screen_t *screen, button_t btn, button_event_t event)
-{
-    if (event != BTN_EVENT_PRESSED) {
-        return;
+static void on_event(screen_t *screen, button_t btn, button_event_t event) {
+  if (event != BTN_EVENT_PRESSED) {
+    return;
+  }
+
+  switch (btn) {
+  case BTN_LEFT:
+    // 上一张图片
+    if (s_viewer_state.file_count > 0) {
+      s_viewer_state.current_index--;
+      if (s_viewer_state.current_index < 0) {
+        s_viewer_state.current_index =
+            s_viewer_state.file_count - 1; // 循环到最后一张
+      }
+      ESP_LOGI(TAG, "Previous image: %d/%d", s_viewer_state.current_index + 1,
+               s_viewer_state.file_count);
+      load_and_display_image(s_viewer_state.current_index);
+      display_refresh(REFRESH_MODE_FULL);
     }
+    break;
 
-    switch (btn) {
-        case BTN_LEFT:
-            // 上一张图片
-            if (s_viewer_state.file_count > 0) {
-                s_viewer_state.current_index--;
-                if (s_viewer_state.current_index < 0) {
-                    s_viewer_state.current_index = s_viewer_state.file_count - 1;  // 循环到最后一张
-                }
-                ESP_LOGI(TAG, "Previous image: %d/%d",
-                         s_viewer_state.current_index + 1, s_viewer_state.file_count);
-                load_and_display_image(s_viewer_state.current_index);
-                display_refresh(REFRESH_MODE_FULL);
-            }
-            break;
-
-        case BTN_RIGHT:
-            // 下一张图片
-            if (s_viewer_state.file_count > 0) {
-                s_viewer_state.current_index++;
-                if (s_viewer_state.current_index >= s_viewer_state.file_count) {
-                    s_viewer_state.current_index = 0;  // 循环到第一张
-                }
-                ESP_LOGI(TAG, "Next image: %d/%d",
-                         s_viewer_state.current_index + 1, s_viewer_state.file_count);
-                load_and_display_image(s_viewer_state.current_index);
-                display_refresh(REFRESH_MODE_FULL);
-            }
-            break;
-
-        case BTN_BACK:
-            // 返回
-            screen_manager_back();
-            break;
-
-        default:
-            break;
+  case BTN_RIGHT:
+    // 下一张图片
+    if (s_viewer_state.file_count > 0) {
+      s_viewer_state.current_index++;
+      if (s_viewer_state.current_index >= s_viewer_state.file_count) {
+        s_viewer_state.current_index = 0; // 循环到第一张
+      }
+      ESP_LOGI(TAG, "Next image: %d/%d", s_viewer_state.current_index + 1,
+               s_viewer_state.file_count);
+      load_and_display_image(s_viewer_state.current_index);
+      display_refresh(REFRESH_MODE_FULL);
     }
+    break;
+
+  case BTN_BACK:
+    // 返回
+    screen_manager_back();
+    break;
+
+  default:
+    break;
+  }
 }
 
 /**********************
  * GLOBAL FUNCTIONS
  **********************/
 
-void image_viewer_screen_init(void)
-{
-    ESP_LOGI(TAG, "Initializing image viewer screen");
+void image_viewer_screen_init(void) {
+  ESP_LOGI(TAG, "Initializing image viewer screen");
 
-    g_image_viewer_screen.name = "image_viewer";
-    g_image_viewer_screen.user_data = NULL;
-    g_image_viewer_screen.on_show = on_show;
-    g_image_viewer_screen.on_hide = on_hide;
-    g_image_viewer_screen.on_draw = on_draw;
-    g_image_viewer_screen.on_event = on_event;
-    g_image_viewer_screen.is_visible = false;
-    g_image_viewer_screen.needs_redraw = false;
+  g_image_viewer_screen.name = "image_viewer";
+  g_image_viewer_screen.user_data = NULL;
+  g_image_viewer_screen.on_show = on_show;
+  g_image_viewer_screen.on_hide = on_hide;
+  g_image_viewer_screen.on_draw = on_draw;
+  g_image_viewer_screen.on_event = on_event;
+  g_image_viewer_screen.is_visible = false;
+  g_image_viewer_screen.needs_redraw = false;
 }
 
-screen_t* image_viewer_screen_get_instance(void)
-{
-    if (g_image_viewer_screen.name == NULL) {
-        image_viewer_screen_init();
-    }
-    return &g_image_viewer_screen;
+screen_t *image_viewer_screen_get_instance(void) {
+  if (g_image_viewer_screen.name == NULL) {
+    image_viewer_screen_init();
+  }
+  return &g_image_viewer_screen;
 }

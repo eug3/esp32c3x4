@@ -5,8 +5,8 @@
 
 #include "bmp_helper.h"
 #include "display_engine.h"
-#include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdint.h>
@@ -17,25 +17,25 @@ static const char *TAG = "BMP_HELPER";
 // BMP 文件头结构
 #pragma pack(push, 1)
 typedef struct {
-    uint16_t bfType;      // 文件类型,必须是 "BM"
-    uint32_t bfSize;      // 文件大小
-    uint16_t bfReserved1; // 保留
-    uint16_t bfReserved2; // 保留
-    uint32_t bfOffBits;   // 从文件头到像素数据的偏移
+  uint16_t bfType;      // 文件类型,必须是 "BM"
+  uint32_t bfSize;      // 文件大小
+  uint16_t bfReserved1; // 保留
+  uint16_t bfReserved2; // 保留
+  uint32_t bfOffBits;   // 从文件头到像素数据的偏移
 } BMPFileHeader;
 
 typedef struct {
-    uint32_t biSize;          // 信息头大小
-    int32_t  biWidth;         // 图像宽度
-    int32_t  biHeight;        // 图像高度
-    uint16_t biPlanes;        // 位平面数
-    uint16_t biBitCount;      // 每像素位数
-    uint32_t biCompression;   // 压缩类型
-    uint32_t biSizeImage;     // 图像大小
-    int32_t  biXPelsPerMeter; // 水平分辨率
-    int32_t  biYPelsPerMeter; // 垂直分辨率
-    uint32_t biClrUsed;       // 使用的颜色数
-    uint32_t biClrImportant;  // 重要颜色数
+  uint32_t biSize;         // 信息头大小
+  int32_t biWidth;         // 图像宽度
+  int32_t biHeight;        // 图像高度
+  uint16_t biPlanes;       // 位平面数
+  uint16_t biBitCount;     // 每像素位数
+  uint32_t biCompression;  // 压缩类型
+  uint32_t biSizeImage;    // 图像大小
+  int32_t biXPelsPerMeter; // 水平分辨率
+  int32_t biYPelsPerMeter; // 垂直分辨率
+  uint32_t biClrUsed;      // 使用的颜色数
+  uint32_t biClrImportant; // 重要颜色数
 } BMPInfoHeader;
 #pragma pack(pop)
 
@@ -44,322 +44,349 @@ typedef struct {
  **********************/
 
 bool bmp_helper_get_size(const uint8_t *bmp_data, size_t bmp_data_size,
-                         int *width, int *height)
-{
-    if (bmp_data == NULL || bmp_data_size < sizeof(BMPFileHeader) + sizeof(BMPInfoHeader)) {
-        ESP_LOGE(TAG, "Invalid BMP data");
-        return false;
-    }
+                         int *width, int *height) {
+  if (bmp_data == NULL ||
+      bmp_data_size < sizeof(BMPFileHeader) + sizeof(BMPInfoHeader)) {
+    ESP_LOGE(TAG, "Invalid BMP data");
+    return false;
+  }
 
-    BMPFileHeader *file_header = (BMPFileHeader *)bmp_data;
+  BMPFileHeader *file_header = (BMPFileHeader *)bmp_data;
 
-    // 检查文件类型
-    if (file_header->bfType != 0x4D42) {  // "BM"
-        ESP_LOGE(TAG, "Not a BMP file (type: 0x%04X)", file_header->bfType);
-        return false;
-    }
+  // 检查文件类型
+  if (file_header->bfType != 0x4D42) { // "BM"
+    ESP_LOGE(TAG, "Not a BMP file (type: 0x%04X)", file_header->bfType);
+    return false;
+  }
 
-    BMPInfoHeader *info_header = (BMPInfoHeader *)(bmp_data + sizeof(BMPFileHeader));
+  BMPInfoHeader *info_header =
+      (BMPInfoHeader *)(bmp_data + sizeof(BMPFileHeader));
 
-    // 支持 1 位、8 位和 24 位 BMP
-    if (info_header->biBitCount != 1 && info_header->biBitCount != 8 && info_header->biBitCount != 24) {
-        ESP_LOGE(TAG, "Unsupported bit count: %d", info_header->biBitCount);
-        return false;
-    }
+  // 支持 1 位、8 位和 24 位 BMP
+  if (info_header->biBitCount != 1 && info_header->biBitCount != 8 &&
+      info_header->biBitCount != 24) {
+    ESP_LOGE(TAG, "Unsupported bit count: %d", info_header->biBitCount);
+    return false;
+  }
 
-    // 只支持无压缩
-    if (info_header->biCompression != 0) {
-        ESP_LOGE(TAG, "Unsupported compression: %d", info_header->biCompression);
-        return false;
-    }
+  // 只支持无压缩
+  if (info_header->biCompression != 0) {
+    ESP_LOGE(TAG, "Unsupported compression: %d", info_header->biCompression);
+    return false;
+  }
 
-    *width = info_header->biWidth;
-    *height = (info_header->biHeight < 0) ? -info_header->biHeight : info_header->biHeight;
+  *width = info_header->biWidth;
+  *height = (info_header->biHeight < 0) ? -info_header->biHeight
+                                        : info_header->biHeight;
 
-    ESP_LOGI(TAG, "BMP size: %dx%d, bits: %d", *width, *height, info_header->biBitCount);
+  ESP_LOGI(TAG, "BMP size: %dx%d, bits: %d", *width, *height,
+           info_header->biBitCount);
 
-    return true;
+  return true;
 }
 
-bool bmp_helper_render(const uint8_t *bmp_data, size_t bmp_data_size,
-                       int x, int y, int width, int height, bool clear_bg)
-{
-    if (bmp_data == NULL || bmp_data_size < sizeof(BMPFileHeader) + sizeof(BMPInfoHeader)) {
-        ESP_LOGE(TAG, "Invalid BMP data");
-        return false;
+bool bmp_helper_render(const uint8_t *bmp_data, size_t bmp_data_size, int x,
+                       int y, int width, int height, bool clear_bg) {
+  if (bmp_data == NULL ||
+      bmp_data_size < sizeof(BMPFileHeader) + sizeof(BMPInfoHeader)) {
+    ESP_LOGE(TAG, "Invalid BMP data");
+    return false;
+  }
+
+  BMPFileHeader *file_header = (BMPFileHeader *)bmp_data;
+
+  // 检查文件类型
+  if (file_header->bfType != 0x4D42) {
+    ESP_LOGE(TAG, "Not a BMP file");
+    return false;
+  }
+
+  BMPInfoHeader *info_header =
+      (BMPInfoHeader *)(bmp_data + sizeof(BMPFileHeader));
+
+  int src_width = info_header->biWidth;
+  int src_height = (info_header->biHeight < 0) ? -info_header->biHeight
+                                               : info_header->biHeight;
+  bool top_down = (info_header->biHeight < 0);
+  uint16_t bit_count = info_header->biBitCount;
+
+  ESP_LOGI(TAG, "BMP: %dx%d, bits: %d, top_down: %d", src_width, src_height,
+           bit_count, top_down);
+
+  // 计算缩放比例 (Cover模式：至少一边铺满，居中裁剪)
+  float scale_w = (float)width / (float)src_width;
+  float scale_h = (float)height / (float)src_height;
+  float scale =
+      (scale_w > scale_h) ? scale_w : scale_h; // Cover模式：选择较大比例
+
+  // 如果图片比目标区域小，不放大
+  if (scale > 1.0f) {
+    scale = 1.0f;
+  }
+
+  // 计算实际显示尺寸
+  int actual_width = (int)(src_width * scale);
+  int actual_height = (int)(src_height * scale);
+
+  // 计算居中偏移（Cover模式：可能超出边界，会被裁剪）
+  int offset_x = x + (width - actual_width) / 2;
+  int offset_y = y + (height - actual_height) / 2;
+
+  ESP_LOGI(TAG, "BMP render: scale=%.2f, offset=(%d,%d), size=(%d,%d)", scale,
+           offset_x, offset_y, actual_width, actual_height);
+
+  // 清除背景
+  if (clear_bg) {
+    display_clear_region(x, y, width, height, COLOR_WHITE);
+  }
+
+  // 计算行字节数 (BMP 行必须是 4 字节对齐)
+  int row_size = ((src_width * bit_count + 31) / 32) * 4;
+
+  // 获取像素数据偏移
+  uint32_t pixel_data_offset = file_header->bfOffBits;
+
+  // 跳过调色板（bfOffBits 非像素数据）
+  if (bit_count == 1) {
+    pixel_data_offset += 8; // 2 色 × 4 字节
+  } else if (bit_count == 8) {
+    pixel_data_offset += 1024; // 256 色 × 4 字节
+  }
+
+  const uint8_t *pixel_data = bmp_data + pixel_data_offset;
+
+  ESP_LOGI(TAG,
+           "BMP parsing: row_size=%d, pixel_data_offset=%lu, src_width=%d, "
+           "bit_count=%u",
+           row_size, (unsigned long)pixel_data_offset, src_width, bit_count);
+
+  // 对于调色板模式（1位、8位），获取调色板
+  const uint8_t *palette = NULL;
+  if (bit_count == 1 || bit_count == 8) {
+    // 调色板位置在信息头之后
+    palette = bmp_data + sizeof(BMPFileHeader) + info_header->biSize;
+
+    // 打印调色板信息（前两个颜色用于1位BMP）
+    if (bit_count == 1 && palette < bmp_data + bmp_data_size) {
+      uint32_t color0 = *(uint32_t *)palette;
+      uint32_t color1 = *(uint32_t *)(palette + 4);
+      ESP_LOGI(TAG, "1-bit BMP palette: color0=0x%08X, color1=0x%08X", color0,
+               color1);
     }
+  }
 
-    BMPFileHeader *file_header = (BMPFileHeader *)bmp_data;
+  // 解码并绘制
+  if (bit_count == 1) {
+    // 1 位 BMP (单色位图)
+    ESP_LOGI(TAG, "1-bit BMP (monochrome)");
 
-    // 检查文件类型
-    if (file_header->bfType != 0x4D42) {
-        ESP_LOGE(TAG, "Not a BMP file");
-        return false;
-    }
+    // 获取 framebuffer 直接访问
+    extern uint8_t *display_get_framebuffer(void);
+    uint8_t *fb = display_get_framebuffer();
 
-    BMPInfoHeader *info_header = (BMPInfoHeader *)(bmp_data + sizeof(BMPFileHeader));
+    // 调试：打印前几行的数据
+    ESP_LOGI(TAG,
+             "BMP data sample: first row bytes (from file): %02X %02X %02X "
+             "%02X %02X %02X %02X %02X",
+             pixel_data[0], pixel_data[1], pixel_data[2], pixel_data[3],
+             pixel_data[4], pixel_data[5], pixel_data[6], pixel_data[7]);
 
-    int src_width = info_header->biWidth;
-    int src_height = (info_header->biHeight < 0) ? -info_header->biHeight : info_header->biHeight;
-    bool top_down = (info_header->biHeight < 0);
-    uint16_t bit_count = info_header->biBitCount;
+    int pixel_count_written = 0; // 统计写入的非白色像素
+    int black_pixel_count = 0;   // 黑色像素计数
 
-    ESP_LOGI(TAG, "BMP: %dx%d, bits: %d, top_down: %d", src_width, src_height, bit_count, top_down);
+    for (int src_y = 0; src_y < src_height; src_y++) {
+      int dest_y = offset_y + (int)(src_y * scale);
+      int bmp_y = top_down ? src_y : (src_height - 1 - src_y);
+      const uint8_t *row_data = pixel_data + bmp_y * row_size;
 
-    // 计算缩放比例 (Cover模式：至少一边铺满，居中裁剪)
-    float scale_w = (float)width / (float)src_width;
-    float scale_h = (float)height / (float)src_height;
-    float scale = (scale_w > scale_h) ? scale_w : scale_h;  // Cover模式：选择较大比例
+      for (int src_x = 0; src_x < src_width; src_x++) {
+        int dest_x = offset_x + (int)(src_x * scale);
 
-    // 如果图片比目标区域小，不放大
-    if (scale > 1.0f) {
-        scale = 1.0f;
-    }
+        // 读取 1 位像素（每字节包含8个像素，MSB first）
+        int byte_index = src_x / 8;
+        int bit_index = 7 - (src_x % 8);
+        uint8_t pixel_index = (row_data[byte_index] >> bit_index) & 1;
 
-    // 计算实际显示尺寸
-    int actual_width = (int)(src_width * scale);
-    int actual_height = (int)(src_height * scale);
-
-    // 计算居中偏移（Cover模式：可能超出边界，会被裁剪）
-    int offset_x = x + (width - actual_width) / 2;
-    int offset_y = y + (height - actual_height) / 2;
-
-    ESP_LOGI(TAG, "BMP render: scale=%.2f, offset=(%d,%d), size=(%d,%d)",
-             scale, offset_x, offset_y, actual_width, actual_height);
-
-    // 清除背景
-    if (clear_bg) {
-        display_clear_region(x, y, width, height, COLOR_WHITE);
-    }
-
-    // 计算行字节数 (BMP 行必须是 4 字节对齐)
-    int row_size = ((src_width * bit_count + 31) / 32) * 4;
-
-    // 获取像素数据偏移
-    uint32_t pixel_data_offset = file_header->bfOffBits;
-
-    // 跳过调色板（bfOffBits 非像素数据）
-    if (bit_count == 1) {
-        pixel_data_offset += 8;    // 2 色 × 4 字节
-    } else if (bit_count == 8) {
-        pixel_data_offset += 1024; // 256 色 × 4 字节
-    }
-
-    const uint8_t *pixel_data = bmp_data + pixel_data_offset;
-
-    ESP_LOGI(TAG, "BMP parsing: row_size=%d, pixel_data_offset=%lu, src_width=%d, bit_count=%u", 
-             row_size, (unsigned long)pixel_data_offset, src_width, bit_count);
-
-    // 对于调色板模式（1位、8位），获取调色板
-    const uint8_t *palette = NULL;
-    if (bit_count == 1 || bit_count == 8) {
-        // 调色板位置在信息头之后
-        palette = bmp_data + sizeof(BMPFileHeader) + info_header->biSize;
-        
-        // 打印调色板信息（前两个颜色用于1位BMP）
-        if (bit_count == 1 && palette < bmp_data + bmp_data_size) {
-            uint32_t color0 = *(uint32_t*)palette;
-            uint32_t color1 = *(uint32_t*)(palette + 4);
-            ESP_LOGI(TAG, "1-bit BMP palette: color0=0x%08X, color1=0x%08X", color0, color1);
-        }
-    }
-
-    // 解码并绘制
-    if (bit_count == 1) {
-        // 1 位 BMP (单色位图)
-        ESP_LOGI(TAG, "1-bit BMP (monochrome)");
-
-        // 获取 framebuffer 直接访问
-        extern uint8_t* display_get_framebuffer(void);
-        uint8_t *fb = display_get_framebuffer();
-
-        // 调试：打印前几行的数据
-        ESP_LOGI(TAG, "BMP data sample: first row bytes (from file): %02X %02X %02X %02X %02X %02X %02X %02X",
-                 pixel_data[0], pixel_data[1], pixel_data[2], pixel_data[3],
-                 pixel_data[4], pixel_data[5], pixel_data[6], pixel_data[7]);
-
-        int pixel_count_written = 0;  // 统计写入的非白色像素
-        int black_pixel_count = 0;    // 黑色像素计数
-
-        for (int src_y = 0; src_y < src_height; src_y++) {
-            int dest_y = offset_y + (int)(src_y * scale);
-            int bmp_y = top_down ? src_y : (src_height - 1 - src_y);
-            const uint8_t *row_data = pixel_data + bmp_y * row_size;
-
-            for (int src_x = 0; src_x < src_width; src_x++) {
-                int dest_x = offset_x + (int)(src_x * scale);
-
-                // 读取 1 位像素（每字节包含8个像素，MSB first）
-                int byte_index = src_x / 8;
-                int bit_index = 7 - (src_x % 8);
-                uint8_t pixel_index = (row_data[byte_index] >> bit_index) & 1;
-
-                // 从调色板获取实际颜色，取 B 分量（BMP存储为BGRA）
-                uint8_t bw = 1;  // 默认白色
-                if (palette) {
-                    const uint8_t *color_entry = palette + pixel_index * 4;  // 每个调色板项 4 字节 (BGRA)
-                    uint8_t blue = color_entry[0];
-                    // 简单判断：如果蓝色分量 < 128，则为黑色
-                    bw = (blue < 128) ? 0 : 1;
-                } else {
-                    // 如果没有调色板，默认：0=白色，1=黑色
-                    bw = pixel_index ? 0 : 1;
-                }
-                
-                if (bw == 0) black_pixel_count++;
-
-                // 考虑缩放
-                if (scale >= 1.0f) {
-                    int scale_int = (int)scale;
-                    for (int sy = 0; sy < scale_int && (dest_y + sy) < (y + height); sy++) {
-                        for (int sx = 0; sx < scale_int && (dest_x + sx) < (x + width); sx++) {
-                            int logic_x = dest_x + sx;
-                            int logic_y = dest_y + sy;
-
-                            // 边界检查（480x800逻辑）
-                            if (logic_x >= 0 && logic_x < 480 && logic_y >= 0 && logic_y < 800) {
-                                
-                                int phys_x = logic_y;
-                                int phys_y = 479 - logic_x;
-
-                                // 写入800x480物理帧缓冲
-                                // bw = 0 = 黑色(清除bit), bw = 1 = 白色(设置bit)
-                                uint32_t byte_idx = phys_y * 100 + (phys_x / 8);  // 100 = 800/8
-                                uint8_t bit_mask = 0x80 >> (phys_x % 8);
-
-                                if (bw == 0) {
-                                    fb[byte_idx] &= ~bit_mask;  // 黑色
-                                    if (sx == 0 && sy == 0) pixel_count_written++;
-                                } else {
-                                    fb[byte_idx] |= bit_mask;   // 白色
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // 无缩放，直接写入
-                    if (dest_x >= 0 && dest_x < 480 && dest_y >= 0 && dest_y < 800) {
-                        int phys_x = dest_y;
-                        int phys_y = 479 - dest_x;
-                        uint32_t byte_idx = phys_y * 100 + (phys_x / 8);
-                        uint8_t bit_mask = 0x80 >> (phys_x % 8);
-
-                        if (bw == 0) {
-                            fb[byte_idx] &= ~bit_mask;
-                            pixel_count_written++;
-                        } else {
-                            fb[byte_idx] |= bit_mask;
-                        }
-                    }
-                }
-            }
-
-            // 每隔一定行数喂狗（减少延迟）
-            if (src_y % 50 == 0) {
-                taskYIELD();  // 使用 yield 而不是 delay，更快
-            }
+        // 从调色板获取实际颜色，取 B 分量（BMP存储为BGRA）
+        uint8_t bw = 1; // 默认白色
+        if (palette) {
+          const uint8_t *color_entry =
+              palette + pixel_index * 4; // 每个调色板项 4 字节 (BGRA)
+          uint8_t blue = color_entry[0];
+          // 简单判断：如果蓝色分量 < 128，则为黑色
+          bw = (blue < 128) ? 0 : 1;
+        } else {
+          // 如果没有调色板，默认：0=白色，1=黑色
+          bw = pixel_index ? 0 : 1;
         }
 
-        ESP_LOGI(TAG, "BMP 1-bit rendering complete: %d pixels written, %d black pixels in source", pixel_count_written, black_pixel_count);
+        if (bw == 0)
+          black_pixel_count++;
 
-    } else if (bit_count == 24) {
-        // 24 位 BMP (RGB888)
-        for (int src_y = 0; src_y < src_height; src_y++) {
-            // 计算目标 Y 坐标
-            int dest_y = offset_y + (int)(src_y * scale);
+        // 考虑缩放
+        if (scale >= 1.0f) {
+          int scale_int = (int)scale;
+          for (int sy = 0; sy < scale_int && (dest_y + sy) < (y + height);
+               sy++) {
+            for (int sx = 0; sx < scale_int && (dest_x + sx) < (x + width);
+                 sx++) {
+              int logic_x = dest_x + sx;
+              int logic_y = dest_y + sy;
 
-            // BMP 可以从下到上或从上到下存储
-            int bmp_y = top_down ? src_y : (src_height - 1 - src_y);
-            const uint8_t *row_data = pixel_data + bmp_y * row_size;
+              // 边界检查（480x800逻辑）
+              if (logic_x >= 0 && logic_x < 480 && logic_y >= 0 &&
+                  logic_y < 800) {
 
-            for (int src_x = 0; src_x < src_width; src_x++) {
-                // 计算目标 X 坐标
-                int dest_x = offset_x + (int)(src_x * scale);
+                int phys_x = logic_y;
+                int phys_y = 479 - logic_x;
 
-                // 读取 BGR 像素
-                uint8_t b = row_data[src_x * 3];
-                uint8_t g = row_data[src_x * 3 + 1];
-                uint8_t r = row_data[src_x * 3 + 2];
+                // 写入800x480物理帧缓冲
+                // bw = 0 = 黑色(清除bit), bw = 1 = 白色(设置bit)
+                uint32_t byte_idx = phys_y * 100 + (phys_x / 8); // 100 = 800/8
+                uint8_t bit_mask = 0x80 >> (phys_x % 8);
 
-                // 转换为灰度
-                uint8_t gray = (r * 38 + g * 75 + b * 15) >> 7;
-
-                // 绘制像素 (考虑缩放)
-                if (scale >= 1.0f) {
-                    int scale_int = (int)scale;
-                    for (int sy = 0; sy < scale_int && (dest_y + sy) < (y + height); sy++) {
-                        for (int sx = 0; sx < scale_int && (dest_x + sx) < (x + width); sx++) {
-                            display_draw_pixel(dest_x + sx, dest_y + sy, gray);
-                        }
-                    }
+                if (bw == 0) {
+                  fb[byte_idx] &= ~bit_mask; // 黑色
+                  if (sx == 0 && sy == 0)
+                    pixel_count_written++;
                 } else {
-                    // 缩放情况: 简单采样
-                    display_draw_pixel(dest_x, dest_y, gray);
+                  fb[byte_idx] |= bit_mask; // 白色
                 }
-
-                // 喂狗
-                if (src_x % 100 == 0) {
-                    vTaskDelay(1);
-                }
+              }
             }
+          }
+        } else {
+          // 无缩放，直接写入
+          if (dest_x >= 0 && dest_x < 480 && dest_y >= 0 && dest_y < 800) {
+            int phys_x = dest_y;
+            int phys_y = 479 - dest_x;
+            uint32_t byte_idx = phys_y * 100 + (phys_x / 8);
+            uint8_t bit_mask = 0x80 >> (phys_x % 8);
 
-            // 每行后喂狗
-            vTaskDelay(1);
-        }
-    } else if (bit_count == 8) {
-        // 8 位 BMP (调色板)
-        ESP_LOGI(TAG, "8-bit BMP with palette");
-
-        // 读取调色板 (256 色 x 4 字节)
-        const uint8_t *palette = bmp_data + sizeof(BMPFileHeader) + info_header->biSize;
-
-        for (int src_y = 0; src_y < src_height; src_y++) {
-            int dest_y = offset_y + (int)(src_y * scale);
-            int bmp_y = top_down ? src_y : (src_height - 1 - src_y);
-            const uint8_t *row_data = pixel_data + bmp_y * row_size;
-
-            for (int src_x = 0; src_x < src_width; src_x++) {
-                int dest_x = offset_x + (int)(src_x * scale);
-
-                // 读取调色板索引
-                uint8_t palette_idx = row_data[src_x];
-
-                // 从调色板读取 BGR
-                uint8_t b = palette[palette_idx * 4];
-                uint8_t g = palette[palette_idx * 4 + 1];
-                uint8_t r = palette[palette_idx * 4 + 2];
-
-                // 转换为灰度
-                uint8_t gray = (r * 38 + g * 75 + b * 15) >> 7;
-
-                // 绘制像素
-                if (scale >= 1.0f) {
-                    int scale_int = (int)scale;
-                    for (int sy = 0; sy < scale_int && (dest_y + sy) < (y + height); sy++) {
-                        for (int sx = 0; sx < scale_int && (dest_x + sx) < (x + width); sx++) {
-                            display_draw_pixel(dest_x + sx, dest_y + sy, gray);
-                        }
-                    }
-                } else {
-                    display_draw_pixel(dest_x, dest_y, gray);
-                }
-
-                // 喂狗
-                if (src_x % 100 == 0) {
-                    vTaskDelay(1);
-                }
+            if (bw == 0) {
+              fb[byte_idx] &= ~bit_mask;
+              pixel_count_written++;
+            } else {
+              fb[byte_idx] |= bit_mask;
             }
-
-            vTaskDelay(1);
+          }
         }
+      }
+
+      // 每隔一定行数喂狗（减少延迟）
+      if (src_y % 50 == 0) {
+        taskYIELD(); // 使用 yield 而不是 delay，更快
+      }
     }
 
-    ESP_LOGI(TAG, "BMP rendered successfully");
-    return true;
+    ESP_LOGI(TAG,
+             "BMP 1-bit rendering complete: %d pixels written, %d black pixels "
+             "in source",
+             pixel_count_written, black_pixel_count);
+
+  } else if (bit_count == 24) {
+    // 24 位 BMP (RGB888)
+    for (int src_y = 0; src_y < src_height; src_y++) {
+      // 计算目标 Y 坐标
+      int dest_y = offset_y + (int)(src_y * scale);
+
+      // BMP 可以从下到上或从上到下存储
+      int bmp_y = top_down ? src_y : (src_height - 1 - src_y);
+      const uint8_t *row_data = pixel_data + bmp_y * row_size;
+
+      for (int src_x = 0; src_x < src_width; src_x++) {
+        // 计算目标 X 坐标
+        int dest_x = offset_x + (int)(src_x * scale);
+
+        // 读取 BGR 像素
+        uint8_t b = row_data[src_x * 3];
+        uint8_t g = row_data[src_x * 3 + 1];
+        uint8_t r = row_data[src_x * 3 + 2];
+
+        // 转换为灰度
+        uint8_t gray = (r * 38 + g * 75 + b * 15) >> 7;
+
+        // 绘制像素 (考虑缩放)
+        if (scale >= 1.0f) {
+          int scale_int = (int)scale;
+          for (int sy = 0; sy < scale_int && (dest_y + sy) < (y + height);
+               sy++) {
+            for (int sx = 0; sx < scale_int && (dest_x + sx) < (x + width);
+                 sx++) {
+              display_draw_pixel(dest_x + sx, dest_y + sy, gray);
+            }
+          }
+        } else {
+          // 缩放情况: 简单采样
+          display_draw_pixel(dest_x, dest_y, gray);
+        }
+
+        // 喂狗
+        if (src_x % 100 == 0) {
+          vTaskDelay(1);
+        }
+      }
+
+      // 每行后喂狗
+      vTaskDelay(1);
+    }
+  } else if (bit_count == 8) {
+    // 8 位 BMP (调色板)
+    ESP_LOGI(TAG, "8-bit BMP with palette");
+
+    // 读取调色板 (256 色 x 4 字节)
+    const uint8_t *palette =
+        bmp_data + sizeof(BMPFileHeader) + info_header->biSize;
+
+    for (int src_y = 0; src_y < src_height; src_y++) {
+      int dest_y = offset_y + (int)(src_y * scale);
+      int bmp_y = top_down ? src_y : (src_height - 1 - src_y);
+      const uint8_t *row_data = pixel_data + bmp_y * row_size;
+
+      for (int src_x = 0; src_x < src_width; src_x++) {
+        int dest_x = offset_x + (int)(src_x * scale);
+
+        // 读取调色板索引
+        uint8_t palette_idx = row_data[src_x];
+
+        // 从调色板读取 BGR
+        uint8_t b = palette[palette_idx * 4];
+        uint8_t g = palette[palette_idx * 4 + 1];
+        uint8_t r = palette[palette_idx * 4 + 2];
+
+        // 转换为灰度
+        uint8_t gray = (r * 38 + g * 75 + b * 15) >> 7;
+
+        // 绘制像素
+        if (scale >= 1.0f) {
+          int scale_int = (int)scale;
+          for (int sy = 0; sy < scale_int && (dest_y + sy) < (y + height);
+               sy++) {
+            for (int sx = 0; sx < scale_int && (dest_x + sx) < (x + width);
+                 sx++) {
+              display_draw_pixel(dest_x + sx, dest_y + sy, gray);
+            }
+          }
+        } else {
+          display_draw_pixel(dest_x, dest_y, gray);
+        }
+
+        // 喂狗
+        if (src_x % 100 == 0) {
+          vTaskDelay(1);
+        }
+      }
+
+      vTaskDelay(1);
+    }
+  }
+
+  ESP_LOGI(TAG, "BMP rendered successfully");
+  return true;
 }
 
-bool bmp_helper_render_fullscreen(const uint8_t *bmp_data, size_t bmp_data_size)
-{
-    return bmp_helper_render(bmp_data, bmp_data_size,
-                             0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, true);
+bool bmp_helper_render_fullscreen(const uint8_t *bmp_data,
+                                  size_t bmp_data_size) {
+  return bmp_helper_render(bmp_data, bmp_data_size, 0, 0, SCREEN_WIDTH,
+                           SCREEN_HEIGHT, true);
 }
