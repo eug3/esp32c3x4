@@ -192,6 +192,30 @@ idf.py -p /dev/ttyUSB0 flash-data
 idf.py -p /dev/ttyUSB0 erase-flash flash flash-data
 ```
 
+### 烧录完整 16MB Flash Bin
+
+使用预合并的完整固件（包含应用 + 字体 + GBK 表）：
+
+```bash
+# 烧录完整 16MB bin 文件
+esptool.py --chip esp32c3 -p /dev/ttyUSB0 -b 460800 \
+  write_flash 0x0 build/monster-c3x4-16m-full.bin
+```
+
+### 备份 Flash 内容
+
+备份设备上的完整 Flash 内容（用于固件恢复或分析）：
+
+```bash
+# 备份完整 16MB Flash 到文件
+esptool.py --chip esp32c3 -p /dev/ttyUSB0 -b 460800 \
+  read_flash 0x0 0x1000000 flash_backup.bin
+
+# 只备份应用程序分区
+esptool.py --chip esp32c3 -p /dev/ttyUSB0 -b 460800 \
+  read_flash 0x10000 0x400000 app_backup.bin
+```
+
 ### 监控串口输出
 
 ```bash
