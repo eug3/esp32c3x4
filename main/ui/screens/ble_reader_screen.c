@@ -163,6 +163,12 @@ typedef struct {
   // ========== 本地续读 ==========
   bool pending_local_resume; // 是否等待用户确认续读
   char resume_path[128];     // 续读文件路径
+
+  // ========== 章节加载进度显示 ==========
+  uint32_t chapter_receive_bytes;  // 当前章节已接收字节数
+  uint32_t chapter_total_bytes;    // 当前章节总字节数
+  uint8_t last_progress_percent;   // 上次显示的进度百分比
+  bool showing_chapter_progress;   // 是否正在显示章节加载进度
 } ble_reader_state_internal_t;
 
 static ble_reader_state_internal_t s_ble_state = {
@@ -196,6 +202,10 @@ static ble_reader_state_internal_t s_ble_state = {
     .book_title = {0},
     .pending_local_resume = false,
     .resume_path = {0},
+    .chapter_receive_bytes = 0,
+    .chapter_total_bytes = 0,
+    .last_progress_percent = 255,
+    .showing_chapter_progress = false,
 };
 
 // 章节信息接收状态（支持分包JSON）
@@ -284,6 +294,10 @@ static void append_image_data(image_type_t type, const uint8_t *data,
                               size_t length);
 static void ensure_ble_vfs_directory(void);
 static void refresh_chapter_browser_if_active(void);
+static void draw_chapter_loading_progress(uint8_t percent);
+static void update_chapter_receive_progress(uint32_t received_bytes,
+                                             uint32_t total_bytes);
+static void clear_chapter_loading_progress(void);
 
 /**********************
  *  STATIC FUNCTIONS
@@ -1161,6 +1175,15 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length) {
         (length > X4IM_HEADER_SIZE) ? (length - X4IM_HEADER_SIZE) : 0;
     has_x4im_header = true;
 
+    // ========== 初始化章节接收进度 ==========
+    if (!s_ble_state.receiving_bmp && !s_ble_state.receiving_jpg) {
+      s_ble_state.chapter_receive_bytes = 0;
+      s_ble_state.chapter_total_bytes = declared_payload_size;
+      s_ble_state.last_progress_percent = 255;
+      s_ble_state.showing_chapter_progress = true;
+      draw_chapter_loading_progress(0);
+    }
+
     // ========== BMP 位图类型处理 ==========
     if (x4im_flags & X4IM_FLAGS_TYPE_BMP) {
       receive_image_data(IMAGE_TYPE_BMP, x4im_filename, payload_data,
@@ -1271,7 +1294,10 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length) {
       // 7. 标记下次收到数据是新传输
       g_ble_new_transfer = true;
 
-      // 8. 触发屏幕显示（全屏清空后绘制新内容）
+      // 8. 清除章节加载进度显示
+      clear_chapter_loading_progress();
+
+      // 9. 触发屏幕显示（全屏清空后绘制新内容）
       screen_t *screen = screen_manager_get_current();
       if (screen != NULL && screen == &g_ble_reader_screen) {
         // 全屏清空后绘制（clear_content=true 会调用 display_clear）
@@ -1310,6 +1336,12 @@ static void ble_data_received_callback(const uint8_t *data, uint16_t length) {
         } else {
           ESP_LOGI(TAG, "Appended %zu bytes to chapter %d%s", written,
                    current_chapter, has_x4im_header ? " (X4IM)" : "");
+        }
+
+        if (s_ble_state.showing_chapter_progress) {
+          s_ble_state.chapter_receive_bytes += written;
+          update_chapter_receive_progress(s_ble_state.chapter_receive_bytes,
+                                          s_ble_state.chapter_total_bytes);
         }
       } else {
         ESP_LOGE(TAG, "Write failed: expected %zu, written %zu", payload_length,
@@ -2676,7 +2708,7 @@ static void handle_reading_mode_button(screen_t *screen, button_t btn) {
     break;
 
   case BTN_BACK:
-    // Back button
+    // Back button (also triggered by long press LEFT)
     if (s_ble_state.device_connected) {
       ble_reader_screen_disconnect();
     }
@@ -3344,5 +3376,68 @@ static void select_and_load_chapter(int chapter_index) {
     // 返回章节列表
     draw_chapter_browser_screen();
     display_refresh(REFRESH_MODE_FULL);
+  }
+}
+
+/**
+ * @brief 绘制章节加载进度显示
+ * @param percent 进度百分比 (0-100)
+ */
+static void draw_chapter_loading_progress(uint8_t percent) {
+  char progress_text[64];
+  snprintf(progress_text, sizeof(progress_text), "正在加载下一章...%u%%", percent);
+
+  display_clear_region(0, 80, SCREEN_WIDTH, 60, COLOR_WHITE);
+  display_draw_text_menu(20, 100, progress_text, COLOR_BLACK, COLOR_WHITE);
+  display_mark_dirty(0, 80, SCREEN_WIDTH, 60);
+  display_refresh(REFRESH_MODE_PARTIAL);
+}
+
+/**
+ * @brief 更新章节接收进度并在指定百分比点刷新屏幕
+ * @param received_bytes 已接收的字节数
+ * @param total_bytes 总字节数
+ */
+static void update_chapter_receive_progress(uint32_t received_bytes,
+                                             uint32_t total_bytes) {
+  if (total_bytes == 0) {
+    return;
+  }
+
+  s_ble_state.chapter_receive_bytes = received_bytes;
+  s_ble_state.chapter_total_bytes = total_bytes;
+
+  uint8_t percent = (received_bytes * 100) / total_bytes;
+
+  // 根据进度阶段显示：0%、30%、60%、90%、100%
+  uint8_t display_percent = 0;
+  if (percent >= 100) {
+    display_percent = 100;
+  } else if (percent >= 90) {
+    display_percent = 90;
+  } else if (percent >= 60) {
+    display_percent = 60;
+  } else if (percent >= 30) {
+    display_percent = 30;
+  } else {
+    display_percent = 0;
+  }
+
+  // 只在达到新的进度节点时刷新屏幕
+  if (display_percent != s_ble_state.last_progress_percent) {
+    s_ble_state.last_progress_percent = display_percent;
+    draw_chapter_loading_progress(display_percent);
+  }
+}
+
+/**
+ * @brief 清除章节加载进度显示并恢复阅读界面
+ */
+static void clear_chapter_loading_progress(void) {
+  if (s_ble_state.showing_chapter_progress) {
+    s_ble_state.showing_chapter_progress = false;
+    s_ble_state.last_progress_percent = 255;
+    s_ble_state.chapter_receive_bytes = 0;
+    s_ble_state.chapter_total_bytes = 0;
   }
 }

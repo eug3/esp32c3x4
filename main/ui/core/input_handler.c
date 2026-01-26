@@ -78,6 +78,15 @@ static int64_t get_time_ms(void)
 
 static void trigger_callback(button_t btn, button_event_t event)
 {
+    // 长按 LEFT 键映射为 BACK 键（系统级按键映射）
+    if (btn == BTN_LEFT && event == BTN_EVENT_LONG_PRESSED) {
+        ESP_LOGI(TAG, "Long press LEFT detected, mapping to BACK");
+        if (s_callback != NULL) {
+            s_callback(BTN_BACK, BTN_EVENT_PRESSED, s_callback_user_data);
+        }
+        return;
+    }
+    
     if (s_callback != NULL) {
         s_callback(btn, event, s_callback_user_data);
     }

@@ -1,12 +1,12 @@
 # 阅星瞳 X4 ESP32-C3 电子书阅读器
 
-| 硬件平台 | 参数                      |
-|----------|--------------------------|
-| 主控芯片 | ESP32-C3 @ 160MHz        |
-| Flash    | 16MB                     |
+| 硬件平台 | 参数                       |
+| -------- | -------------------------- |
+| 主控芯片 | ESP32-C3 @ 160MHz          |
+| Flash    | 16MB                       |
 | 显示屏   | 4.26" 电子墨水屏 (800x480) |
-| RAM      | 400KB                   |
-| 字体     | 微软雅黑 14.25pt (19x25) |
+| RAM      | 400KB                      |
+| 字体     | 微软雅黑 14.25pt (19x25)   |
 
 ## 简介
 
@@ -15,6 +15,7 @@
 ## 核心功能
 
 ### 阅读功能
+
 - **TXT 阅读器** - 支持 GB18030/UTF-8 编码自动检测和转换
 - **EPUB 阅读器** - 完整的 EPUB 2.0/3.0 支持，带章节导航
 - **智能预缓存** - 滑动窗口预缓存机制，翻页速度提升 **16倍** (800ms → 50ms)
@@ -22,6 +23,7 @@
 - **字体管理** - 支持 Flash 分区字体，可扩展自定义字体
 
 ### 系统功能
+
 - **文件浏览器** - SD 卡文件管理，支持图片、电子书分类浏览
 - **图片查看器** - 支持 PNG/JPEG/BMP 格式
 - **壁纸管理** - 自定义设备壁纸
@@ -143,15 +145,15 @@ esp32c3x4/
 
 ## Flash 分区方案 (16MB)
 
-| 分区        | 用途         | 大小   | 偏移地址    |
-|-------------|------------|--------|------------|
-| nvs         | NVS 存储    | 24KB   | 0x9000     |
-| phy_init    | PHY 校准    | 4KB    | 0xf000     |
-| factory     | 应用程序    | 4MB    | 0x10000    |
-| littlefs    | 用户数据    | 4MB    | 0x410000   |
-| chapter_buf | 章节缓冲    | 2MB    | 0x810000   |
-| font_data   | 字体文件    | 5MB    | 0xa10000   |
-| gbk_table   | GBK 编码表  | 64KB   | 0xf10000   |
+| 分区        | 用途       | 大小 | 偏移地址 |
+| ----------- | ---------- | ---- | -------- |
+| nvs         | NVS 存储   | 24KB | 0x9000   |
+| phy_init    | PHY 校准   | 4KB  | 0xf000   |
+| factory     | 应用程序   | 4MB  | 0x10000  |
+| littlefs    | 用户数据   | 4MB  | 0x410000 |
+| chapter_buf | 章节缓冲   | 2MB  | 0x810000 |
+| font_data   | 字体文件   | 5MB  | 0xa10000 |
+| gbk_table   | GBK 编码表 | 64KB | 0xf10000 |
 
 ## 编译与烧录
 
@@ -282,10 +284,10 @@ void app_main(void) {
 
 ## 数据文件说明
 
-| 文件                              | 大小     | 用途说明                       |
-|-----------------------------------|----------|------------------------------|
-| `data/msyh-14.25pt.19×25.bin`     | ~4.9MB   | 微软雅黑字体，19x25 像素       |
-| `data/gbk_table.bin`              | 64KB     | GBK/GB18030 到 Unicode 编码转换表 |
+| 文件                             | 大小   | 用途说明                          |
+| -------------------------------- | ------ | --------------------------------- |
+| `data/msyh-14.25pt.19×25.bin` | ~4.9MB | 微软雅黑字体，19x25 像素          |
+| `data/gbk_table.bin`           | 64KB   | GBK/GB18030 到 Unicode 编码转换表 |
 
 ### 重新生成 GBK 编码表
 
@@ -364,21 +366,25 @@ idf.py -p /dev/ttyUSB0 erase-flash flash flash-data
 ## 文档索引
 
 ### 核心功能文档
+
 - [EPUB 预缓存快速参考](docs/EPUB_PRECACHE_QUICKREF.md)
 - [阅读历史快速参考](docs/READING_HISTORY_QUICKREF.md)
 - [EPUB 解析流程](docs/EPUB_PARSING_PROCESS.md)
 
 ### 设计文档
+
 - [EPUB 预缓存设计](docs/EPUB_PRECACHE_DESIGN.md)
 - [阅读历史指南](docs/READING_HISTORY_GUIDE.md)
 - [BLE 流式修复](docs/BLE_STREAMING_FIX.md)
 
 ### 实现文档
+
 - [EPUB 预缓存实现](docs/EPUB_PRECACHE_IMPLEMENTATION.md)
 - [TXT 阅读器实现](docs/TXT_READER_IMPLEMENTATION.md)
 - [阅读历史实现](docs/READING_HISTORY_SUMMARY.md)
 
 ### 故障排查
+
 - [Flash 刷新指南](FLASH_GUIDE.md)
 - [内存优化方案](MEMORY_OPTIMIZATION.md)
 - [BLE 断连修复](docs/BLE_DISCONNECT_CRASH_FIX.md)
