@@ -32,7 +32,8 @@ static volatile int64_t s_last_isr_time = 0;  // ISR 防抖时间戳（微秒）
 #define BTN_RIGHT_VAL           3      // Right按钮ADC值
 #define BTN_LEFT_VAL            1470   // Left按钮ADC值
 #define BTN_CONFIRM_VAL         2655   // Confirm按钮ADC值
-#define BTN_BACK_VAL            3470   // Back按钮ADC值
+#define BTN_BACK_HIGH_VAL       3470   // Back按钮ADC值（设备 A: 2409~3260）
+#define BTN_BACK_LOW_VAL        1800   // Back按钮ADC值（设备 B: 1195~2408）
 #define BTN_VOLUME_DOWN_VAL     3      // Volume Down按钮ADC值
 #define BTN_VOLUME_UP_VAL       2205   // Volume Up按钮ADC值
 
@@ -78,15 +79,6 @@ static int64_t get_time_ms(void)
 
 static void trigger_callback(button_t btn, button_event_t event)
 {
-    // 长按 LEFT 键映射为 BACK 键（系统级按键映射）
-    if (btn == BTN_LEFT && event == BTN_EVENT_LONG_PRESSED) {
-        ESP_LOGI(TAG, "Long press LEFT detected, mapping to BACK");
-        if (s_callback != NULL) {
-            s_callback(BTN_BACK, BTN_EVENT_PRESSED, s_callback_user_data);
-        }
-        return;
-    }
-    
     if (s_callback != NULL) {
         s_callback(btn, event, s_callback_user_data);
     }
@@ -142,16 +134,27 @@ button_t read_button_adc(void)
         detected_btn = BTN_RIGHT;
     } else if (btn1_adc < BTN_LEFT_VAL + BTN_THRESHOLD) {
         detected_btn = BTN_LEFT;
-    } else if (btn1_adc < BTN_CONFIRM_VAL + BTN_THRESHOLD) {
-        detected_btn = BTN_CONFIRM;
-    } else if (btn1_adc < BTN_BACK_VAL + BTN_THRESHOLD) {
-        detected_btn = BTN_BACK;
+    } else {
+        // 检查 BACK 键（同时支持两个不连续的范围，兼容设备 A 和设备 B）
+        int back_high_low = BTN_BACK_HIGH_VAL - BTN_THRESHOLD;   // 3370
+        int back_high_high = BTN_BACK_HIGH_VAL + BTN_THRESHOLD;  // 3570
+        int back_low_low = BTN_BACK_LOW_VAL - BTN_THRESHOLD;     // 1700
+        int back_low_high = BTN_BACK_LOW_VAL + BTN_THRESHOLD;    // 1900
+
+        if ((btn1_adc >= back_low_low && btn1_adc <= back_low_high) ||
+            (btn1_adc >= back_high_low && btn1_adc <= back_high_high)) {
+            detected_btn = BTN_BACK;
+        } else if (btn1_adc < BTN_CONFIRM_VAL + BTN_THRESHOLD) {
+            detected_btn = BTN_CONFIRM;
+        }
     }
     // 检查 BTN_GPIO2 (2个按钮通过电阻分压)
-    else if (btn2_adc < BTN_VOLUME_DOWN_VAL + BTN_THRESHOLD) {
-        detected_btn = BTN_VOLUME_DOWN;
-    } else if (btn2_adc < BTN_VOLUME_UP_VAL + BTN_THRESHOLD) {
-        detected_btn = BTN_VOLUME_UP;
+    if (detected_btn == BTN_NONE) {
+        if (btn2_adc < BTN_VOLUME_DOWN_VAL + BTN_THRESHOLD) {
+            detected_btn = BTN_VOLUME_DOWN;
+        } else if (btn2_adc < BTN_VOLUME_UP_VAL + BTN_THRESHOLD) {
+            detected_btn = BTN_VOLUME_UP;
+        }
     }
 
     return detected_btn;
