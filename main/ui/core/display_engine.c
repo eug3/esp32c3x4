@@ -902,7 +902,7 @@ void display_refresh(refresh_mode_t mode)
     // 根据刷新模式选择 EPD 函数
     switch (mode) {
         case REFRESH_MODE_FULL:
-            EPD_4in26_Display(s_framebuffer);
+            EPD_4in26_Display_Fast(s_framebuffer);
             s_partial_refresh_count = 0;  // 全刷重置计数器
             ESP_LOGI(TAG, "Full refresh, reset partial count to 0");
             break;
